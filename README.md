@@ -1,3 +1,5 @@
+[![CodeFactor](https://www.codefactor.io/repository/github/justgoodin/stocky/badge)](https://www.codefactor.io/repository/github/justgoodin/stocky)
+
 # Stocky McStockface 
 **Stocky Will help you generate a consolidated list of Instruments**
 1. by mapping their ISIN codes to
