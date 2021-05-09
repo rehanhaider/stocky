@@ -37,14 +37,14 @@ class yahooDataManager:
             if data[f"{symbol}.{ex}"] == f"Quote not found for ticker symbol: {symbol}.{ex}":
                 print(f"{symbol}, {exchange}: No match found")
                 return data[f"{symbol}.{ex}"]
-            else:
-                print(colored(f"INFO: Found response", "yellow"))
-                print(colored(f"INFO: Writing to file", "yellow"))
-                with open(f"{self.path}/{symbol}.{ex}.json", "w") as file:
-                    file.write(json.dumps(data))
+
+            print(colored(f"INFO: Found response", "yellow"))
+            print(colored(f"INFO: Writing to file", "yellow"))
+            with open(f"{self.path}/{symbol}.{ex}.json", "w") as file:
+                file.write(json.dumps(data))
 
         for symbol in self.symbols:
-            if symbol[key] != None:
+            if symbol[key] is not None:
                 try:
                     getAPIData(symbol[key], exchange)
                 except KeyError:
