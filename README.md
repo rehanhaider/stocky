@@ -2,7 +2,8 @@
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 [![made-with-python](https://img.shields.io/badge/Made%20with-Python-1f425f.svg)](https://www.python.org/)
 [![license](https://img.shields.io/github/license/justgoodin/stocky)](https://choosealicense.com/licenses/gpl-3.0/)
-[![GitHub commit checks state](https://img.shields.io/github/checks-status/justgoodin/stocky/6a872cc4171bf9bc8d35a1c7578a47216687391f)]()
+![GitHub commit checks state](https://img.shields.io/github/checks-status/justgoodin/stocky/master)
+
 # Stocky McStockface 
 **Stocky Will help you generate a consolidated list of Instruments**
 1. by mapping their ISIN codes to
