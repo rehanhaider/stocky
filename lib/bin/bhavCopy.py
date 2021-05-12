@@ -1,5 +1,7 @@
 import sqlite3 as lite
 import pandas as pd
+from termcolor import colored
+from os import path
 
 
 def bhavUpdate() -> None:
@@ -8,7 +10,17 @@ def bhavUpdate() -> None:
     bseBhavPath = f"data/marketData/bhavCopies/BSE-EQ_ISINCODE_030521.CSV"
     nseBhavPath = f"data/marketData/bhavCopies/NSE-cm03MAY2021bhav.csv"
 
+    if path.isfile(bseBhavPath) and path.isfile(nseBhavPath):
+        print(colored("Found NSE & BSE Bhav Copies", "yellow"))
+    elif path.isfile(bseBhavPath) and not path.isfile(nseBhavPath):
+        print(colored("NSE Bhav Copy is missing", "red"))
+    elif not path.isfile(bseBhavPath) and path.isfile(nseBhavPath):
+        print(colored("BSE Bhav Copy is missing", "red"))
+    else:
+        print(colored("Both Bhav Copies are missing", "red"))
+
     # Read both files
+    print(colored("Processing Bhav Copies", "yellow"))
     bseBhav = pd.read_csv(bseBhavPath)
     nseBhav = pd.read_csv(nseBhavPath)
 
@@ -48,8 +60,9 @@ def bhavUpdate() -> None:
     equities["ins_type"] = "equity"
 
     # #Match zerodha symbols
+    print(colored("Merging Zerodha instruments", "yellow"))
     # **Step 6:** ***Read Zerodha instruments and extract only equity and relevant fields***
-    zerodha_instruments = pd.read_csv("marketData/zerodha/instruments.csv")
+    zerodha_instruments = pd.read_csv("data/marketData/zerodha/instruments.csv")
     zerodha_instruments = zerodha_instruments.query("segment=='BSE' or segment=='NSE'")
     zerodha_instruments = zerodha_instruments[["exchange_token", "tradingsymbol"]]
     zerodha_instruments["exchange_token"] = zerodha_instruments["exchange_token"].astype(str)
@@ -79,11 +92,16 @@ def bhavUpdate() -> None:
     equities["zd_symbol"] = equities.apply(f, axis=1)
 
     # # Match with yahoo names for stocks that have been found already
+    print(colored("Merging yahoo symbols", "yellow"))
+
     import glob
     import os
 
-    yahooList = glob.glob("marketData/yahoo/apiResponse/*.json")
+    print("Here")
+    yahooList = glob.glob("data/marketData/yahoo/apiResponse/*.json")
     for row in range(len(yahooList)):
+        # print("Here")
+        # print(yahooList)
         # yahooList[row] = yahooList[row][29:-5]
         yahooList[row] = os.path.basename(yahooList[row])[:-5]
 
@@ -100,20 +118,23 @@ def bhavUpdate() -> None:
     stocky = equities[["ins_type", "zd_symbol", "yq_symbol", "nse_symbol", "bse_sc_code", "bse_sc_name"]]
 
     # # Create a copy of the stocky.db
+    print(colored("Backing up existing db", "yellow"))
     from shutil import copyfile
     from datetime import datetime
 
     timestamp = str(datetime.now()).replace(":", "-").split(".")[0]
-    copyfile("data/output/stocky.db", f"data/output/{timestamp}-stocky.db")
+    copyfile("data/output/stocky.db", f"data/output/backup/{timestamp}-stocky.db")
 
     # **Step 9:** ***Open db, delete previous data, update new data***
-    con = lite.connect("output/stocky.db")
+    print(colored("Saving to stocky.db", "yellow"))
+    con = lite.connect("data/output/stocky.db")
     cur = con.cursor()
     try:
-        cur.execute("DROP TABLE equities")
+        cur.execute("DROP TABLE consolidated")
     except Exception as e:
         print(e)
 
-    equities.to_sql("equities", con)
+    stocky.to_sql("consolidated", con)
     con.commit()
     con.close()
+    print(colored("Completed updating stocky.db", "yellow"))
