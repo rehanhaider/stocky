@@ -9,3 +9,22 @@
     2. NSE symbols
     3. Zerodha symbols
     4. Yahoo symbols (Both .NS and .BO)
+
+# Installation
+Clone the repository
+
+`git clone https://github.com/justgoodin/stocky.git`
+
+Install the dependencies
+`pip install --upgrade requirements.txt`
+
+Run the app:
+On windows
+
+`python app.py`
+
+On linux/MacOS
+
+`python3 ./app.py`
+
+Or open it in your favourite code editor and run from there. 
