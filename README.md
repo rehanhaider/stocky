@@ -19,17 +19,6 @@ Clone the repository
 Install the dependencies
 `pip install --upgrade requirements.txt`
 
-Run the app:
-On windows
-
-`python app.py`
-
-On linux/MacOS
-
-`python3 ./app.py`
-
-Or open it in your favourite code editor and run from there. 
-
 # Instructions
 
 ## Inputs needed
@@ -47,13 +36,16 @@ In future version, this will be more streamlined
 3. Zerodha Instruments: `data/marketData/zerodha`. The filename should be instruments.csv
 
 ## Running the app
-There are three options
-
-### On windows
+#### On windows
 `python app.py`
 
-### On Linux
-`python3 app.py`
+#### On linux/MacOS
+`python3 ./app.py`
+
+Or open it in your favourite code editor and run from there. 
+
+## UI Options
+There are three options
 
 **1. Rebuild stocky.db from scratch:** 
 This will delete the existing copy of stocky.db and recreate it from scratch. Requires bhavcopies and zerodha instruments in their respective locations
