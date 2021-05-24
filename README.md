@@ -41,7 +41,7 @@ Note: Downloading BHAV Copy using programmatic methods is illegal.
 
 ### Then place these files in the following locations
 1. BSE Bhavcopy: `data/marketData/bhavCopies`
-2. NSE Bhavcopy: `data/marketData/bhavcopies
+2. NSE Bhavcopy: `data/marketData/bhavcopies`
 You need to update the file name in `lib/bin/bhavCopy.py`. 
 In future version, this will be more streamlined
 3. Zerodha Instruments: `data/marketData/zerodha`. The filename should be instruments.csv
