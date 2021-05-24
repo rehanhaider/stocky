@@ -49,6 +49,12 @@ In future version, this will be more streamlined
 ## Running the app
 There are three options
 
+### On windows
+`python app.py`
+
+### On Linux
+`python3 app.py`
+
 **1. Rebuild stocky.db from scratch:** 
 This will delete the existing copy of stocky.db and recreate it from scratch. Requires bhavcopies and zerodha instruments in their respective locations
 
