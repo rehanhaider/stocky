@@ -14,10 +14,14 @@
 # Installation
 Clone the repository
 
-`git clone https://github.com/justgoodin/stocky.git`
+```bash
+git clone https://github.com/justgoodin/stocky.git
+```
 
 Install the dependencies
-`pip install --upgrade requirements.txt`
+```
+pip install --upgrade requirements.txt
+```
 
 # Instructions
 
