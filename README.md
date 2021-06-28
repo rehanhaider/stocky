@@ -37,10 +37,14 @@ In future version, this will be more streamlined
 
 ## Running the app
 #### On windows
-`python app.py`
+```bash
+python app.py
+```
 
 #### On linux/MacOS
-`python3 ./app.py`
+```bash
+python3 ./app.py
+```
 
 Or open it in your favourite code editor and run from there. 
 
