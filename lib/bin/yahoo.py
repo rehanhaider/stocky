@@ -12,7 +12,7 @@ from termcolor import colored
 
 class yahooDataManager:
     def __init__(self):
-        self.path = f"data/marketData/yahoo/apiResponse"
+        self.path = 'data/marketData/yahoo/apiResponse'
         dbCon = lite.connect("data/output/stocky.db")
         data = pd.read_sql_query("SELECT * FROM equities WHERE yq_symbol is not NULL", dbCon)
         self.symbols = data.to_dict("records")
@@ -38,8 +38,8 @@ class yahooDataManager:
                 print(f"{symbol}, {exchange}: No match found")
                 return data[f"{symbol}.{ex}"]
 
-            print(colored(f"INFO: Found response", "yellow"))
-            print(colored(f"INFO: Writing to file", "yellow"))
+            print(colored('INFO: Found response', "yellow"))
+            print(colored('INFO: Writing to file', "yellow"))
             with open(f"{self.path}/{symbol}.{ex}.json", "w") as file:
                 file.write(json.dumps(data))
 
