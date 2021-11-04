@@ -25,12 +25,7 @@ class ScreenManager:
     def getConfirmation() -> bool:
         print(colored("--------------------------------------------", "green"))
         choice = input("Enter (Y)es to confirm, any key to cancel: ").strip()
-        if choice.lower() == "y" or choice.lower() == "yes":
-            confirm = True
-        else:
-            confirm = False
-
-        return confirm
+        return choice.lower() in ["y", "yes"]
 
     def yahoo():
         from lib.bin import yahooDataManager
