@@ -3,7 +3,7 @@ aiohttp==3.7.4.post0
 appdirs==1.4.4
 async-timeout==3.0.1
 attrs==20.3.0
-autobahn==19.11.2
+autobahn==20.12.3
 Automat==20.2.0
 backcall==0.2.0
 black==21.5b0
