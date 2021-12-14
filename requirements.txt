@@ -46,7 +46,7 @@ Jinja2==2.11.3
 jupyter-client==6.1.12
 jupyter-core==4.7.1
 kiteconnect==3.9.2
-lxml==4.6.3
+lxml==4.6.5
 MarkupSafe==1.1.1
 msgpack==1.0.2
 multidict==5.1.0
