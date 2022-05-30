@@ -86,7 +86,7 @@ toml==0.10.2
 tornado==6.1
 tqdm==4.60.0
 traitlets==5.0.5
-Twisted==21.2.0
+Twisted==22.4.0
 twisted-iocpsupport==1.0.1
 txaio==21.2.1
 typing-extensions==3.7.4.3
