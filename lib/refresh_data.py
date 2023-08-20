@@ -58,11 +58,11 @@ def refresh_data():
             case "1":
                 _refresh_all_data()
             case "2":
-                _refresh_bse_data()
-            case "3":
-                _refresh_nse_data()
-            case "4":
                 _refresh_zerodha_data()
+            case "3":
+                _refresh_bse_data()
+            case "4":
+                _refresh_nse_data()
             case "5":
                 _refresh_yahoo_data()
             case "6":
