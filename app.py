@@ -21,8 +21,10 @@
 
 from rich import print as rprint
 
-from lib.bse import get_bhav_bse
-from lib.art import print_welcome_message
+from lib.welcome import print_welcome_message, print_options
+from lib.merge_data import merge_isin
+from lib.refresh_data import refresh_data
+from lib.structure import create_folders
 
 
 def main():
@@ -30,10 +32,25 @@ def main():
     Main function
     """
     print_welcome_message()
+    create_folders()
 
-    # get bhavcopy from BSE
+    run_screen = True
+    while run_screen:
+        # print options
+        print_options()
 
-    print("Getting bhavcopy from BSE")
+        # get user input
+        user_input = input("Enter your choice: ")
+
+        # process user input
+        match user_input:
+            case "1":
+                merge_isin()
+            case "2":
+                refresh_data()
+            case "3":
+                rprint("Exiting...")
+                run_screen = False
 
 
 # print options
