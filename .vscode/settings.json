@@ -1,0 +1,18 @@
+{
+    "editor.formatOnType": true,
+    "[python]": {
+        "editor.defaultFormatter": "ms-python.black-formatter",
+    },
+    "editor.formatOnSave": true,
+    "black-formatter.args": [
+        "--line-length",
+        "119"
+    ],
+    "pylint.args": [
+        "--max-line-length=119"
+    ],
+    "python.analysis.typeCheckingMode": "basic",
+    "files.trimFinalNewlines": true,
+    "files.trimTrailingWhitespace": true,
+    "python.defaultInterpreterPath": ".env/bin/python3.11",
+}

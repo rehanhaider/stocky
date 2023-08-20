@@ -122,7 +122,6 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
-.vscode/
 __pycache__/
 
 # custom removals
@@ -133,3 +132,4 @@ YahooQuery.ipynb
 archive/
 data/output/backups/
 ph.md
+gen_req.sh

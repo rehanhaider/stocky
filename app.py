@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+"""
 # -*- coding: utf-8 -*-
 #
 # Stocky McStockface for Indian stock markets
@@ -6,10 +6,9 @@
 # Copyright (C) 2021  Rehan Haider (justgoodin)
 #
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+# This program is free software: you can redistribute it and/or modify it under the
+# terms of the GNU General Public License as published by the Free Software Foundation,
+# either version 3 of the License, or (at your option) any later version.
 
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -18,51 +17,23 @@
 
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
+"""
 
+from rich import print as rprint
 
-import sys
-from termcolor import colored
-from lib.screen.screenManager import ScreenManager
-from lib.bin.bhavCopy import bhavUpdate
-from lib.bin.yahoo import yahooDataManager
-
-_DEFAULT = 0
-_BHAV = 1
-_YAHOO = 2
-_EXIT = 3
-_ERROR = -1
+from lib.bse import get_bhav_bse
+from lib.art import print_welcome_message
 
 
 def main():
-    exitApp = False
-    screen = _DEFAULT
-    while True:
-        if exitApp:
-            sys.exit(0)
+    """
+    Main function
+    """
+    print_welcome_message()
 
-        if screen == _DEFAULT:
-            ScreenManager()
-            option = ScreenManager.getUserInput()
+    # get bhavcopy from BSE
 
-        elif option == _ERROR:
-            print(colored("Not a valid selection. Please choose a valid option from below", "red"))
-            continue
-        if option == _BHAV:
-            screen = 1
-            print(colored("Rebuilding will delete the previous version.", "yellow", "on_red"))
-            if ScreenManager.getConfirmation():
-                bhavUpdate()
-            screen = _DEFAULT
-        elif option == _YAHOO:
-            print(colored("This will download all data and may take a long time.", "yellow", "on_red"))
-            if ScreenManager.getConfirmation():
-                ydm = yahooDataManager()
-                ydm.updateData()
-            screen = _DEFAULT
-        if option == _EXIT:
-            print(colored("Terminate program and exit?", "yellow", "on_red"))
-            if ScreenManager.getConfirmation():
-                exitApp = True
+    print("Getting bhavcopy from BSE")
 
 
 # print options
