@@ -1,0 +1,15 @@
+{
+    "data_urls": {
+        "zerodha": "https://api.kite.trade/instruments",
+        "bse": "https://www.bseindia.com/download/BhavCopy/Equity"
+    },
+    "paths": {
+        "input": {
+            "zerodha": "data/zerodha",
+            "bse": "data/bse",
+            "nse": "data/nse",
+            "yahoo": "data/yahoo"
+        },
+        "output": "output"
+    }
+}
