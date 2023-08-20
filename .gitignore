@@ -133,3 +133,4 @@ archive/
 data/output/backups/
 ph.md
 gen_req.sh
+old_data/
