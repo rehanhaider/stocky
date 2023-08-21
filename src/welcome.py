@@ -34,6 +34,6 @@ def print_options() -> None:
     """Prints the options."""
     rprint("[bold blue]Options:[/bold blue]")
     rprint("[bold]1.[/bold] Merge and generate ISIN mapping")
-    rprint("[bold]2.[/bold] Download & refresh data")
+    rprint("[bold]2.[/bold] Download & refresh data manually")
     rprint("[bold]3.[/bold] Exit")
     rprint()

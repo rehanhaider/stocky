@@ -3,11 +3,20 @@ Refresh data from all sources
 """
 import sys
 from rich import print as rprint
-from .lib.zerodha import download_zerodha_data
+from .zerodha import download_zerodha_data
+from .yahoo import YahooDataManager
+import pandas as pd
 
 
 def _refresh_yahoo_data():
     """Refresh from yahoo finance"""
+    try:
+        ydm = YahooDataManager()
+    except pd.errors.DatabaseError:
+        rprint("[bold red]Error[/bold red]: Please run the merging of bhavcopy data first")
+        return
+
+    ydm.update_data()
 
 
 def _refresh_bse_data():

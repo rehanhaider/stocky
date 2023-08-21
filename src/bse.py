@@ -23,7 +23,7 @@ def check_bhav_bse(file_name: str) -> bool:
     return os.path.exists(file_name)
 
 
-def get_bhav_bse(file_date: date = date.today(), force_download: bool = False):
+def get_bhav_bse(file_date: date = date.today()):
     """
     file_date: Bhav copy's date when it was generated. Default is today but will not work on a holiday.
     force_download: Download a fresh version of Bhav copy even if it exists
