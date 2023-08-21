@@ -21,10 +21,10 @@
 
 from rich import print as rprint
 
-from lib.welcome import print_welcome_message, print_options
-from lib.merge_data import merge_isin
-from lib.refresh_data import refresh_data
-from lib.structure import create_folders
+from src.welcome import print_welcome_message, print_options
+from src.merge_data import merge_isin
+from src.refresh_data import refresh_data
+from src.structure import create_folders
 
 
 def main():

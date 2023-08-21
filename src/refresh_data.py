@@ -3,7 +3,7 @@ Refresh data from all sources
 """
 import sys
 from rich import print as rprint
-from .zerodha import download_zerodha_data
+from .lib.zerodha import download_zerodha_data
 
 
 def _refresh_yahoo_data():
