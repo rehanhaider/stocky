@@ -1,5 +1,6 @@
-from src.yahoo import YahooDataManager
+from src.lib.bse import check_bhav_bse, get_bhav_bse
+from src.config import get_config
 
-ydm = YahooDataManager()
+config = get_config()
 
-ydm.update_data()
+get_bhav_bse(config)

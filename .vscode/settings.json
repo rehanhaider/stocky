@@ -11,8 +11,14 @@
     "pylint.args": [
         "--max-line-length=119"
     ],
+    "flake8.args": [
+        "--max-line-length=119"
+    ],
+    // set flake string length to 119
     "python.analysis.typeCheckingMode": "basic",
     "files.trimFinalNewlines": true,
     "files.trimTrailingWhitespace": true,
     "python.defaultInterpreterPath": ".env/bin/python3.11",
+    "python.linting.flake8Enabled": true,
+    "python.linting.enabled": true
 }

@@ -10,26 +10,23 @@ import pandas as pd
 
 from rich import print as rprint
 
-from .config import get_config
-
 
 class YahooDataManager:
     """
     Data manager class
     """
 
-    def __init__(self):
-        self._config = get_config()
-        self.path = self._config["paths"]["input"]["yahoo"]
-        dbCon = lite.connect(f"{self._config['paths']['output']}/stocky.db")  # pylint: disable=invalid-name
+    def __init__(self, config):
+        self.path = config["paths"]["input"]["yahoo"]
+        db_con = lite.connect(f"{config['paths']['output']}/stocky.db")
         try:
-            data = pd.read_sql_query("SELECT * FROM equities WHERE yq_symbol is not NULL", dbCon)
+            data = pd.read_sql_query("SELECT * FROM equities WHERE yq_symbol is not NULL", db_con)
         except pd.errors.DatabaseError as db_error:
             raise db_error
         self._symbols = data.to_dict("records")
         # print(self.symbols)
-        dbCon.commit()
-        dbCon.close()
+        db_con.commit()
+        db_con.close()
 
     def get_symbol_keys(self):
         """

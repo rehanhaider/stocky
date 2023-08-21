@@ -1,8 +1,10 @@
 """
 Downloads zerodha data
 """
+
 import json
 import requests
+
 from rich import print as rprint
 
 
