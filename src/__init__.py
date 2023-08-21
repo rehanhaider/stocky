@@ -1,3 +1,3 @@
 """
-Initialises the lib folder as a package.
+Initialises the scr folder as a package.
 """
