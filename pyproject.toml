@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "stocky"
+version = "0.2.0"
+description = "Consolidate Indian market instrument symbols across BSE, NSE, Zerodha, and Yahoo Finance."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+authors = [{ name = "Rehan Haider" }]
+dependencies = [
+    "pandas>=2.2",
+    "rich>=13.7",
+    "typer>=0.12",
+    "yahooquery>=2.3",
+]
+
+[project.scripts]
+stocky = "stocky.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["stocky"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -122,7 +122,8 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
-.vscode/
+.vscode/*
+!.vscode/settings.json
 __pycache__/
 
 # custom removals
@@ -131,5 +132,8 @@ fbServiceAccount.*
 init.ipynb
 YahooQuery.ipynb
 archive/
+data/marketData/*
+!data/marketData/.gitkeep
+data/output/backup/
 data/output/backups/
 ph.md
