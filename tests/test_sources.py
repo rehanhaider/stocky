@@ -11,15 +11,19 @@ from stocky.sources import (
 
 
 def test_bhavcopy_filename_generation() -> None:
-    trade_date = date(2021, 5, 3)
+    legacy_trade_date = date(2021, 5, 3)
+    udiff_trade_date = date(2026, 5, 22)
 
-    assert bse_filename_for_date(trade_date) == "BSE-EQ_ISINCODE_030521.CSV"
-    assert nse_filename_for_date(trade_date) == "NSE-cm03MAY2021bhav.csv"
+    assert bse_filename_for_date(legacy_trade_date) == "BSE-EQ_ISINCODE_030521.CSV"
+    assert nse_filename_for_date(legacy_trade_date) == "NSE-cm03MAY2021bhav.csv"
+    assert nse_filename_for_date(udiff_trade_date) == "BhavCopy_NSE_CM_0_0_0_20260522_F_0000.csv.zip"
 
 
 def test_bhavcopy_filename_parsing() -> None:
     assert parse_bse_bhavcopy_date(Path("BSE-EQ_ISINCODE_030521.CSV")) == date(2021, 5, 3)
     assert parse_nse_bhavcopy_date(Path("NSE-cm03MAY2021bhav.csv")) == date(2021, 5, 3)
+    assert parse_nse_bhavcopy_date(Path("BhavCopy_NSE_CM_0_0_0_20260522_F_0000.csv.zip")) == date(2026, 5, 22)
+    assert parse_nse_bhavcopy_date(Path("BhavCopy_NSE_CM_0_0_0_20260522_F_0000.csv")) == date(2026, 5, 22)
 
 
 def test_discover_latest_bhavcopy_pair(tmp_path) -> None:

@@ -15,6 +15,9 @@ from stocky.database import (
 )
 from stocky.sources import BhavcopyPaths, require_existing_files
 
+NSE_LEGACY_COLUMNS = {"SERIES", "ISIN", "SYMBOL"}
+NSE_UDIFF_COLUMNS = {"SctySrs", "ISIN", "TckrSymb"}
+
 
 @dataclass(frozen=True)
 class RebuildResult:
@@ -52,11 +55,21 @@ def load_bse_equities(path: Path) -> pd.DataFrame:
 
 def load_nse_equities(path: Path) -> pd.DataFrame:
     nse_bhavcopy = _strip_dataframe_strings(pd.read_csv(path))
-    _require_columns(nse_bhavcopy, {"SERIES", "ISIN", "SYMBOL"}, "NSE bhavcopy")
 
-    equities = nse_bhavcopy[nse_bhavcopy["SERIES"] == "EQ"][["ISIN", "SYMBOL"]].copy()
-    equities.rename(columns={"ISIN": "isin", "SYMBOL": "nse_symbol"}, inplace=True)
-    return equities
+    if NSE_LEGACY_COLUMNS.issubset(nse_bhavcopy.columns):
+        equities = nse_bhavcopy[nse_bhavcopy["SERIES"] == "EQ"][["ISIN", "SYMBOL"]].copy()
+        equities.rename(columns={"ISIN": "isin", "SYMBOL": "nse_symbol"}, inplace=True)
+        return equities
+
+    if NSE_UDIFF_COLUMNS.issubset(nse_bhavcopy.columns):
+        equities = nse_bhavcopy[nse_bhavcopy["SctySrs"] == "EQ"][["ISIN", "TckrSymb"]].copy()
+        equities.rename(columns={"ISIN": "isin", "TckrSymb": "nse_symbol"}, inplace=True)
+        return equities
+
+    raise ValueError(
+        "NSE bhavcopy is missing required columns for supported formats: "
+        f"legacy {sorted(NSE_LEGACY_COLUMNS)} or UDiFF {sorted(NSE_UDIFF_COLUMNS)}"
+    )
 
 
 def load_zerodha_instruments(path: Path) -> pd.DataFrame:

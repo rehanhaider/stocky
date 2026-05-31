@@ -23,10 +23,15 @@ MONTHS = {
 }
 
 MONTH_NAMES = {value: key for key, value in MONTHS.items()}
+NSE_UDIFF_START_DATE = date(2024, 7, 8)
 
 BSE_BHAVCOPY_RE = re.compile(r"^BSE-EQ_ISINCODE_(?P<day>\d{2})(?P<month>\d{2})(?P<year>\d{2})\.CSV$", re.IGNORECASE)
-NSE_BHAVCOPY_RE = re.compile(
+NSE_LEGACY_BHAVCOPY_RE = re.compile(
     r"^NSE-cm(?P<day>\d{2})(?P<month>[A-Z]{3})(?P<year>\d{4})bhav\.csv$",
+    re.IGNORECASE,
+)
+NSE_UDIFF_BHAVCOPY_RE = re.compile(
+    r"^BhavCopy_NSE_CM_0_0_0_(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})_F_0000\.csv(?:\.zip)?$",
     re.IGNORECASE,
 )
 
@@ -43,6 +48,9 @@ def bse_filename_for_date(trade_date: date) -> str:
 
 
 def nse_filename_for_date(trade_date: date) -> str:
+    if trade_date >= NSE_UDIFF_START_DATE:
+        return f"BhavCopy_NSE_CM_0_0_0_{trade_date:%Y%m%d}_F_0000.csv.zip"
+
     return f"NSE-cm{trade_date:%d}{MONTH_NAMES[trade_date.month]}{trade_date:%Y}bhav.csv"
 
 
@@ -68,15 +76,23 @@ def parse_bse_bhavcopy_date(path: Path) -> date | None:
 
 
 def parse_nse_bhavcopy_date(path: Path) -> date | None:
-    match = NSE_BHAVCOPY_RE.match(path.name)
-    if not match:
-        return None
+    legacy_match = NSE_LEGACY_BHAVCOPY_RE.match(path.name)
+    if legacy_match:
+        month = MONTHS.get(legacy_match.group("month").upper())
+        if month is None:
+            return None
 
-    month = MONTHS.get(match.group("month").upper())
-    if month is None:
-        return None
+        return date(int(legacy_match.group("year")), month, int(legacy_match.group("day")))
 
-    return date(int(match.group("year")), month, int(match.group("day")))
+    udiff_match = NSE_UDIFF_BHAVCOPY_RE.match(path.name)
+    if udiff_match:
+        return date(
+            int(udiff_match.group("year")),
+            int(udiff_match.group("month")),
+            int(udiff_match.group("day")),
+        )
+
+    return None
 
 
 def discover_latest_bhavcopy_pair(

@@ -26,7 +26,8 @@ Instead, encode exchange-specific filename conventions and provide explicit over
 For date-derived lookup, generate expected filenames from known source conventions:
 
 - BSE: `BSE-EQ_ISINCODE_DDMMYY.CSV`
-- NSE: `NSE-cmDDMONYYYYbhav.csv`
+- NSE before 2024-07-08: `NSE-cmDDMONYYYYbhav.csv`
+- NSE from 2024-07-08: `BhavCopy_NSE_CM_0_0_0_YYYYMMDD_F_0000.csv.zip`
 
 For auto-discovery, parse matching filenames in `data/marketData/bhavCopies`, extract dates, and choose the latest compatible pair.
 

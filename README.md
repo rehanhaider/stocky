@@ -29,13 +29,18 @@ uv sync
 ## Inputs needed
 ### You need to download 3 files
 1. BSE Bhavcopy: Download from `https://www.bseindia.com/markets/MarketInfo/BhavCopy.aspx`.
-2. NSE Bhavcopy: Download from `https://www1.nseindia.com/products/content/equities/equities/archieve_eq.htm`. \
-Note: Downloading BHAV Copy using programmatic methods is illegal.
+2. NSE Bhavcopy:
+    - Current files: Download `CM-UDiFF Common Bhavcopy Final (zip)` from `https://www.nseindia.com/all-reports`, or open the date-specific archive URL:
+      `https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_YYYYMMDD_F_0000.csv.zip`
+    - Example direct file:
+      `https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260522_F_0000.csv.zip`
+    - Legacy files before 2024-07-08 use the older `NSE-cmDDMONYYYYbhav.csv` filename convention.
+    - This project treats exchange bhavcopies as manually downloaded local inputs; do not add automated NSE downloads here.
 3. Zerodha Instruments: Download from `https://api.kite.trade/instruments`
 
 ### Then place these files in the following locations
 1. BSE Bhavcopy: `data/marketData/bhavCopies`
-2. NSE Bhavcopy: `data/marketData/bhavCopies`
+2. NSE Bhavcopy: `data/marketData/bhavCopies`. Current NSE UDiFF `.csv.zip` files can be used directly.
 3. Zerodha Instruments: `data/marketData/zerodha`. The filename should be `instruments.csv`
 
 Raw market data files are local inputs and are ignored by Git. The durable output is `data/output/stocky.db`.
