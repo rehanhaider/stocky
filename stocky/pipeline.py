@@ -18,6 +18,10 @@ from stocky.sources import BhavcopyPaths, require_existing_files
 NSE_LEGACY_COLUMNS = {"SERIES", "ISIN", "SYMBOL"}
 NSE_UDIFF_COLUMNS = {"SctySrs", "ISIN", "TckrSymb"}
 
+# EQ = rolling-settlement equities; BE/BZ = trade-for-trade equities.
+# SME platform (SM/ST) and debt/bond/ETF series stay excluded.
+NSE_EQUITY_SERIES = {"EQ", "BE", "BZ"}
+
 
 @dataclass(frozen=True)
 class RebuildResult:
@@ -57,12 +61,12 @@ def load_nse_equities(path: Path) -> pd.DataFrame:
     nse_bhavcopy = _strip_dataframe_strings(pd.read_csv(path))
 
     if NSE_LEGACY_COLUMNS.issubset(nse_bhavcopy.columns):
-        equities = nse_bhavcopy[nse_bhavcopy["SERIES"] == "EQ"][["ISIN", "SYMBOL"]].copy()
+        equities = nse_bhavcopy[nse_bhavcopy["SERIES"].isin(NSE_EQUITY_SERIES)][["ISIN", "SYMBOL"]].copy()
         equities.rename(columns={"ISIN": "isin", "SYMBOL": "nse_symbol"}, inplace=True)
         return equities
 
     if NSE_UDIFF_COLUMNS.issubset(nse_bhavcopy.columns):
-        equities = nse_bhavcopy[nse_bhavcopy["SctySrs"] == "EQ"][["ISIN", "TckrSymb"]].copy()
+        equities = nse_bhavcopy[nse_bhavcopy["SctySrs"].isin(NSE_EQUITY_SERIES)][["ISIN", "TckrSymb"]].copy()
         equities.rename(columns={"ISIN": "isin", "TckrSymb": "nse_symbol"}, inplace=True)
         return equities
 
