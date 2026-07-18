@@ -86,10 +86,24 @@ Update Yahoo responses in SQLite:
 uv run stocky yahoo update --exchange BSE
 ```
 
+Show database statistics, per-column coverage, and Yahoo cache freshness:
+
+```bash
+uv run stocky status
+```
+
+Look up an instrument by symbol, ISIN, BSE scrip code, or name fragment:
+
+```bash
+uv run stocky query RELIANCE
+uv run stocky query "hdfc bank"
+uv run stocky query 500325 --exact
+```
+
 For compatibility, `python app.py` still launches the CLI after dependencies are installed.
 
 ## UI Options
-There are four options.
+There are six options.
 
 **1. Rebuild stocky.db from scratch:**
 This backs up the existing database and replaces the `consolidated` table. Requires bhavcopies and Zerodha instruments in their respective locations.
@@ -100,7 +114,13 @@ Downloads Yahoo data using yahooquery and stores responses in `data/output/stock
 **3. Import Yahoo JSON cache:**
 Imports legacy files from `data/marketData/yahoo/apiResponse` into the `yahoo_responses` SQLite table.
 
-**4. Exit:**
+**4. Show database status:**
+Prints row counts, per-column coverage, and Yahoo cache freshness for `data/output/stocky.db`.
+
+**5. Look up an instrument:**
+Searches the `consolidated` table across all symbol namespaces (Zerodha, Yahoo, NSE, BSE, ISIN, name).
+
+**6. Exit:**
 Exit the program
 
 

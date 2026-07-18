@@ -13,11 +13,50 @@ from stocky.config import DEFAULT_BACKUP_DIR, DEFAULT_DB_PATH
 CONSOLIDATED_TABLE = "consolidated"
 YAHOO_RESPONSES_TABLE = "yahoo_responses"
 
+SEARCHABLE_COLUMNS = ("isin", "zd_symbol", "yq_symbol", "nse_symbol", "bse_sc_code", "bse_sc_name")
+
 
 @dataclass(frozen=True)
 class JsonImportResult:
     imported: int
     skipped: int
+
+
+@dataclass(frozen=True)
+class ColumnCoverage:
+    column: str
+    populated: int
+
+
+@dataclass(frozen=True)
+class DatabaseStatus:
+    db_path: Path
+    db_size_bytes: int
+    consolidated_rows: int
+    ins_type_counts: dict[str, int]
+    coverage: list[ColumnCoverage]
+    yahoo_rows: int
+    yahoo_exchange_counts: dict[str, int]
+    yahoo_oldest_fetch: str | None
+    yahoo_newest_fetch: str | None
+    yahoo_cached_yq_symbols: int
+
+
+@dataclass(frozen=True)
+class InstrumentMatch:
+    isin: str | None
+    ins_type: str | None
+    zd_symbol: str | None
+    yq_symbol: str | None
+    nse_symbol: str | None
+    bse_sc_code: str | None
+    bse_sc_name: str | None
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    matches: list[InstrumentMatch]
+    total: int
 
 
 def connect(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
@@ -105,6 +144,118 @@ def fetch_consolidated_symbols(
             rows = con.execute(query).fetchall()
 
     return [str(row[0]) for row in rows]
+
+
+def read_status(db_path: Path = DEFAULT_DB_PATH) -> DatabaseStatus:
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database not found: {db_path}. Run 'stocky rebuild' first.")
+
+    with connect(db_path) as con:
+        consolidated_rows = 0
+        ins_type_counts: dict[str, int] = {}
+        coverage: list[ColumnCoverage] = []
+        if table_exists(con, CONSOLIDATED_TABLE):
+            populated_sums = ", ".join(
+                f"SUM(CASE WHEN {column} IS NOT NULL AND TRIM(CAST({column} AS TEXT)) != '' THEN 1 ELSE 0 END)"
+                for column in SEARCHABLE_COLUMNS
+            )
+            row = con.execute(f"SELECT COUNT(*), {populated_sums} FROM {CONSOLIDATED_TABLE}").fetchone()
+            consolidated_rows = row[0]
+            coverage = [
+                ColumnCoverage(column=column, populated=row[index + 1] or 0)
+                for index, column in enumerate(SEARCHABLE_COLUMNS)
+            ]
+            ins_type_counts = dict(
+                con.execute(
+                    f"SELECT COALESCE(ins_type, 'unknown'), COUNT(*) FROM {CONSOLIDATED_TABLE} "
+                    "GROUP BY 1 ORDER BY 2 DESC"
+                ).fetchall()
+            )
+
+        yahoo_rows = 0
+        yahoo_exchange_counts: dict[str, int] = {}
+        yahoo_oldest_fetch: str | None = None
+        yahoo_newest_fetch: str | None = None
+        yahoo_cached_yq_symbols = 0
+        if table_exists(con, YAHOO_RESPONSES_TABLE):
+            yahoo_rows, yahoo_oldest_fetch, yahoo_newest_fetch = con.execute(
+                f"SELECT COUNT(*), MIN(fetched_at), MAX(fetched_at) FROM {YAHOO_RESPONSES_TABLE}"
+            ).fetchone()
+            yahoo_exchange_counts = dict(
+                con.execute(
+                    f"SELECT exchange, COUNT(*) FROM {YAHOO_RESPONSES_TABLE} GROUP BY exchange ORDER BY COUNT(*) DESC"
+                ).fetchall()
+            )
+            if table_exists(con, CONSOLIDATED_TABLE):
+                yahoo_cached_yq_symbols = con.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM {CONSOLIDATED_TABLE} c
+                    WHERE c.yq_symbol IS NOT NULL AND TRIM(c.yq_symbol) != ''
+                      AND EXISTS (SELECT 1 FROM {YAHOO_RESPONSES_TABLE} y WHERE y.symbol = c.yq_symbol)
+                    """
+                ).fetchone()[0]
+
+    return DatabaseStatus(
+        db_path=db_path,
+        db_size_bytes=db_path.stat().st_size,
+        consolidated_rows=consolidated_rows,
+        ins_type_counts=ins_type_counts,
+        coverage=coverage,
+        yahoo_rows=yahoo_rows,
+        yahoo_exchange_counts=yahoo_exchange_counts,
+        yahoo_oldest_fetch=yahoo_oldest_fetch,
+        yahoo_newest_fetch=yahoo_newest_fetch,
+        yahoo_cached_yq_symbols=yahoo_cached_yq_symbols,
+    )
+
+
+def _escape_like(term: str) -> str:
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def search_instruments(
+    term: str,
+    db_path: Path = DEFAULT_DB_PATH,
+    *,
+    limit: int = 20,
+    exact: bool = False,
+) -> SearchResult:
+    cleaned = term.strip()
+    if not cleaned:
+        raise ValueError("Search term must not be empty.")
+    if limit < 1:
+        raise ValueError("Limit must be at least 1.")
+
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database not found: {db_path}. Run 'stocky rebuild' first.")
+
+    equality = " OR ".join(f"UPPER(CAST({column} AS TEXT)) = :exact" for column in SEARCHABLE_COLUMNS)
+    where = f"({equality})"
+    params: dict[str, object] = {"exact": cleaned.upper()}
+    if not exact:
+        fuzzy = " OR ".join(f"UPPER(CAST({column} AS TEXT)) LIKE :fuzzy ESCAPE '\\'" for column in SEARCHABLE_COLUMNS)
+        where = f"({equality} OR {fuzzy})"
+        params["fuzzy"] = f"%{_escape_like(cleaned.upper())}%"
+
+    with connect(db_path) as con:
+        if not table_exists(con, CONSOLIDATED_TABLE):
+            raise RuntimeError(f"Database table '{CONSOLIDATED_TABLE}' does not exist in {db_path}")
+
+        total = con.execute(f"SELECT COUNT(*) FROM {CONSOLIDATED_TABLE} WHERE {where}", params).fetchone()[0]
+        rows = con.execute(
+            f"""
+            SELECT isin, ins_type, zd_symbol, yq_symbol, nse_symbol, bse_sc_code, bse_sc_name
+            FROM {CONSOLIDATED_TABLE}
+            WHERE {where}
+            ORDER BY CASE WHEN {equality} THEN 0 ELSE 1 END, isin
+            LIMIT :limit
+            """,
+            {**params, "limit": limit},
+        ).fetchall()
+
+    matches = [InstrumentMatch(*(str(value) if value is not None else None for value in row)) for row in rows]
+    return SearchResult(matches=matches, total=total)
 
 
 def upsert_yahoo_response(
