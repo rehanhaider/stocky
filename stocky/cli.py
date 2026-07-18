@@ -331,10 +331,25 @@ def yahoo_update(
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Count symbols without calling Yahoo Finance.")] = False,
     limit: Annotated[int | None, typer.Option("--limit", help="Optional maximum number of symbols to process.")] = None,
+    missing_only: Annotated[
+        bool,
+        typer.Option("--missing-only", help="Only fetch symbols that have no cached response yet."),
+    ] = False,
 ) -> None:
     """Update Yahoo Finance responses in SQLite."""
+
+    def print_progress(index: int, total: int, written: int, skipped: int) -> None:
+        console.print(f"[dim]{index}/{total} processed; {written} written; {skipped} skipped[/dim]")
+
     try:
-        result = YahooDataManager(db_path).update_data(key=key, exchange=exchange, dry_run=dry_run, limit=limit)
+        result = YahooDataManager(db_path).update_data(
+            key=key,
+            exchange=exchange,
+            dry_run=dry_run,
+            limit=limit,
+            missing_only=missing_only,
+            progress=print_progress,
+        )
     except Exception as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc

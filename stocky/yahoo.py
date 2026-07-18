@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,8 +10,14 @@ from stocky.database import (
     encode_response_json,
     fetch_consolidated_symbols,
     initialize_database,
+    read_available_yahoo_symbols,
     upsert_yahoo_response,
 )
+
+COMMIT_EVERY = 25
+PROGRESS_EVERY = 50
+
+ProgressCallback = Callable[[int, int, int, int], None]
 
 
 @dataclass(frozen=True)
@@ -41,9 +48,15 @@ class YahooDataManager:
         exchange: str = "BSE",
         dry_run: bool = False,
         limit: int | None = None,
+        missing_only: bool = False,
+        progress: ProgressCallback | None = None,
     ) -> YahooUpdateResult:
         suffix = exchange_suffix(exchange)
         symbols = fetch_consolidated_symbols(self.db_path, key=key, limit=limit)
+
+        if missing_only:
+            available = read_available_yahoo_symbols(self.db_path)
+            symbols = [symbol for symbol in symbols if f"{symbol}.{suffix}" not in available]
 
         if dry_run:
             return YahooUpdateResult(processed=len(symbols), written=0, skipped=0, dry_run=True)
@@ -55,24 +68,31 @@ class YahooDataManager:
         skipped = 0
 
         with connect(self.db_path) as con:
-            for symbol in symbols:
+            for index, symbol in enumerate(symbols, start=1):
                 yahoo_symbol = f"{symbol}.{suffix}"
-                ticker = yq.Ticker(yahoo_symbol)
-                data = ticker.all_modules
-                payload = data.get(yahoo_symbol)
+                try:
+                    data = yq.Ticker(yahoo_symbol).all_modules
+                    payload = data.get(yahoo_symbol)
+                except Exception:
+                    data = None
+                    payload = None
 
-                if payload == f"Quote not found for ticker symbol: {yahoo_symbol}":
+                if payload is None or payload == f"Quote not found for ticker symbol: {yahoo_symbol}":
                     skipped += 1
-                    continue
+                else:
+                    upsert_yahoo_response(
+                        con,
+                        yahoo_symbol=yahoo_symbol,
+                        symbol=symbol,
+                        exchange=exchange.upper(),
+                        response_json=encode_response_json(data),
+                        source="yahooquery",
+                    )
+                    written += 1
+                    if written % COMMIT_EVERY == 0:
+                        con.commit()
 
-                upsert_yahoo_response(
-                    con,
-                    yahoo_symbol=yahoo_symbol,
-                    symbol=symbol,
-                    exchange=exchange.upper(),
-                    response_json=encode_response_json(data),
-                    source="yahooquery",
-                )
-                written += 1
+                if progress is not None and index % PROGRESS_EVERY == 0:
+                    progress(index, len(symbols), written, skipped)
 
         return YahooUpdateResult(processed=len(symbols), written=written, skipped=skipped, dry_run=False)
