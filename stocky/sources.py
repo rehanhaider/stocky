@@ -23,9 +23,15 @@ MONTHS = {
 }
 
 MONTH_NAMES = {value: key for key, value in MONTHS.items()}
-NSE_UDIFF_START_DATE = date(2024, 7, 8)
+
+# SEBI-mandated UDiFF cutover; both exchanges stopped publishing legacy formats around this date.
+UDIFF_START_DATE = date(2024, 7, 8)
 
 BSE_BHAVCOPY_RE = re.compile(r"^BSE-EQ_ISINCODE_(?P<day>\d{2})(?P<month>\d{2})(?P<year>\d{2})\.CSV$", re.IGNORECASE)
+BSE_UDIFF_BHAVCOPY_RE = re.compile(
+    r"^BhavCopy_BSE_CM_0_0_0_(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})_F_0000\.csv(?:\.zip)?$",
+    re.IGNORECASE,
+)
 NSE_LEGACY_BHAVCOPY_RE = re.compile(
     r"^NSE-cm(?P<day>\d{2})(?P<month>[A-Z]{3})(?P<year>\d{4})bhav\.csv$",
     re.IGNORECASE,
@@ -44,11 +50,14 @@ class BhavcopyPaths:
 
 
 def bse_filename_for_date(trade_date: date) -> str:
+    if trade_date >= UDIFF_START_DATE:
+        return f"BhavCopy_BSE_CM_0_0_0_{trade_date:%Y%m%d}_F_0000.CSV"
+
     return f"BSE-EQ_ISINCODE_{trade_date:%d%m%y}.CSV"
 
 
 def nse_filename_for_date(trade_date: date) -> str:
-    if trade_date >= NSE_UDIFF_START_DATE:
+    if trade_date >= UDIFF_START_DATE:
         return f"BhavCopy_NSE_CM_0_0_0_{trade_date:%Y%m%d}_F_0000.csv.zip"
 
     return f"NSE-cm{trade_date:%d}{MONTH_NAMES[trade_date.month]}{trade_date:%Y}bhav.csv"
@@ -67,12 +76,20 @@ def bhavcopy_paths_for_date(
 
 
 def parse_bse_bhavcopy_date(path: Path) -> date | None:
-    match = BSE_BHAVCOPY_RE.match(path.name)
-    if not match:
-        return None
+    legacy_match = BSE_BHAVCOPY_RE.match(path.name)
+    if legacy_match:
+        year = 2000 + int(legacy_match.group("year"))
+        return date(year, int(legacy_match.group("month")), int(legacy_match.group("day")))
 
-    year = 2000 + int(match.group("year"))
-    return date(year, int(match.group("month")), int(match.group("day")))
+    udiff_match = BSE_UDIFF_BHAVCOPY_RE.match(path.name)
+    if udiff_match:
+        return date(
+            int(udiff_match.group("year")),
+            int(udiff_match.group("month")),
+            int(udiff_match.group("day")),
+        )
+
+    return None
 
 
 def parse_nse_bhavcopy_date(path: Path) -> date | None:

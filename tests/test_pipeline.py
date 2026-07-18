@@ -2,7 +2,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 import pandas as pd
 
-from stocky.pipeline import build_consolidated_dataframe, load_nse_equities
+from stocky.pipeline import build_consolidated_dataframe, load_bse_equities, load_nse_equities
 
 
 def test_build_consolidated_dataframe_matches_symbols() -> None:
@@ -47,6 +47,25 @@ def test_load_nse_equities_supports_udiff_zip(tmp_path) -> None:
     assert result.to_dict("records") == [
         {"isin": "INE002A01018", "nse_symbol": "RELIANCE"},
         {"isin": "INE111B01023", "nse_symbol": "63MOONS"},
+    ]
+
+
+def test_load_bse_equities_udiff_excludes_fixed_income_and_gilts(tmp_path) -> None:
+    csv_path = tmp_path / "BhavCopy_BSE_CM_0_0_0_20260717_F_0000.CSV"
+    csv_path.write_text(
+        "TradDt,BizDt,Sgmt,Src,FinInstrmTp,FinInstrmId,ISIN,TckrSymb,SctySrs,FinInstrmNm,ClsPric\n"
+        "2026-07-17,2026-07-17,CM,BSE,STK,500002,INE117A01022,ABB,A,ABB INDIA LIMITED,7509.85\n"
+        "2026-07-17,2026-07-17,CM,BSE,STK,538565,INE111B01023,63MOONS,T,63 MOONS TECHNOLOGIES,250.00\n"
+        "2026-07-17,2026-07-17,CM,BSE,STK,975840,INE528G08394,915YESBANK28,F,YES BANK PERPETUAL BOND,100.00\n"
+        "2026-07-17,2026-07-17,CM,BSE,STK,800403,IN0020200104,SGBJUN28,G,SOVEREIGN GOLD BOND,15783.00\n",
+        encoding="utf-8",
+    )
+
+    result = load_bse_equities(csv_path)
+
+    assert result.to_dict("records") == [
+        {"isin": "INE117A01022", "bse_sc_code": "500002", "bse_sc_name": "ABB INDIA LIMITED"},
+        {"isin": "INE111B01023", "bse_sc_code": "538565", "bse_sc_name": "63 MOONS TECHNOLOGIES"},
     ]
 
 

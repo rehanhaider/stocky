@@ -22,6 +22,13 @@ NSE_UDIFF_COLUMNS = {"SctySrs", "ISIN", "TckrSymb"}
 # SME platform (SM/ST) and debt/bond/ETF series stay excluded.
 NSE_EQUITY_SERIES = {"EQ", "BE", "BZ"}
 
+BSE_LEGACY_COLUMNS = {"SC_TYPE", "ISIN_CODE", "SC_CODE", "SC_NAME"}
+BSE_UDIFF_COLUMNS = {"SctySrs", "ISIN", "FinInstrmId", "FinInstrmNm"}
+
+# The legacy files' SC_TYPE "Q" filter kept every group except fixed income (F)
+# and gilts/SGBs (G); the UDiFF file has no SC_TYPE, so exclude those series instead.
+BSE_NON_EQUITY_UDIFF_SERIES = {"F", "G"}
+
 
 @dataclass(frozen=True)
 class RebuildResult:
@@ -46,15 +53,31 @@ def _require_columns(dataframe: pd.DataFrame, required_columns: set[str], source
 
 def load_bse_equities(path: Path) -> pd.DataFrame:
     bse_bhavcopy = _strip_dataframe_strings(pd.read_csv(path))
-    _require_columns(bse_bhavcopy, {"SC_TYPE", "ISIN_CODE", "SC_CODE", "SC_NAME"}, "BSE bhavcopy")
 
-    equities = bse_bhavcopy[bse_bhavcopy["SC_TYPE"] == "Q"][["ISIN_CODE", "SC_CODE", "SC_NAME"]].copy()
-    equities.rename(
-        columns={"ISIN_CODE": "isin", "SC_CODE": "bse_sc_code", "SC_NAME": "bse_sc_name"},
-        inplace=True,
+    if BSE_LEGACY_COLUMNS.issubset(bse_bhavcopy.columns):
+        equities = bse_bhavcopy[bse_bhavcopy["SC_TYPE"] == "Q"][["ISIN_CODE", "SC_CODE", "SC_NAME"]].copy()
+        equities.rename(
+            columns={"ISIN_CODE": "isin", "SC_CODE": "bse_sc_code", "SC_NAME": "bse_sc_name"},
+            inplace=True,
+        )
+        equities["bse_sc_code"] = equities["bse_sc_code"].astype(str)
+        return equities
+
+    if BSE_UDIFF_COLUMNS.issubset(bse_bhavcopy.columns):
+        equities = bse_bhavcopy[~bse_bhavcopy["SctySrs"].isin(BSE_NON_EQUITY_UDIFF_SERIES)][
+            ["ISIN", "FinInstrmId", "FinInstrmNm"]
+        ].copy()
+        equities.rename(
+            columns={"ISIN": "isin", "FinInstrmId": "bse_sc_code", "FinInstrmNm": "bse_sc_name"},
+            inplace=True,
+        )
+        equities["bse_sc_code"] = equities["bse_sc_code"].astype(str)
+        return equities
+
+    raise ValueError(
+        "BSE bhavcopy is missing required columns for supported formats: "
+        f"legacy {sorted(BSE_LEGACY_COLUMNS)} or UDiFF {sorted(BSE_UDIFF_COLUMNS)}"
     )
-    equities["bse_sc_code"] = equities["bse_sc_code"].astype(str)
-    return equities
 
 
 def load_nse_equities(path: Path) -> pd.DataFrame:
