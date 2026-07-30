@@ -67,13 +67,6 @@ This document captures additional feature ideas beyond the current implementatio
 - Improved backup/restore story and DB migration handling if schema evolves.
 - Optional read-only HTTP API (FastAPI + sqlite) so other tools can query the master list without copying the DB.
 
-## Lower Priority / More Ambitious
-
-- Historical mapping versions (track symbol changes over quarters).
-- Corporate action feed integration or at least a place to annotate them.
-- Multi-asset expansion beyond equities/debt/MFs if the project scope grows.
-- Browser-based viewer (nice-to-have once TUI exists).
-
 ---
 
 ## Already on ROADMAP.md
@@ -83,14 +76,6 @@ These are captured in the existing roadmap and are worth prioritizing:
 - TUI (thin layer over existing commands)
 - Quarterly refresh process + generated summary
 
-## Quick Wins (relatively small surface area)
-
-- `stocky status` / info command
-- CSV/Parquet export
-- MF instrument support (the file is literally sitting there)
-- Better dry-run + preview output on rebuild
-- Selective Yahoo update
-
 ---
 
-**How to use this doc**: Pick one or more areas above when planning work. Cross-reference with [ROADMAP.md](../ROADMAP.md) and open specific items in `ISSUES.md` (using the template) before implementing.
+**How to use this doc**: Pick one or more areas above when planning work. Cross-reference with [ROADMAP.md](../ROADMAP.md) and open a GitHub issue for specific items before implementing.
