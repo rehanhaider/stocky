@@ -112,6 +112,14 @@ Search and inspect equivalent identifiers in a standalone explorer:
 uv run stocky explore
 ```
 
+### JSON output
+
+```bash
+uv run stocky status --json
+```
+
+The `status`, `query`, `lookup`, `explore`, `rebuild`, `yahoo update`, and `yahoo import-cache` commands accept `--json`, print JSON on stdout, and keep human output on stderr.
+
 ### Exporting the consolidated table
 
 Export every row and column to CSV:
