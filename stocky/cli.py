@@ -241,11 +241,14 @@ def interactive() -> None:
                     console.print(f"[red]{exc}[/red]")
         elif choice == "2":
             if typer.confirm("This will call Yahoo Finance and may take a long time. Continue?"):
-                manager = YahooDataManager()
-                result = manager.update_data(exchange="BSE")
-                console.print(
-                    f"[green]Processed {result.processed}; wrote {result.written}; skipped {result.skipped}.[/green]"
-                )
+                try:
+                    result = YahooDataManager(DEFAULT_DB_PATH).update_data(exchange="BSE")
+                    console.print(
+                        f"[green]Processed {result.processed}; wrote {result.written}; "
+                        f"skipped {result.skipped}.[/green]"
+                    )
+                except Exception as exc:
+                    console.print(f"[red]{escape(str(exc))}[/red]")
         elif choice == "3":
             result = import_yahoo_json_cache(DEFAULT_YAHOO_JSON_CACHE_DIR, DEFAULT_DB_PATH)
             console.print(f"[green]Imported {result.imported}; skipped {result.skipped}.[/green]")
@@ -590,7 +593,11 @@ def yahoo_update(
                 progress=print_progress,
             )
     except Exception as exc:
-        error_console.print(f"[red]{escape(str(exc))}[/red]")
+        if json_output:
+            sys.stderr.write(json.dumps({"event": "error", "message": str(exc)}) + "\n")
+            sys.stderr.flush()
+        else:
+            error_console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
 
     if json_output:

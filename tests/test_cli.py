@@ -500,6 +500,18 @@ def test_yahoo_update_reports_missing_database(tmp_path, runner) -> None:
     assert result.stdout == ""
 
 
+def test_yahoo_update_json_reports_missing_database_as_an_event(tmp_path, runner) -> None:
+    result = runner.invoke(app, ["yahoo", "update", "--db-path", str(tmp_path / "missing.db"), "--json"])
+
+    events = [json.loads(line) for line in result.stderr.splitlines() if line.strip()]
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert len(events) == 1
+    assert events[0]["event"] == "error"
+    assert "Run 'stocky rebuild' first." in events[0]["message"]
+
+
 def test_yahoo_import_cache_skips_bad_file(tmp_path, runner) -> None:
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
@@ -555,6 +567,23 @@ def test_interactive_searches_once_then_quits(tmp_path, monkeypatch, seed_consol
 
     assert result.exit_code == 0
     assert "Matches for 'INFY'" in result.stdout
+    assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_reports_yahoo_update_errors_and_keeps_going(
+    tmp_path, monkeypatch, seed_consolidated, runner
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path, [("INE001", "equity", "", None, None, None, None)])
+    monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
+
+    result = runner.invoke(app, ["interactive"], input="2\ny\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "No symbols found for --key zd_symbol" in message
+    assert "run 'stocky rebuild' first." in message
     assert result.stdout.count("Choose an option") == 2
 
 

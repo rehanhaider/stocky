@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from stocky.config import DEFAULT_DB_PATH
 from stocky.database import (
@@ -22,6 +23,31 @@ ProgressCallback = Callable[[int, int, int, int], None]
 
 class YahooFetchError(RuntimeError):
     """Raised when Yahoo Finance keeps failing and the run cannot continue."""
+
+
+Outcome = Literal["success", "not_found", "failure"]
+
+
+def classify_payload(yahoo_symbol: str, data: object, payload: object) -> tuple[Outcome, str]:
+    """Classify one symbol's ``all_modules`` result as success, not_found or failure.
+
+    yahooquery reports most failures as return values rather than exceptions: a
+    response it cannot decode becomes ``{"error": ...}`` for the whole call
+    (base.py:188-190), and an API error becomes the error description in place
+    of the symbol payload (base.py:290-303). Both must count as failures so a
+    rate-limited run aborts instead of marking every symbol skipped.
+    """
+    if payload == f"Quote not found for ticker symbol: {yahoo_symbol}":
+        return "not_found", ""
+    if isinstance(payload, dict):
+        if "error" in payload:
+            return "failure", str(payload["error"])
+        return "success", ""
+    if payload is None:
+        if isinstance(data, dict) and "error" in data:
+            return "failure", str(data["error"])
+        return "failure", f"no payload returned for {yahoo_symbol}"
+    return "failure", str(payload)
 
 
 @dataclass(frozen=True)
@@ -84,38 +110,44 @@ class YahooDataManager:
         with connect(self.db_path) as con:
             for index, symbol in enumerate(symbols, start=1):
                 yahoo_symbol = f"{symbol}.{suffix}"
+                cause: Exception | None = None
                 try:
                     data = yq.Ticker(yahoo_symbol).all_modules
-                    payload = data.get(yahoo_symbol)
+                    payload = data.get(yahoo_symbol) if isinstance(data, dict) else None
                 except Exception as exc:
+                    cause = exc
+                    outcome: Outcome = "failure"
+                    detail = repr(exc)
+                else:
+                    outcome, detail = classify_payload(yahoo_symbol, data, payload)
+
+                if outcome == "failure":
                     consecutive_failures += 1
                     skipped += 1
                     if consecutive_failures >= CONSECUTIVE_FAILURE_LIMIT:
                         con.commit()
                         raise YahooFetchError(
                             f"Yahoo Finance request failed for {yahoo_symbol} "
-                            f"({consecutive_failures} consecutive failures; last error: {exc!r}). "
+                            f"({consecutive_failures} consecutive failures; last error: {detail}). "
                             "Check the network connection, or wait if Yahoo is rate limiting, "
                             "then re-run with --missing-only to resume from the symbols already saved."
-                        ) from exc
+                        ) from cause
+                elif outcome == "not_found":
+                    consecutive_failures = 0
+                    skipped += 1
                 else:
-                    if payload is not None:
-                        consecutive_failures = 0
-
-                    if payload is None or payload == f"Quote not found for ticker symbol: {yahoo_symbol}":
-                        skipped += 1
-                    else:
-                        upsert_yahoo_response(
-                            con,
-                            yahoo_symbol=yahoo_symbol,
-                            symbol=symbol,
-                            exchange=exchange.upper(),
-                            response_json=encode_response_json(data),
-                            source="yahooquery",
-                        )
-                        written += 1
-                        if written % COMMIT_EVERY == 0:
-                            con.commit()
+                    consecutive_failures = 0
+                    upsert_yahoo_response(
+                        con,
+                        yahoo_symbol=yahoo_symbol,
+                        symbol=symbol,
+                        exchange=exchange.upper(),
+                        response_json=encode_response_json(data),
+                        source="yahooquery",
+                    )
+                    written += 1
+                    if written % COMMIT_EVERY == 0:
+                        con.commit()
 
                 if progress is not None:
                     progress(index, len(symbols), written, skipped)
