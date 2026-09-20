@@ -53,6 +53,12 @@ Run the interactive menu:
 uv run stocky
 ```
 
+The rebuild option lists the BSE/NSE bhavcopy pairs it found in `data/marketData/bhavCopies`, lets you pick one by row
+number or trade date, and previews the resolved files and their row counts before you confirm the rebuild. The Yahoo
+option asks for the exchange, the key column, an optional limit, and whether to fetch only uncached symbols, then shows
+how many symbols it will fetch and a progress bar while it runs. Both options run exactly what `stocky rebuild` and
+`stocky yahoo update` run.
+
 Rebuild the SQLite database using the latest matching BSE/NSE bhavcopy pair:
 
 ```bash
@@ -148,10 +154,13 @@ For compatibility, `python app.py` still launches the CLI after dependencies are
 There are six options.
 
 **1. Rebuild stocky.db from scratch:**
-This backs up the existing database and replaces the `consolidated` table. Requires bhavcopies and Zerodha instruments in their respective locations.
+Lists the BSE/NSE bhavcopy pairs found in `data/marketData/bhavCopies`, takes a row number or a trade date, previews the
+resolved files with their row counts, and on confirmation backs up the existing database and replaces the `consolidated`
+table. Requires bhavcopies and Zerodha instruments in their respective locations.
 
-**2. Update all Yahoo data:**
-Downloads Yahoo data using yahooquery and stores responses in `data/output/stocky.db`
+**2. Update Yahoo data:**
+Asks for the exchange, key column, optional limit, and whether to fetch only uncached symbols, reports how many symbols
+it will fetch, then downloads Yahoo data using yahooquery and stores responses in `data/output/stocky.db`
 
 **3. Import Yahoo JSON cache:**
 Imports legacy files from `data/marketData/yahoo/apiResponse` into the `yahoo_responses` SQLite table.
