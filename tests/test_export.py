@@ -2,44 +2,20 @@ import json
 import sqlite3
 
 import pytest
-from typer.testing import CliRunner
 
 from stocky.cli import app
 from stocky.database import CONSOLIDATED_TABLE
 from stocky.export import EXPORT_COLUMNS, export_consolidated, read_consolidated
 
-runner = CliRunner()
 
-
-def _seed_consolidated(db_path) -> None:
-    with sqlite3.connect(db_path) as con:
-        con.execute(
-            f"""
-            CREATE TABLE {CONSOLIDATED_TABLE} (
-                isin TEXT, ins_type TEXT, zd_symbol TEXT, yq_symbol TEXT,
-                nse_symbol TEXT, bse_sc_code TEXT, bse_sc_name TEXT
-            )
-            """
-        )
-        con.executemany(
-            f"INSERT INTO {CONSOLIDATED_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [
-                ("INE002A01018", "equity", "RELIANCE", "RELIANCE", "RELIANCE", "500325", "RELIANCE INDUSTRIES"),
-                ("INE009A01021", "equity", "INFY", "INFY", "INFY", "500209", "INFOSYS LTD"),
-                ("INE144J01027", "equity", "20MICRONS", "", None, "533022", "20 MICRONS LTD"),
-                ("INE999Z01019", "equity", "INFYBEES", None, None, None, "INFY ETF"),
-            ],
-        )
-
-
-def _seeded_db(tmp_path):
+def _seeded_db(tmp_path, seed_consolidated):
     db_path = tmp_path / "stocky.db"
-    _seed_consolidated(db_path)
+    seed_consolidated(db_path)
     return db_path
 
 
-def test_csv_export_keeps_column_order_empty_nulls_and_text_codes(tmp_path) -> None:
-    db_path = _seeded_db(tmp_path)
+def test_csv_export_keeps_column_order_empty_nulls_and_text_codes(tmp_path, seed_consolidated) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
     output = tmp_path / "out" / "all.csv"
 
     result = export_consolidated(db_path, output=output, format=None)
@@ -67,8 +43,8 @@ def test_csv_export_writes_header_for_zero_rows(tmp_path) -> None:
     assert output.read_text(encoding="utf-8") == "isin,bse_sc_code\n"
 
 
-def test_json_export_preserves_key_order_and_nulls(tmp_path) -> None:
-    db_path = _seeded_db(tmp_path)
+def test_json_export_preserves_key_order_and_nulls(tmp_path, seed_consolidated) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
     output = tmp_path / "all.json"
 
     result = export_consolidated(db_path, output=output, format=None)
@@ -81,7 +57,7 @@ def test_json_export_preserves_key_order_and_nulls(tmp_path) -> None:
     assert list(records[0]) == list(EXPORT_COLUMNS)
     assert records[0]["bse_sc_code"] == "500325"
     last = records[-1]
-    assert last["yq_symbol"] is None
+    assert records[2]["yq_symbol"] == ""
     assert last["bse_sc_code"] is None
 
 
@@ -97,8 +73,8 @@ def test_json_export_of_zero_rows_is_an_empty_list(tmp_path) -> None:
     assert json.loads(output.read_text(encoding="utf-8")) == []
 
 
-def test_columns_subset_and_order_are_honoured(tmp_path) -> None:
-    db_path = _seeded_db(tmp_path)
+def test_columns_subset_and_order_are_honoured(tmp_path, seed_consolidated) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
 
     frame = read_consolidated(db_path, columns=["zd_symbol", "isin"])
 
@@ -111,16 +87,16 @@ def test_columns_subset_and_order_are_honoured(tmp_path) -> None:
     ]
 
 
-def test_require_filters_blank_and_null_values(tmp_path) -> None:
-    db_path = _seeded_db(tmp_path)
+def test_require_filters_blank_and_null_values(tmp_path, seed_consolidated) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
 
     frame = read_consolidated(db_path, require=["zd_symbol", "yq_symbol"])
 
     assert frame["zd_symbol"].tolist() == ["RELIANCE", "INFY"]
 
 
-def test_unknown_columns_raise_value_error_listing_valid_columns(tmp_path) -> None:
-    db_path = _seeded_db(tmp_path)
+def test_unknown_columns_raise_value_error_listing_valid_columns(tmp_path, seed_consolidated) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
 
     with pytest.raises(ValueError) as column_error:
         read_consolidated(db_path, columns=["isin", "nope"])
@@ -136,8 +112,8 @@ def test_unknown_columns_raise_value_error_listing_valid_columns(tmp_path) -> No
         read_consolidated(db_path, columns=["isin", "isin"])
 
 
-def test_format_inference_and_its_failures(tmp_path) -> None:
-    db_path = _seeded_db(tmp_path)
+def test_format_inference_and_its_failures(tmp_path, seed_consolidated) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
 
     upper = export_consolidated(db_path, output=tmp_path / "out.CSV", format=None)
     assert upper.format == "csv"
@@ -165,8 +141,16 @@ def test_missing_database_raises_without_creating_the_file(tmp_path) -> None:
     assert not output.exists()
 
 
-def test_cli_export_to_file_prints_summary(tmp_path) -> None:
-    db_path = _seeded_db(tmp_path)
+def test_missing_consolidated_table_raises_runtime_error(tmp_path) -> None:
+    db_path = tmp_path / "empty.db"
+    sqlite3.connect(db_path).close()
+
+    with pytest.raises(RuntimeError, match="consolidated.*does not exist"):
+        read_consolidated(db_path)
+
+
+def test_cli_export_to_file_prints_summary(tmp_path, seed_consolidated, runner) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
     output = tmp_path / "out.csv"
 
     result = runner.invoke(app, ["export", "-o", str(output), "--db-path", str(db_path)])
@@ -176,8 +160,8 @@ def test_cli_export_to_file_prints_summary(tmp_path) -> None:
     assert output.exists()
 
 
-def test_cli_export_to_stdout_writes_json(tmp_path) -> None:
-    db_path = _seeded_db(tmp_path)
+def test_cli_export_to_stdout_writes_json(tmp_path, seed_consolidated, runner) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
 
     result = runner.invoke(
         app,
@@ -189,8 +173,8 @@ def test_cli_export_to_stdout_writes_json(tmp_path) -> None:
     assert list(records[0]) == ["isin", "zd_symbol"]
 
 
-def test_cli_export_with_invalid_column_reports_on_stderr(tmp_path) -> None:
-    db_path = _seeded_db(tmp_path)
+def test_cli_export_with_invalid_column_reports_on_stderr(tmp_path, seed_consolidated, runner) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
 
     result = runner.invoke(app, ["export", "--format", "csv", "--columns", "nope", "--db-path", str(db_path)])
 
@@ -200,7 +184,7 @@ def test_cli_export_with_invalid_column_reports_on_stderr(tmp_path) -> None:
     assert result.stdout == ""
 
 
-def test_cli_export_with_missing_database_keeps_stdout_empty(tmp_path) -> None:
+def test_cli_export_with_missing_database_keeps_stdout_empty(tmp_path, runner) -> None:
     db_path = tmp_path / "missing.db"
 
     result = runner.invoke(app, ["export", "--format", "csv", "--db-path", str(db_path)])
@@ -211,8 +195,8 @@ def test_cli_export_with_missing_database_keeps_stdout_empty(tmp_path) -> None:
     assert result.stdout == ""
 
 
-def test_empty_columns_or_require_selection_raises_value_error(tmp_path) -> None:
-    db_path = _seeded_db(tmp_path)
+def test_empty_columns_or_require_selection_raises_value_error(tmp_path, seed_consolidated) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
 
     with pytest.raises(ValueError) as columns_error:
         read_consolidated(db_path, columns=[])
@@ -223,8 +207,8 @@ def test_empty_columns_or_require_selection_raises_value_error(tmp_path) -> None
     assert "--require must name at least one column." in str(require_error.value)
 
 
-def test_cli_export_with_empty_columns_reports_on_stderr(tmp_path) -> None:
-    db_path = _seeded_db(tmp_path)
+def test_cli_export_with_empty_columns_reports_on_stderr(tmp_path, seed_consolidated, runner) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
 
     result = runner.invoke(app, ["export", "--format", "csv", "--columns", "", "--db-path", str(db_path)])
 
@@ -233,8 +217,8 @@ def test_cli_export_with_empty_columns_reports_on_stderr(tmp_path) -> None:
     assert result.stdout == ""
 
 
-def test_cli_export_with_empty_require_reports_on_stderr(tmp_path) -> None:
-    db_path = _seeded_db(tmp_path)
+def test_cli_export_with_empty_require_reports_on_stderr(tmp_path, seed_consolidated, runner) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
 
     result = runner.invoke(app, ["export", "--format", "csv", "--require", "", "--db-path", str(db_path)])
 
@@ -243,8 +227,8 @@ def test_cli_export_with_empty_require_reports_on_stderr(tmp_path) -> None:
     assert result.stdout == ""
 
 
-def test_cli_export_summary_escapes_markup_in_output_path(tmp_path) -> None:
-    db_path = _seeded_db(tmp_path)
+def test_cli_export_summary_escapes_markup_in_output_path(tmp_path, seed_consolidated, runner) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
     output = tmp_path / "out[/red].csv"
 
     result = runner.invoke(app, ["export", "-o", str(output), "--db-path", str(db_path)])

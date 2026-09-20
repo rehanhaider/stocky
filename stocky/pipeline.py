@@ -169,7 +169,6 @@ def rebuild_database(
     dry_run: bool = False,
 ) -> RebuildResult:
     require_existing_files(paths)
-    initialize_database(db_path)
 
     stocky = build_consolidated_dataframe(
         bse_equities=load_bse_equities(paths.bse),
@@ -179,13 +178,24 @@ def rebuild_database(
     )
 
     backup_path = None
-    if not dry_run:
-        if backup:
-            backup_path = backup_database(db_path, backup_dir=backup_dir)
+    if dry_run:
+        return RebuildResult(
+            rows=len(stocky),
+            db_path=db_path,
+            backup_path=backup_path,
+            dry_run=dry_run,
+            bse_bhavcopy=paths.bse,
+            nse_bhavcopy=paths.nse,
+            zerodha_instruments=paths.zerodha,
+        )
 
-        initialize_database(db_path)
-        with connect(db_path) as con:
-            stocky.to_sql(CONSOLIDATED_TABLE, con, if_exists="replace", index=True, index_label="isin")
+    initialize_database(db_path)
+    if backup:
+        backup_path = backup_database(db_path, backup_dir=backup_dir)
+
+    initialize_database(db_path)
+    with connect(db_path) as con:
+        stocky.to_sql(CONSOLIDATED_TABLE, con, if_exists="replace", index=True, index_label="isin")
 
     return RebuildResult(
         rows=len(stocky),

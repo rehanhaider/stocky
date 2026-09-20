@@ -149,6 +149,9 @@ def resolve_bhavcopy_paths(
     zerodha: Path = DEFAULT_ZERODHA_INSTRUMENTS,
     latest: bool = False,
 ) -> BhavcopyPaths:
+    if latest:
+        return discover_latest_bhavcopy_pair(input_dir=input_dir, zerodha=zerodha)
+
     if bse_bhavcopy or nse_bhavcopy:
         if not bse_bhavcopy or not nse_bhavcopy:
             raise ValueError("Provide both --bse-bhavcopy and --nse-bhavcopy, or neither.")
@@ -156,9 +159,6 @@ def resolve_bhavcopy_paths(
 
     if trade_date is not None:
         return bhavcopy_paths_for_date(trade_date, input_dir=input_dir, zerodha=zerodha)
-
-    if latest:
-        return discover_latest_bhavcopy_pair(input_dir=input_dir, zerodha=zerodha)
 
     return discover_latest_bhavcopy_pair(input_dir=input_dir, zerodha=zerodha)
 

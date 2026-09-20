@@ -1,7 +1,9 @@
-import sqlite3
 import sys
 import types
 
+import pytest
+
+import stocky.yahoo as yahoo
 from stocky.database import (
     connect,
     encode_response_json,
@@ -9,16 +11,7 @@ from stocky.database import (
     read_available_yahoo_symbols,
     upsert_yahoo_response,
 )
-from stocky.yahoo import YahooDataManager
-
-
-def _seed_consolidated(db_path, zd_symbols: list[str]) -> None:
-    with sqlite3.connect(db_path) as con:
-        con.execute("CREATE TABLE consolidated (isin TEXT, zd_symbol TEXT)")
-        con.executemany(
-            "INSERT INTO consolidated VALUES (?, ?)",
-            [(f"INE{index:03d}", symbol) for index, symbol in enumerate(zd_symbols)],
-        )
+from stocky.yahoo import YahooDataManager, exchange_suffix
 
 
 def _seed_cached_response(db_path, yahoo_symbol: str) -> None:
@@ -46,9 +39,15 @@ class _FakeTicker:
         return {self.symbol: {"price": 100}}
 
 
-def test_dry_run_missing_only_excludes_cached_symbols(tmp_path) -> None:
+def test_dry_run_missing_only_excludes_cached_symbols(tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
-    _seed_consolidated(db_path, ["RELIANCE", "INFY", "NEWIPO"])
+    seed_consolidated(
+        db_path,
+        [
+            (f"INE{index:03d}", "equity", symbol, None, None, None, None)
+            for index, symbol in enumerate(["RELIANCE", "INFY", "NEWIPO"])
+        ],
+    )
     _seed_cached_response(db_path, "RELIANCE.BO")
 
     manager = YahooDataManager(db_path)
@@ -57,11 +56,18 @@ def test_dry_run_missing_only_excludes_cached_symbols(tmp_path) -> None:
     assert manager.update_data(exchange="BSE", dry_run=True, missing_only=True).processed == 2
     # The cached response is for .BO, so an NSE run still needs all three.
     assert manager.update_data(exchange="NSE", dry_run=True, missing_only=True).processed == 3
+    assert manager.update_data(exchange="BSE", dry_run=True, limit=1).processed == 1
 
 
-def test_update_writes_responses_and_skips_unknown_symbols(tmp_path, monkeypatch) -> None:
+def test_update_writes_responses_and_skips_unknown_symbols(tmp_path, monkeypatch, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
-    _seed_consolidated(db_path, ["RELIANCE", "BADSYMBOL"])
+    seed_consolidated(
+        db_path,
+        [
+            (f"INE{index:03d}", "equity", symbol, None, None, None, None)
+            for index, symbol in enumerate(["RELIANCE", "BADSYMBOL"])
+        ],
+    )
 
     fake_module = types.ModuleType("yahooquery")
     fake_module.Ticker = _FakeTicker
@@ -73,3 +79,79 @@ def test_update_writes_responses_and_skips_unknown_symbols(tmp_path, monkeypatch
     assert result.written == 1
     assert result.skipped == 1
     assert read_available_yahoo_symbols(db_path) == {"RELIANCE.BO"}
+
+
+def test_update_skips_fetch_exceptions(tmp_path, monkeypatch, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path, [("INE001", "equity", "BROKEN", None, None, None, None)])
+
+    class RaisingTicker:
+        def __init__(self, symbol: str) -> None:
+            self.symbol = symbol
+
+        @property
+        def all_modules(self):
+            raise RuntimeError("offline failure")
+
+    fake_module = types.ModuleType("yahooquery")
+    fake_module.Ticker = RaisingTicker
+    monkeypatch.setitem(sys.modules, "yahooquery", fake_module)
+
+    result = YahooDataManager(db_path).update_data()
+
+    assert result.processed == 1
+    assert result.written == 0
+    assert result.skipped == 1
+
+
+def test_update_commits_every_25_reports_progress_and_writes_nse(tmp_path, monkeypatch, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    symbols = [f"SYM{index:02d}" for index in range(51)]
+    seed_consolidated(
+        db_path,
+        [(f"INE{index:03d}", "equity", symbol, None, None, None, None) for index, symbol in enumerate(symbols)],
+    )
+
+    fake_module = types.ModuleType("yahooquery")
+    fake_module.Ticker = _FakeTicker
+    monkeypatch.setitem(sys.modules, "yahooquery", fake_module)
+
+    commits = []
+    real_connect = yahoo.connect
+
+    class TrackingConnection:
+        def __init__(self, path) -> None:
+            self.connection = real_connect(path)
+
+        def __enter__(self):
+            self.connection.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.connection.__exit__(*args)
+
+        def execute(self, *args, **kwargs):
+            return self.connection.execute(*args, **kwargs)
+
+        def commit(self) -> None:
+            commits.append(True)
+            self.connection.commit()
+
+    monkeypatch.setattr(yahoo, "connect", TrackingConnection)
+    progress = []
+
+    result = YahooDataManager(db_path).update_data(exchange="NSE", progress=lambda *args: progress.append(args))
+
+    assert result.processed == 51
+    assert result.written == 51
+    assert result.skipped == 0
+    assert commits == [True, True]
+    assert progress == [(50, 51, 50, 0)]
+    assert "SYM00.NS" in read_available_yahoo_symbols(db_path)
+    with real_connect(db_path) as con:
+        assert con.execute("SELECT DISTINCT exchange FROM yahoo_responses").fetchall() == [("NSE",)]
+
+
+def test_exchange_suffix_rejects_unknown_exchange() -> None:
+    with pytest.raises(ValueError, match="Unsupported exchange"):
+        exchange_suffix("MCX")

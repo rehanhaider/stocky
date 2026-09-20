@@ -109,8 +109,9 @@ def read_available_yahoo_symbols(db_path: Path = DEFAULT_DB_PATH) -> set[str]:
     if not db_path.exists():
         return set()
 
-    initialize_database(db_path)
     with connect(db_path) as con:
+        if not table_exists(con, YAHOO_RESPONSES_TABLE):
+            return set()
         rows = con.execute(f"SELECT yahoo_symbol FROM {YAHOO_RESPONSES_TABLE}").fetchall()
     return {row[0] for row in rows}
 
