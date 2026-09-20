@@ -48,6 +48,11 @@ def test_discover_latest_bhavcopy_pair(tmp_path) -> None:
     assert paths.nse.name == "NSE-cm30SEP2021bhav.csv"
 
 
+def test_discover_latest_bhavcopy_pair_rejects_empty_directory(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError, match="No matching BSE/NSE bhavcopy pair"):
+        discover_latest_bhavcopy_pair(tmp_path)
+
+
 def test_discover_latest_bhavcopy_pair_prefers_newer_udiff_files(tmp_path) -> None:
     (tmp_path / "BSE-EQ_ISINCODE_030521.CSV").write_text("", encoding="utf-8")
     (tmp_path / "NSE-cm03MAY2021bhav.csv").write_text("", encoding="utf-8")

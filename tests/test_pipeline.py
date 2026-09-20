@@ -101,6 +101,57 @@ def test_load_nse_equities_legacy_includes_trade_for_trade_series(tmp_path) -> N
     ]
 
 
+def test_load_nse_equities_rejects_unknown_columns(tmp_path) -> None:
+    csv_path = tmp_path / "nse.csv"
+    csv_path.write_text("UNKNOWN,OTHER\nvalue,other\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="NSE bhavcopy is missing required columns"):
+        load_nse_equities(csv_path)
+
+
+def test_load_bse_equities_legacy_filters_sc_type_q(tmp_path) -> None:
+    csv_path = tmp_path / "bse.csv"
+    csv_path.write_text(
+        "SC_TYPE,ISIN_CODE,SC_CODE,SC_NAME\n"
+        "Q,INE002A01018,500325,RELIANCE INDUSTRIES\n"
+        "F,INE000F01000,900000,EXCLUDED BOND\n",
+        encoding="utf-8",
+    )
+
+    result = load_bse_equities(csv_path)
+
+    assert result.to_dict("records") == [
+        {"isin": "INE002A01018", "bse_sc_code": "500325", "bse_sc_name": "RELIANCE INDUSTRIES"}
+    ]
+
+
+def test_load_bse_equities_rejects_unknown_columns(tmp_path) -> None:
+    csv_path = tmp_path / "bse.csv"
+    csv_path.write_text("UNKNOWN,OTHER\nvalue,other\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="BSE bhavcopy is missing required columns"):
+        load_bse_equities(csv_path)
+
+
+def test_build_consolidated_dataframe_keeps_exchange_only_isins_and_nan_fallbacks() -> None:
+    bse = pd.DataFrame([{"isin": "BSE_ONLY", "bse_sc_code": "500001", "bse_sc_name": "BSE ONLY"}])
+    nse = pd.DataFrame([{"isin": "NSE_ONLY", "nse_symbol": "NSEONLY"}])
+    zerodha = pd.DataFrame(columns=["exchange_token", "tradingsymbol"])
+
+    result = build_consolidated_dataframe(
+        bse_equities=bse,
+        nse_equities=nse,
+        zerodha_instruments=zerodha,
+        available_yahoo_symbols=set(),
+    )
+
+    assert set(result.index) == {"BSE_ONLY", "NSE_ONLY"}
+    assert pd.isna(result.loc["BSE_ONLY", "nse_symbol"])
+    assert pd.isna(result.loc["NSE_ONLY", "bse_sc_code"])
+    assert result.loc["BSE_ONLY", "zd_symbol"] is None
+    assert result.loc["NSE_ONLY", "yq_symbol"] is None
+
+
 def test_rebuild_database_dry_run_does_not_create_database(tmp_path, market_csv_builder) -> None:
     paths = market_csv_builder(tmp_path / "inputs")
     db_path = tmp_path / "fresh.db"

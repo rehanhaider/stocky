@@ -141,6 +141,14 @@ def test_missing_database_raises_without_creating_the_file(tmp_path) -> None:
     assert not output.exists()
 
 
+def test_missing_consolidated_table_raises_runtime_error(tmp_path) -> None:
+    db_path = tmp_path / "empty.db"
+    sqlite3.connect(db_path).close()
+
+    with pytest.raises(RuntimeError, match="consolidated.*does not exist"):
+        read_consolidated(db_path)
+
+
 def test_cli_export_to_file_prints_summary(tmp_path, seed_consolidated, runner) -> None:
     db_path = _seeded_db(tmp_path, seed_consolidated)
     output = tmp_path / "out.csv"
