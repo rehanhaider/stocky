@@ -402,12 +402,12 @@ def explore(
 
         try:
             result = search_instruments(term, db_path, limit=limit)
-        except FileNotFoundError as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(1) from exc
-        except Exception as exc:
+        except ValueError as exc:
             console.print(f"[red]{exc}[/red]")
             continue
+        except Exception as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
 
         _print_search_result(term, result, numbered=True)
         if not result.matches:

@@ -7,6 +7,7 @@ import typer
 import stocky.cli as cli
 from stocky import __version__
 from stocky.cli import app
+from stocky.database import initialize_database
 from stocky.yahoo import YahooUpdateResult
 
 
@@ -284,6 +285,17 @@ def test_explore_missing_database_exits(tmp_path, runner) -> None:
 
     assert result.exit_code == 1
     assert "Database not found" in result.stdout
+
+
+def test_explore_exits_when_consolidated_table_is_missing(tmp_path, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    initialize_database(db_path)
+
+    result = runner.invoke(app, ["explore", "--db-path", str(db_path)], input="INFY\n")
+
+    assert result.exit_code == 1
+    assert "does not exist" in result.stdout
+    assert result.stdout.count("Search (blank to quit)") == 1
 
 
 def test_explore_rejects_invalid_limit_before_prompting(tmp_path, seed_consolidated, runner) -> None:

@@ -334,3 +334,19 @@ def test_backup_database_returns_none_for_missing_source(tmp_path) -> None:
 
     assert backup_database(tmp_path / "missing.db", backup_dir) is None
     assert not backup_dir.exists()
+
+
+def test_search_instruments_fuzzy_ranks_strongest_score_first(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(
+        db_path,
+        [
+            ("INE467B01029", "equity", "TCS", "TCS.NS", "TCS", "532540", "TATA CONSULTANCY SERVICES LTD."),
+            ("INE0QVA01016", "equity", "TRACXN", "TRACXN.NS", "TRACXN", "543638", "TRACXN TECHNOLOGIES LTD"),
+        ],
+    )
+
+    result = search_instruments("TCSX", db_path, limit=1)
+
+    assert result.fuzzy is True
+    assert [match.zd_symbol for match in result.matches] == ["TCS"]

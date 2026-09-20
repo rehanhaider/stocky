@@ -288,7 +288,9 @@ def search_instruments(
                 if name_score >= 0.6 or symbol_score >= 0.6:
                     fuzzy_rows.append((name_score, symbol_score, row))
 
-            fuzzy_rows.sort(key=lambda item: (-item[0], -item[1], "" if item[2][0] is None else str(item[2][0])))
+            fuzzy_rows.sort(
+                key=lambda item: (-max(item[0], item[1]), -item[0], "" if item[2][0] is None else str(item[2][0]))
+            )
             total = len(fuzzy_rows)
             rows = [row for _, _, row in fuzzy_rows[:limit]]
             fuzzy_matches = bool(rows)
