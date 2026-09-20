@@ -118,7 +118,7 @@ uv run stocky explore
 uv run stocky status --json
 ```
 
-The `status`, `query`, `lookup`, `explore`, `rebuild`, `yahoo update`, and `yahoo import-cache` commands accept `--json`, print JSON on stdout, and keep human output on stderr.
+The `status`, `query`, `lookup`, `explore`, `rebuild`, `yahoo update`, and `yahoo import-cache` commands accept `--json` and print JSON on stdout. With `--json`, `yahoo update` also writes its progress and error events to stderr as JSON lines, one per line.
 
 ### Exporting the consolidated table
 

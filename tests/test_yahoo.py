@@ -35,7 +35,7 @@ class _FakeTicker:
     @property
     def all_modules(self):
         if "BAD" in self.symbol:
-            return {self.symbol: f"Quote not found for ticker symbol: {self.symbol}"}
+            return {self.symbol: f"Quote not found for symbol: {self.symbol}"}
         return {self.symbol: {"price": 100}}
 
 
@@ -281,7 +281,7 @@ def test_update_resets_failure_counter_after_a_not_found(tmp_path, monkeypatch, 
         def all_modules(self):
             if not self.not_found:
                 raise RuntimeError("temporary failure")
-            return {self.symbol: f"Quote not found for ticker symbol: {self.symbol}"}
+            return {self.symbol: f"Quote not found for symbol: {self.symbol}"}
 
     fake_module = types.ModuleType("yahooquery")
     fake_module.Ticker = FlakyTicker
@@ -369,16 +369,28 @@ def test_update_treats_unexpected_payload_text_as_failure(tmp_path, monkeypatch,
 
 def test_classify_payload_maps_yahooquery_outcomes() -> None:
     assert yahoo.classify_payload("RELIANCE.BO", {}, {"price": 1})[0] == "success"
+    assert yahoo.classify_payload("RELIANCE.BO", {}, "Quote not found for symbol: RELIANCE.BO") == ("not_found", "")
+    # Yahoo has also used this older wording, so both must classify the same way.
     assert yahoo.classify_payload("RELIANCE.BO", {}, "Quote not found for ticker symbol: RELIANCE.BO") == (
         "not_found",
         "",
     )
+    assert yahoo.classify_payload("RELIANCE.BO", {}, 'For input string: "42525.0000000001"')[0] == "failure"
     assert yahoo.classify_payload("RELIANCE.BO", {}, {"error": "Too Many Requests"}) == (
         "failure",
         "Too Many Requests",
     )
     assert yahoo.classify_payload("RELIANCE.BO", {"error": "HTTP 404"}, None) == ("failure", "HTTP 404")
     assert yahoo.classify_payload("RELIANCE.BO", {}, None)[0] == "failure"
+
+
+def test_update_allows_an_empty_result_for_limit_zero(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = YahooDataManager(db_path).update_data(limit=0, dry_run=True)
+
+    assert result.processed == 0
 
 
 def test_exchange_suffix_rejects_unknown_exchange() -> None:

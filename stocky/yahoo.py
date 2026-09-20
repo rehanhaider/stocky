@@ -17,6 +17,7 @@ from stocky.database import (
 
 COMMIT_EVERY = 25
 CONSECUTIVE_FAILURE_LIMIT = 5
+NOT_FOUND_PREFIX = "Quote not found for"
 
 ProgressCallback = Callable[[int, int, int, int], None]
 
@@ -36,8 +37,12 @@ def classify_payload(yahoo_symbol: str, data: object, payload: object) -> tuple[
     (base.py:188-190), and an API error becomes the error description in place
     of the symbol payload (base.py:290-303). Both must count as failures so a
     rate-limited run aborts instead of marking every symbol skipped.
+
+    Yahoo answers an unlisted ticker with ``Quote not found for symbol: X`` and
+    has also used ``Quote not found for ticker symbol: X``, so the prefix is
+    matched rather than one exact sentence.
     """
-    if payload == f"Quote not found for ticker symbol: {yahoo_symbol}":
+    if isinstance(payload, str) and payload.startswith(NOT_FOUND_PREFIX):
         return "not_found", ""
     if isinstance(payload, dict):
         if "error" in payload:
@@ -84,7 +89,7 @@ class YahooDataManager:
         suffix = exchange_suffix(exchange)
         symbols = fetch_consolidated_symbols(self.db_path, key=key, limit=limit)
 
-        if not symbols:
+        if not symbols and (limit is None or limit > 0):
             raise ValueError(
                 f"No symbols found for --key {key} in {self.db_path}. "
                 "Try another --key (zd_symbol, yq_symbol, nse_symbol, bse_sc_code) or run 'stocky rebuild' first."

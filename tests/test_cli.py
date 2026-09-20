@@ -463,6 +463,31 @@ def test_yahoo_update_passes_options_and_prints_progress(tmp_path, monkeypatch, 
     assert "Processed 60; wrote 58; skipped 2; dry_run=False." in result.stdout
 
 
+def test_yahoo_update_throttles_plain_progress_lines(tmp_path, monkeypatch, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+
+    class FakeManager:
+        def __init__(self, selected_db_path) -> None:
+            assert selected_db_path == db_path
+
+        def update_data(self, **options):
+            for index in range(1, 52):
+                options["progress"](index, 51, index, 0)
+            return YahooUpdateResult(processed=51, written=51, skipped=0, dry_run=False)
+
+    monkeypatch.setattr(cli, "YahooDataManager", FakeManager)
+
+    result = runner.invoke(app, ["yahoo", "update", "--db-path", str(db_path)])
+
+    lines = [line for line in result.stderr.splitlines() if line.strip()]
+
+    assert result.exit_code == 0
+    assert lines == [
+        "50/51 processed; 50 written; 0 skipped",
+        "51/51 processed; 51 written; 0 skipped",
+    ]
+
+
 def test_yahoo_update_json_emits_progress_events_on_stderr(tmp_path, monkeypatch, runner) -> None:
     db_path = tmp_path / "stocky.db"
 
