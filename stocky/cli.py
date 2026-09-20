@@ -6,6 +6,7 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from stocky import __version__
@@ -28,6 +29,7 @@ from stocky.sources import resolve_bhavcopy_paths
 from stocky.yahoo import YahooDataManager
 
 console = Console()
+error_console = Console(stderr=True)
 app = typer.Typer(help="Consolidate Indian market instrument symbols.", no_args_is_help=False)
 yahoo_app = typer.Typer(help="Manage Yahoo Finance cache data.")
 
@@ -359,7 +361,7 @@ def export(
             require=_split_columns(require),
         )
     except Exception as exc:
-        console.print(f"[red]{exc}[/red]")
+        error_console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
 
     if result.output is not None:

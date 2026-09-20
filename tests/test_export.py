@@ -189,10 +189,23 @@ def test_cli_export_to_stdout_writes_json(tmp_path) -> None:
     assert list(records[0]) == ["isin", "zd_symbol"]
 
 
-def test_cli_export_with_invalid_column_exits_one(tmp_path) -> None:
+def test_cli_export_with_invalid_column_reports_on_stderr(tmp_path) -> None:
     db_path = _seeded_db(tmp_path)
 
     result = runner.invoke(app, ["export", "--format", "csv", "--columns", "nope", "--db-path", str(db_path)])
 
     assert result.exit_code == 1
-    assert "Unknown column 'nope'" in result.stdout
+    assert "Unknown column 'nope'" in result.stderr
+    assert "Unknown column" not in result.stdout
+    assert result.stdout == ""
+
+
+def test_cli_export_with_missing_database_keeps_stdout_empty(tmp_path) -> None:
+    db_path = tmp_path / "missing.db"
+
+    result = runner.invoke(app, ["export", "--format", "csv", "--db-path", str(db_path)])
+
+    assert result.exit_code == 1
+    assert "Database not found" in result.stderr
+    assert "Database not found" not in result.stdout
+    assert result.stdout == ""
