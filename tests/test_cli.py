@@ -261,6 +261,24 @@ def test_lookup_prints_multiple_match_hint(tmp_path, seed_consolidated, runner) 
     assert "Multiple instruments match; refine the identifier." in result.stdout
 
 
+def test_lookup_limit_controls_ambiguous_candidates(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    rows = [
+        (f"INE{index:06d}01016", "equity", f"FUND{index}", None, None, str(500000 + index), "MIRAE ASSET MUTUAL FUND")
+        for index in range(21)
+    ]
+    seed_consolidated(db_path, rows)
+
+    default = runner.invoke(app, ["lookup", "MIRAE ASSET MUTUAL FUND", "--db-path", str(db_path)])
+    raised = runner.invoke(app, ["lookup", "MIRAE ASSET MUTUAL FUND", "--limit", "25", "--db-path", str(db_path)])
+
+    assert default.exit_code == 0
+    assert "Showing 20 of 21 matches" in default.stdout
+    assert raised.exit_code == 0
+    assert "Showing 20 of 21" not in raised.stdout
+    assert raised.stdout.count("FUND") >= 21
+
+
 def test_explore_searches_selects_and_reprompts(tmp_path, seed_consolidated, runner) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path)

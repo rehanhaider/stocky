@@ -357,11 +357,14 @@ def query(
 @app.command()
 def lookup(
     identifier: Annotated[str, typer.Argument(help="Exact symbol, ISIN, BSE scrip code, or name.")],
+    limit: Annotated[
+        int, typer.Option("--limit", help="Maximum number of candidates to display when the identifier is ambiguous.")
+    ] = 20,
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
 ) -> None:
     """Show every known identifier for one exact match."""
     try:
-        result = search_instruments(identifier, db_path, exact=True)
+        result = search_instruments(identifier, db_path, exact=True, limit=limit)
     except Exception as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
