@@ -237,6 +237,43 @@ def test_cli_parquet_export_to_stdout_writes_binary(tmp_path, seed_consolidated,
     assert result.stdout_bytes.startswith(b"PAR1")
 
 
+def test_parquet_export_refuses_interactive_stdout_before_database_read(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "missing.db"
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    with pytest.raises(
+        ValueError,
+        match=r"^Parquet output is binary\. Pass --output FILE or redirect stdout to a file\.$",
+    ):
+        export_consolidated(db_path, output=None, format="parquet")
+
+    assert not db_path.exists()
+
+
+def test_parquet_export_writes_binary_to_piped_stdout(tmp_path, seed_consolidated, monkeypatch, capsysbinary) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+
+    result = export_consolidated(db_path, output=None, format="parquet")
+
+    assert result.rows == 4
+    assert capsysbinary.readouterr().out.startswith(b"PAR1")
+
+
+def test_cli_parquet_export_to_interactive_stdout_reports_error(tmp_path, monkeypatch, runner) -> None:
+    db_path = tmp_path / "missing.db"
+    with runner.isolation():
+        runner_stdout_type = type(sys.stdout)
+    monkeypatch.setattr(runner_stdout_type, "isatty", lambda self: True)
+
+    result = runner.invoke(app, ["export", "--format", "parquet", "--db-path", str(db_path)])
+
+    assert result.exit_code == 1
+    assert "Parquet output is binary. Pass --output FILE or redirect stdout to a file." in result.stderr
+    assert result.stdout == ""
+    assert not db_path.exists()
+
+
 def test_cli_export_to_stdout_writes_json(tmp_path, seed_consolidated, runner) -> None:
     db_path = _seeded_db(tmp_path, seed_consolidated)
 

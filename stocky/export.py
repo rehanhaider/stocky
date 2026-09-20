@@ -139,6 +139,8 @@ def export_consolidated(
                 "Parquet export needs pyarrow. Install it with 'uv sync --extra parquet' or "
                 "'pip install \"stocky[parquet]\"'."
             ) from exc
+        if output is None and sys.stdout.isatty():
+            raise ValueError("Parquet output is binary. Pass --output FILE or redirect stdout to a file.")
 
     frame = read_consolidated(db_path, columns=columns, require=require)
 
