@@ -10,7 +10,8 @@ import typer
 import stocky.cli as cli
 from stocky import __version__
 from stocky.cli import app
-from stocky.database import initialize_database
+from stocky.database import connect, encode_response_json, initialize_database, upsert_yahoo_response
+from stocky.sources import bse_filename_for_date, nse_filename_for_date
 from stocky.yahoo import YahooUpdateResult
 
 
@@ -27,6 +28,20 @@ def _use_fake_yahooquery(monkeypatch) -> None:
     fake_module = types.ModuleType("yahooquery")
     fake_module.Ticker = _FakeTicker
     monkeypatch.setitem(sys.modules, "yahooquery", fake_module)
+
+
+def _seed_cached_yahoo_responses(db_path, symbols, suffix: str = "BO") -> None:
+    initialize_database(db_path)
+    with connect(db_path) as con:
+        for symbol in symbols:
+            upsert_yahoo_response(
+                con,
+                yahoo_symbol=f"{symbol}.{suffix}",
+                symbol=symbol,
+                exchange="BSE",
+                response_json=encode_response_json({"price": 1}),
+                source="test",
+            )
 
 
 def _use_interactive_defaults(monkeypatch, paths, db_path) -> None:
@@ -693,7 +708,7 @@ def test_interactive_rebuild_reports_malformed_source_file(tmp_path, market_csv_
     assert result.stdout.count("Choose an option") == 2
 
 
-def test_interactive_rebuild_reports_date_without_files(tmp_path, market_csv_builder, monkeypatch, runner) -> None:
+def test_interactive_rebuild_reports_date_without_a_pair(tmp_path, market_csv_builder, monkeypatch, runner) -> None:
     paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 5, 3))
     db_path = tmp_path / "stocky.db"
     _use_interactive_defaults(monkeypatch, paths, db_path)
@@ -703,7 +718,9 @@ def test_interactive_rebuild_reports_date_without_files(tmp_path, market_csv_bui
     message = " ".join(result.stdout.split())
 
     assert result.exit_code == 0
-    assert "Cannot rebuild: Required input files are missing" in message
+    assert f"No BSE/NSE bhavcopy pair for 2021-05-04 in {paths.bse.parent}" in message
+    assert "Pick a listed row or download that day's files." in message
+    assert "Rebuild preview" not in message
     assert not db_path.exists()
     assert result.stdout.count("Choose an option") == 2
 
@@ -752,6 +769,49 @@ def test_interactive_rebuild_declined_leaves_database_untouched(
     assert "Rebuild summary" not in message
     assert not db_path.exists()
     assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_rebuild_accepts_a_date_with_an_unzipped_nse_file(
+    tmp_path, market_csv_builder, monkeypatch, runner
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2026, 7, 17))
+    unzipped_nse = paths.nse.with_suffix("")
+    paths.nse.rename(unzipped_nse)
+    db_path = tmp_path / "stocky.db"
+    _use_interactive_defaults(monkeypatch, paths, db_path)
+
+    result = runner.invoke(app, ["interactive"], input="1\n2026-07-17\ny\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert str(unzipped_nse) in message
+    assert "Rebuild summary" in message
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("SELECT COUNT(*) FROM consolidated").fetchone()[0] == 1
+
+
+def test_interactive_rebuild_accepts_a_date_below_the_listed_rows(
+    tmp_path, market_csv_builder, monkeypatch, runner
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 5, 3))
+    for day in range(1, 11):
+        newer = date(2021, 6, day)
+        (paths.bse.parent / bse_filename_for_date(newer)).write_text("", encoding="utf-8")
+        (paths.bse.parent / nse_filename_for_date(newer)).write_text("", encoding="utf-8")
+    db_path = tmp_path / "stocky.db"
+    _use_interactive_defaults(monkeypatch, paths, db_path)
+
+    result = runner.invoke(app, ["interactive"], input="1\n2021-05-03\ny\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "... and 1 more" in message
+    assert str(paths.bse) in message
+    assert "Rebuild summary" in message
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("SELECT COUNT(*) FROM consolidated").fetchone()[0] == 1
 
 
 def test_interactive_yahoo_update_prompts_and_reports_progress(
@@ -814,16 +874,17 @@ def test_interactive_yahoo_update_rejects_non_numeric_limit(tmp_path, monkeypatc
     message = " ".join(result.stdout.split())
 
     assert result.exit_code == 0
-    assert "Enter a whole number of symbols, or leave it blank for all." in message
+    assert "Enter a positive number, or leave blank for all." in message
 
 
 def test_interactive_yahoo_update_stops_when_nothing_to_fetch(tmp_path, monkeypatch, seed_consolidated, runner) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path)
+    _seed_cached_yahoo_responses(db_path, ["RELIANCE", "INFY", "20MICRONS", "INFYBEES"])
     monkeypatch.setenv("COLUMNS", "200")
     monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
 
-    result = runner.invoke(app, ["interactive"], input="2\nBSE\nzd_symbol\n0\nn\n6\n")
+    result = runner.invoke(app, ["interactive"], input="2\nBSE\nzd_symbol\n\ny\n6\n")
 
     message = " ".join(result.stdout.split())
 
@@ -831,6 +892,22 @@ def test_interactive_yahoo_update_stops_when_nothing_to_fetch(tmp_path, monkeypa
     assert "0 symbols to fetch from Yahoo Finance (BSE, key zd_symbol)." in message
     assert "Nothing to fetch; every symbol already has a cached response." in message
     assert "Start the update?" not in message
+    assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_yahoo_update_rejects_zero_limit(tmp_path, monkeypatch, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
+
+    result = runner.invoke(app, ["interactive"], input="2\nBSE\nzd_symbol\n0\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "Enter a positive number, or leave blank for all." in message
+    assert "symbols to fetch from Yahoo Finance" not in message
     assert result.stdout.count("Choose an option") == 2
 
 

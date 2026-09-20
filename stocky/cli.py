@@ -252,19 +252,24 @@ def _select_bhavcopy_paths() -> BhavcopyPaths | None:
             console.print(f"[red]Enter a number between 1 and {listed}.[/red]")
             return None
         pair = pairs[row_number - 1]
-        return BhavcopyPaths(bse=pair.bse, nse=pair.nse, zerodha=DEFAULT_ZERODHA_INSTRUMENTS)
+    else:
+        try:
+            trade_date = date.fromisoformat(selection)
+        except ValueError:
+            console.print("[red]Enter a row number or a date like 2026-09-19.[/red]")
+            return None
 
-    try:
-        trade_date = date.fromisoformat(selection)
-    except ValueError:
-        console.print("[red]Enter a row number or a date like 2026-09-19.[/red]")
-        return None
+        # Resolve against the discovered pairs rather than the canonical filenames, so every
+        # accepted spelling works and dates below the displayed rows stay reachable.
+        pair = next((candidate for candidate in pairs if candidate.trade_date == trade_date), None)
+        if pair is None:
+            console.print(
+                f"[red]No BSE/NSE bhavcopy pair for {trade_date} in {DEFAULT_BHAVCOPY_DIR}. "
+                "Pick a listed row or download that day's files.[/red]"
+            )
+            return None
 
-    return resolve_bhavcopy_paths(
-        trade_date=trade_date,
-        input_dir=DEFAULT_BHAVCOPY_DIR,
-        zerodha=DEFAULT_ZERODHA_INSTRUMENTS,
-    )
+    return BhavcopyPaths(bse=pair.bse, nse=pair.nse, zerodha=DEFAULT_ZERODHA_INSTRUMENTS)
 
 
 def _interactive_rebuild() -> None:
@@ -311,10 +316,15 @@ def _interactive_yahoo_update() -> None:
         return
 
     raw_limit = typer.prompt("Limit (blank = all)", default="", show_default=False).strip()
-    if raw_limit and not raw_limit.isdigit():
-        console.print("[red]Enter a whole number of symbols, or leave it blank for all.[/red]")
-        return
-    limit = int(raw_limit) if raw_limit else None
+    limit: int | None = None
+    if raw_limit:
+        try:
+            limit = int(raw_limit)
+        except ValueError:
+            limit = 0
+        if limit < 1:
+            console.print("[red]Enter a positive number, or leave blank for all.[/red]")
+            return
 
     missing_only = typer.confirm("Only fetch symbols with no cached response?", default=False)
 
@@ -333,7 +343,13 @@ def _interactive_yahoo_update() -> None:
 
     console.print(f"[cyan]{planned.processed} symbols to fetch from Yahoo Finance ({exchange}, key {key}).[/cyan]")
     if planned.processed == 0:
-        console.print("[green]Nothing to fetch; every symbol already has a cached response.[/green]")
+        # update_data raises when the key holds no symbols at all, so an empty plan means
+        # missing_only filtered out every symbol it found.
+        console.print(
+            "[green]Nothing to fetch; every symbol already has a cached response.[/green]"
+            if missing_only
+            else f"[green]No symbols found for key {key}.[/green]"
+        )
         return
 
     if not typer.confirm("Start the update? This may take a long time."):
