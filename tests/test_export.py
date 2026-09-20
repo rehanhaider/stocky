@@ -209,3 +209,49 @@ def test_cli_export_with_missing_database_keeps_stdout_empty(tmp_path) -> None:
     assert "Database not found" in result.stderr
     assert "Database not found" not in result.stdout
     assert result.stdout == ""
+
+
+def test_empty_columns_or_require_selection_raises_value_error(tmp_path) -> None:
+    db_path = _seeded_db(tmp_path)
+
+    with pytest.raises(ValueError) as columns_error:
+        read_consolidated(db_path, columns=[])
+    assert "--columns must name at least one column." in str(columns_error.value)
+
+    with pytest.raises(ValueError) as require_error:
+        read_consolidated(db_path, require=[])
+    assert "--require must name at least one column." in str(require_error.value)
+
+
+def test_cli_export_with_empty_columns_reports_on_stderr(tmp_path) -> None:
+    db_path = _seeded_db(tmp_path)
+
+    result = runner.invoke(app, ["export", "--format", "csv", "--columns", "", "--db-path", str(db_path)])
+
+    assert result.exit_code == 1
+    assert "--columns must name at least one column." in result.stderr
+    assert result.stdout == ""
+
+
+def test_cli_export_with_empty_require_reports_on_stderr(tmp_path) -> None:
+    db_path = _seeded_db(tmp_path)
+
+    result = runner.invoke(app, ["export", "--format", "csv", "--require", "", "--db-path", str(db_path)])
+
+    assert result.exit_code == 1
+    assert "--require must name at least one column." in result.stderr
+    assert result.stdout == ""
+
+
+def test_cli_export_summary_escapes_markup_in_output_path(tmp_path) -> None:
+    db_path = _seeded_db(tmp_path)
+    output = tmp_path / "out[/red].csv"
+
+    result = runner.invoke(app, ["export", "-o", str(output), "--db-path", str(db_path)])
+
+    assert result.exit_code == 0
+    assert result.exception is None
+    assert output.exists()
+    assert output.read_text(encoding="utf-8").split("\n")[0] == ",".join(EXPORT_COLUMNS)
+    assert "Wrote 4 rows" in result.stdout
+    assert "out[/red].csv" in result.stdout.replace("\n", "")

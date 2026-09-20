@@ -27,8 +27,10 @@ class ExportResult:
 
 
 def _resolve_columns(columns: Sequence[str] | None) -> tuple[str, ...]:
-    if not columns:
+    if columns is None:
         return EXPORT_COLUMNS
+    if len(columns) == 0:
+        raise ValueError("--columns must name at least one column.")
 
     resolved: list[str] = []
     for column in columns:
@@ -41,8 +43,10 @@ def _resolve_columns(columns: Sequence[str] | None) -> tuple[str, ...]:
 
 
 def _resolve_require(require: Sequence[str] | None) -> tuple[str, ...]:
-    if not require:
+    if require is None:
         return ()
+    if len(require) == 0:
+        raise ValueError("--require must name at least one column.")
 
     resolved: list[str] = []
     for column in require:

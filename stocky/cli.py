@@ -366,8 +366,8 @@ def export(
 
     if result.output is not None:
         console.print(
-            f"[green]Wrote {result.rows} rows ({', '.join(result.columns)}) "
-            f"to {result.output} as {result.format}.[/green]"
+            f"[green]Wrote {result.rows} rows ({escape(', '.join(result.columns))}) "
+            f"to {escape(str(result.output))} as {result.format}.[/green]"
         )
 
 
