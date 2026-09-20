@@ -146,10 +146,117 @@ def test_update_commits_every_25_reports_progress_and_writes_nse(tmp_path, monke
     assert result.written == 51
     assert result.skipped == 0
     assert commits == [True, True]
-    assert progress == [(50, 51, 50, 0)]
+    assert len(progress) == 51
+    assert progress[0] == (1, 51, 1, 0)
+    assert progress[-1] == (51, 51, 51, 0)
     assert "SYM00.NS" in read_available_yahoo_symbols(db_path)
     with real_connect(db_path) as con:
         assert con.execute("SELECT DISTINCT exchange FROM yahoo_responses").fetchall() == [("NSE",)]
+
+
+def test_update_rejects_empty_symbol_set(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path, [("INE001", "equity", "", None, None, None, None)])
+
+    with pytest.raises(ValueError) as excinfo:
+        YahooDataManager(db_path).update_data(dry_run=True)
+
+    message = str(excinfo.value)
+    assert "--key" in message
+    assert "stocky rebuild" in message
+
+
+def test_update_aborts_after_five_consecutive_failures(tmp_path, monkeypatch, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(
+        db_path,
+        [(f"INE{index:03d}", "equity", f"SYM{index:02d}", None, None, None, None) for index in range(8)],
+    )
+
+    attempts = []
+
+    class RaisingTicker:
+        def __init__(self, symbol: str) -> None:
+            attempts.append(symbol)
+
+        @property
+        def all_modules(self):
+            raise RuntimeError("offline failure")
+
+    fake_module = types.ModuleType("yahooquery")
+    fake_module.Ticker = RaisingTicker
+    monkeypatch.setitem(sys.modules, "yahooquery", fake_module)
+
+    progress = []
+    with pytest.raises(yahoo.YahooFetchError) as excinfo:
+        YahooDataManager(db_path).update_data(progress=lambda *args: progress.append(args))
+
+    message = str(excinfo.value)
+    assert len(attempts) == yahoo.CONSECUTIVE_FAILURE_LIMIT
+    assert len(progress) <= yahoo.CONSECUTIVE_FAILURE_LIMIT
+    assert "--missing-only" in message
+    assert "5 consecutive failures" in message
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+
+def test_update_persists_rows_written_before_aborting(tmp_path, monkeypatch, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    good = ["RELIANCE", "INFY", "TCS"]
+    broken = [f"BROKEN{index}" for index in range(5)]
+    seed_consolidated(
+        db_path,
+        [
+            (f"INE{index:03d}", "equity", symbol, None, None, None, None)
+            for index, symbol in enumerate([*good, *broken])
+        ],
+    )
+
+    class PartlyRaisingTicker(_FakeTicker):
+        @property
+        def all_modules(self):
+            if "BROKEN" in self.symbol:
+                raise RuntimeError("offline failure")
+            return {self.symbol: {"price": 100}}
+
+    fake_module = types.ModuleType("yahooquery")
+    fake_module.Ticker = PartlyRaisingTicker
+    monkeypatch.setitem(sys.modules, "yahooquery", fake_module)
+
+    with pytest.raises(yahoo.YahooFetchError):
+        YahooDataManager(db_path).update_data(exchange="BSE")
+
+    assert read_available_yahoo_symbols(db_path) == {f"{symbol}.BO" for symbol in good}
+
+
+def test_update_resets_failure_counter_after_a_success(tmp_path, monkeypatch, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(
+        db_path,
+        [(f"INE{index:03d}", "equity", f"SYM{index:02d}", None, None, None, None) for index in range(9)],
+    )
+
+    failures = {"remaining": 4}
+
+    class FlakyTicker:
+        def __init__(self, symbol: str) -> None:
+            self.symbol = symbol
+
+        @property
+        def all_modules(self):
+            if failures["remaining"] > 0:
+                failures["remaining"] -= 1
+                raise RuntimeError("temporary failure")
+            return {self.symbol: {"price": 100}}
+
+    fake_module = types.ModuleType("yahooquery")
+    fake_module.Ticker = FlakyTicker
+    monkeypatch.setitem(sys.modules, "yahooquery", fake_module)
+
+    result = YahooDataManager(db_path).update_data(exchange="BSE")
+
+    assert result.processed == 9
+    assert result.written == 5
+    assert result.skipped == 4
 
 
 def test_exchange_suffix_rejects_unknown_exchange() -> None:

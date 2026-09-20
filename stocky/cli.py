@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import shlex
@@ -11,6 +12,7 @@ from typing import Annotated
 import typer
 from rich.console import Console
 from rich.markup import escape
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, TaskID, TextColumn, TimeRemainingColumn
 from rich.table import Table
 
 from stocky import __version__
@@ -31,12 +33,14 @@ from stocky.database import (
 from stocky.export import export_consolidated
 from stocky.pipeline import RebuildResult, rebuild_database
 from stocky.sources import resolve_bhavcopy_paths
-from stocky.yahoo import YahooDataManager
+from stocky.yahoo import ProgressCallback, YahooDataManager
 
 console = Console()
 error_console = Console(stderr=True)
 app = typer.Typer(help="Consolidate Indian market instrument symbols.", no_args_is_help=False)
 yahoo_app = typer.Typer(help="Manage Yahoo Finance cache data.")
+
+PLAIN_PROGRESS_EVERY = 50
 
 
 def _emit_json(payload: object) -> None:
@@ -528,26 +532,65 @@ def yahoo_update(
         bool,
         typer.Option("--missing-only", help="Only fetch symbols that have no cached response yet."),
     ] = False,
-    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Print the result as JSON on stdout and progress events as JSON lines on stderr."),
+    ] = False,
 ) -> None:
     """Update Yahoo Finance responses in SQLite."""
+    bar: Progress | None = None
+    task_id: TaskID | None = None
 
-    def print_progress(index: int, total: int, written: int, skipped: int) -> None:
-        (error_console if json_output else console).print(
-            f"[dim]{index}/{total} processed; {written} written; {skipped} skipped[/dim]"
+    def json_progress(index: int, total: int, written: int, skipped: int) -> None:
+        sys.stderr.write(
+            json.dumps(
+                {"event": "progress", "processed": index, "total": total, "written": written, "skipped": skipped}
+            )
+            + "\n"
         )
+        sys.stderr.flush()
+
+    def bar_progress(index: int, total: int, written: int, skipped: int) -> None:
+        nonlocal task_id
+        if bar is None:
+            return
+        if task_id is None:
+            task_id = bar.add_task(
+                f"Fetching {exchange}", total=total, completed=index, written=written, skipped=skipped
+            )
+        bar.update(task_id, completed=index, written=written, skipped=skipped)
+
+    def plain_progress(index: int, total: int, written: int, skipped: int) -> None:
+        if index % PLAIN_PROGRESS_EVERY == 0 or index == total:
+            error_console.print(f"{index}/{total} processed; {written} written; {skipped} skipped")
+
+    if json_output:
+        print_progress: ProgressCallback = json_progress
+    elif error_console.is_terminal:
+        bar = Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TextColumn("{task.fields[written]} written, {task.fields[skipped]} skipped"),
+            TimeRemainingColumn(),
+            console=error_console,
+        )
+        print_progress = bar_progress
+    else:
+        print_progress = plain_progress
 
     try:
-        result = YahooDataManager(db_path).update_data(
-            key=key,
-            exchange=exchange,
-            dry_run=dry_run,
-            limit=limit,
-            missing_only=missing_only,
-            progress=print_progress,
-        )
+        with bar if bar is not None else contextlib.nullcontext():
+            result = YahooDataManager(db_path).update_data(
+                key=key,
+                exchange=exchange,
+                dry_run=dry_run,
+                limit=limit,
+                missing_only=missing_only,
+                progress=print_progress,
+            )
     except Exception as exc:
-        (error_console if json_output else console).print(f"[red]{exc}[/red]")
+        error_console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
 
     if json_output:

@@ -305,8 +305,9 @@ def test_fetch_consolidated_symbols_limit_and_failures(tmp_path, seed_consolidat
 
     with pytest.raises(ValueError, match="Unsupported symbol key"):
         fetch_consolidated_symbols(db_path, key="bad_key")
-    with pytest.raises(FileNotFoundError, match="Database not found"):
+    with pytest.raises(FileNotFoundError, match="Database not found") as missing_db:
         fetch_consolidated_symbols(tmp_path / "missing.db")
+    assert "Run 'stocky rebuild' first." in str(missing_db.value)
 
     yahoo_only = tmp_path / "yahoo-only.db"
     initialize_database(yahoo_only)

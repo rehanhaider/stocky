@@ -458,11 +458,12 @@ def test_yahoo_update_passes_options_and_prints_progress(tmp_path, monkeypatch, 
         "progress": None,
     }
     assert callable(calls[1][1]["progress"])
-    assert "50/60 processed; 48 written; 2 skipped" in result.stdout
+    assert "50/60 processed; 48 written; 2 skipped" in result.stderr
+    assert "50/60 processed" not in result.stdout
     assert "Processed 60; wrote 58; skipped 2; dry_run=False." in result.stdout
 
 
-def test_yahoo_update_json_prints_result_without_progress(tmp_path, monkeypatch, runner) -> None:
+def test_yahoo_update_json_emits_progress_events_on_stderr(tmp_path, monkeypatch, runner) -> None:
     db_path = tmp_path / "stocky.db"
 
     class FakeManager:
@@ -470,6 +471,7 @@ def test_yahoo_update_json_prints_result_without_progress(tmp_path, monkeypatch,
             assert selected_db_path == db_path
 
         def update_data(self, **options):
+            options["progress"](1, 2, 1, 0)
             options["progress"](2, 2, 1, 1)
             return YahooUpdateResult(processed=2, written=1, skipped=1, dry_run=False)
 
@@ -477,10 +479,25 @@ def test_yahoo_update_json_prints_result_without_progress(tmp_path, monkeypatch,
 
     result = runner.invoke(app, ["yahoo", "update", "--db-path", str(db_path), "--json"])
 
-    payload = json.loads(result.stdout)
     assert result.exit_code == 0
-    assert payload == {"processed": 2, "written": 1, "skipped": 1, "dry_run": False}
-    assert "2/2 processed; 1 written; 1 skipped" not in result.stdout
+    assert json.loads(result.stdout) == {"processed": 2, "written": 1, "skipped": 1, "dry_run": False}
+    events = [json.loads(line) for line in result.stderr.splitlines() if line.strip()]
+    assert events == [
+        {"event": "progress", "processed": 1, "total": 2, "written": 1, "skipped": 0},
+        {"event": "progress", "processed": 2, "total": 2, "written": 1, "skipped": 1},
+    ]
+    assert "2/2 processed" not in result.stdout
+
+
+def test_yahoo_update_reports_missing_database(tmp_path, runner) -> None:
+    result = runner.invoke(app, ["yahoo", "update", "--db-path", str(tmp_path / "missing.db")])
+
+    message = " ".join(result.stderr.split())
+
+    assert result.exit_code == 1
+    assert "Database not found" in message
+    assert "Run 'stocky rebuild' first." in message
+    assert result.stdout == ""
 
 
 def test_yahoo_import_cache_skips_bad_file(tmp_path, runner) -> None:

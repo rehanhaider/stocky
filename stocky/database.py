@@ -128,7 +128,7 @@ def fetch_consolidated_symbols(
         raise ValueError(f"Unsupported symbol key: {key}")
 
     if not db_path.exists():
-        raise FileNotFoundError(f"Database not found: {db_path}")
+        raise FileNotFoundError(f"Database not found: {db_path}. Run 'stocky rebuild' first.")
 
     with connect(db_path) as con:
         if not table_exists(con, CONSOLIDATED_TABLE):

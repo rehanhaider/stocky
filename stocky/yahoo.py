@@ -15,9 +15,13 @@ from stocky.database import (
 )
 
 COMMIT_EVERY = 25
-PROGRESS_EVERY = 50
+CONSECUTIVE_FAILURE_LIMIT = 5
 
 ProgressCallback = Callable[[int, int, int, int], None]
+
+
+class YahooFetchError(RuntimeError):
+    """Raised when Yahoo Finance keeps failing and the run cannot continue."""
 
 
 @dataclass(frozen=True)
@@ -54,6 +58,12 @@ class YahooDataManager:
         suffix = exchange_suffix(exchange)
         symbols = fetch_consolidated_symbols(self.db_path, key=key, limit=limit)
 
+        if not symbols:
+            raise ValueError(
+                f"No symbols found for --key {key} in {self.db_path}. "
+                "Try another --key (zd_symbol, yq_symbol, nse_symbol, bse_sc_code) or run 'stocky rebuild' first."
+            )
+
         if missing_only:
             available = read_available_yahoo_symbols(self.db_path)
             symbols = [symbol for symbol in symbols if f"{symbol}.{suffix}" not in available]
@@ -66,33 +76,48 @@ class YahooDataManager:
         initialize_database(self.db_path)
         written = 0
         skipped = 0
+        consecutive_failures = 0
 
+        # The sqlite3 connection context manager commits on a clean exit, so the
+        # writes after the last COMMIT_EVERY boundary are persisted there. The
+        # abort path commits explicitly because that exit rolls back instead.
         with connect(self.db_path) as con:
             for index, symbol in enumerate(symbols, start=1):
                 yahoo_symbol = f"{symbol}.{suffix}"
                 try:
                     data = yq.Ticker(yahoo_symbol).all_modules
                     payload = data.get(yahoo_symbol)
-                except Exception:
-                    data = None
-                    payload = None
-
-                if payload is None or payload == f"Quote not found for ticker symbol: {yahoo_symbol}":
+                except Exception as exc:
+                    consecutive_failures += 1
                     skipped += 1
-                else:
-                    upsert_yahoo_response(
-                        con,
-                        yahoo_symbol=yahoo_symbol,
-                        symbol=symbol,
-                        exchange=exchange.upper(),
-                        response_json=encode_response_json(data),
-                        source="yahooquery",
-                    )
-                    written += 1
-                    if written % COMMIT_EVERY == 0:
+                    if consecutive_failures >= CONSECUTIVE_FAILURE_LIMIT:
                         con.commit()
+                        raise YahooFetchError(
+                            f"Yahoo Finance request failed for {yahoo_symbol} "
+                            f"({consecutive_failures} consecutive failures; last error: {exc!r}). "
+                            "Check the network connection, or wait if Yahoo is rate limiting, "
+                            "then re-run with --missing-only to resume from the symbols already saved."
+                        ) from exc
+                else:
+                    if payload is not None:
+                        consecutive_failures = 0
 
-                if progress is not None and index % PROGRESS_EVERY == 0:
+                    if payload is None or payload == f"Quote not found for ticker symbol: {yahoo_symbol}":
+                        skipped += 1
+                    else:
+                        upsert_yahoo_response(
+                            con,
+                            yahoo_symbol=yahoo_symbol,
+                            symbol=symbol,
+                            exchange=exchange.upper(),
+                            response_json=encode_response_json(data),
+                            source="yahooquery",
+                        )
+                        written += 1
+                        if written % COMMIT_EVERY == 0:
+                            con.commit()
+
+                if progress is not None:
                     progress(index, len(symbols), written, skipped)
 
         return YahooUpdateResult(processed=len(symbols), written=written, skipped=skipped, dry_run=False)
