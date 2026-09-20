@@ -649,7 +649,7 @@ def export(
     ] = None,
     format: Annotated[
         str | None,
-        typer.Option("--format", help="Output format: csv or json. Inferred from --output when omitted."),
+        typer.Option("--format", help="Output format: csv, json, or parquet. Inferred from --output when omitted."),
     ] = None,
     columns: Annotated[
         str | None,
