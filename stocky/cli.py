@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import dataclasses
+import json
 import shlex
+import sys
 from datetime import date
 from pathlib import Path
 from typing import Annotated
@@ -34,6 +37,13 @@ console = Console()
 error_console = Console(stderr=True)
 app = typer.Typer(help="Consolidate Indian market instrument symbols.", no_args_is_help=False)
 yahoo_app = typer.Typer(help="Manage Yahoo Finance cache data.")
+
+
+def _emit_json(payload: object) -> None:
+    sys.stdout.write(
+        json.dumps(dataclasses.asdict(payload) if dataclasses.is_dataclass(payload) else payload, default=str, indent=2)
+        + "\n"
+    )
 
 
 def _parse_date(value: str | None) -> date | None:
@@ -300,6 +310,7 @@ def rebuild(
         bool,
         typer.Option("--no-backup", help="Do not back up an existing DB before writing."),
     ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
 ) -> None:
     """Rebuild the consolidated instruments table."""
     try:
@@ -315,24 +326,31 @@ def rebuild(
             no_backup=no_backup,
         )
     except Exception as exc:
-        console.print(f"[red]{exc}[/red]")
+        (error_console if json_output else console).print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
-    _print_rebuild_result(result)
+    if json_output:
+        _emit_json(result)
+    else:
+        _print_rebuild_result(result)
 
 
 @app.command()
 def status(
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
 ) -> None:
     """Show database statistics, coverage, and Yahoo cache freshness."""
     try:
         result = read_status(db_path)
     except Exception as exc:
-        console.print(f"[red]{exc}[/red]")
+        (error_console if json_output else console).print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
-    _print_status(result)
+    if json_output:
+        _emit_json(result)
+    else:
+        _print_status(result)
 
 
 @app.command()
@@ -343,15 +361,19 @@ def query(
         bool, typer.Option("--exact", help="Match symbols/ISIN/code exactly instead of substring search.")
     ] = False,
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
 ) -> None:
     """Look up an instrument across all symbol namespaces."""
     try:
         result = search_instruments(term, db_path, limit=limit, exact=exact)
     except Exception as exc:
-        console.print(f"[red]{exc}[/red]")
+        (error_console if json_output else console).print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
-    _print_search_result(term, result)
+    if json_output:
+        _emit_json({"term": term, **dataclasses.asdict(result)})
+    else:
+        _print_search_result(term, result)
 
 
 @app.command()
@@ -361,64 +383,78 @@ def lookup(
         int, typer.Option("--limit", help="Maximum number of candidates to display when the identifier is ambiguous.")
     ] = 20,
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
 ) -> None:
     """Show every known identifier for one exact match."""
     try:
         result = search_instruments(identifier, db_path, exact=True, limit=limit)
     except Exception as exc:
-        console.print(f"[red]{exc}[/red]")
+        (error_console if json_output else console).print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
     if result.total == 0:
-        console.print(
+        (error_console if json_output else console).print(
             f"[red]No instrument matches '{identifier}' exactly.\n"
             f"Try 'stocky query {shlex.quote(identifier)}' for a fuzzy search.[/red]"
         )
         raise typer.Exit(1)
     if result.total > 1:
-        _print_search_result(identifier, result)
-        console.print("[dim]Multiple instruments match; refine the identifier.[/dim]")
+        if json_output:
+            _emit_json({"identifier": identifier, **dataclasses.asdict(result)})
+            error_console.print("[dim]Multiple instruments match; refine the identifier.[/dim]")
+        else:
+            _print_search_result(identifier, result)
+            console.print("[dim]Multiple instruments match; refine the identifier.[/dim]")
         return
 
-    _print_equivalents(result.matches[0], identifier)
+    if json_output:
+        _emit_json(result.matches[0])
+    else:
+        _print_equivalents(result.matches[0], identifier)
 
 
 @app.command()
 def explore(
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
     limit: Annotated[int, typer.Option("--limit", help="Maximum number of matches to display.")] = 20,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
 ) -> None:
     """Search instruments and inspect their equivalent identifiers."""
     if limit < 1:
-        console.print("[red]Limit must be at least 1.[/red]")
+        (error_console if json_output else console).print("[red]Limit must be at least 1.[/red]")
         raise typer.Exit(1)
 
     if not db_path.exists():
-        console.print(f"[red]Database not found: {db_path}. Run 'stocky rebuild' first.[/red]")
+        (error_console if json_output else console).print(
+            f"[red]Database not found: {db_path}. Run 'stocky rebuild' first.[/red]"
+        )
         raise typer.Exit(1)
 
     while True:
-        term = typer.prompt("Search (blank to quit)", default="", show_default=False).strip()
+        term = typer.prompt("Search (blank to quit)", default="", show_default=False, err=json_output).strip()
         if not term:
-            console.print("[dim]Bye.[/dim]")
+            (error_console if json_output else console).print("[dim]Bye.[/dim]")
             return
 
         try:
             result = search_instruments(term, db_path, limit=limit)
         except ValueError as exc:
-            console.print(f"[red]{exc}[/red]")
+            (error_console if json_output else console).print(f"[red]{exc}[/red]")
             continue
         except Exception as exc:
-            console.print(f"[red]{exc}[/red]")
+            (error_console if json_output else console).print(f"[red]{exc}[/red]")
             raise typer.Exit(1) from exc
 
-        _print_search_result(term, result, numbered=True)
+        if json_output:
+            _emit_json({"term": term, **dataclasses.asdict(result)})
+        else:
+            _print_search_result(term, result, numbered=True)
         if not result.matches:
             continue
 
         while True:
             selection = typer.prompt(
-                "Row number for equivalents (blank to search again)", default="", show_default=False
+                "Row number for equivalents (blank to search again)", default="", show_default=False, err=json_output
             ).strip()
             if not selection:
                 break
@@ -427,10 +463,15 @@ def explore(
             except ValueError:
                 row_number = 0
             if not 1 <= row_number <= len(result.matches):
-                console.print(f"[yellow]Enter a number between 1 and {len(result.matches)}.[/yellow]")
+                (error_console if json_output else console).print(
+                    f"[yellow]Enter a number between 1 and {len(result.matches)}.[/yellow]"
+                )
                 continue
 
-            _print_equivalents(result.matches[row_number - 1])
+            if json_output:
+                _emit_json(result.matches[row_number - 1])
+            else:
+                _print_equivalents(result.matches[row_number - 1])
             break
 
 
@@ -487,11 +528,14 @@ def yahoo_update(
         bool,
         typer.Option("--missing-only", help="Only fetch symbols that have no cached response yet."),
     ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
 ) -> None:
     """Update Yahoo Finance responses in SQLite."""
 
     def print_progress(index: int, total: int, written: int, skipped: int) -> None:
-        console.print(f"[dim]{index}/{total} processed; {written} written; {skipped} skipped[/dim]")
+        (error_console if json_output else console).print(
+            f"[dim]{index}/{total} processed; {written} written; {skipped} skipped[/dim]"
+        )
 
     try:
         result = YahooDataManager(db_path).update_data(
@@ -503,13 +547,16 @@ def yahoo_update(
             progress=print_progress,
         )
     except Exception as exc:
-        console.print(f"[red]{exc}[/red]")
+        (error_console if json_output else console).print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
-    console.print(
-        f"[green]Processed {result.processed}; wrote {result.written}; skipped {result.skipped}; "
-        f"dry_run={result.dry_run}.[/green]"
-    )
+    if json_output:
+        _emit_json(result)
+    else:
+        console.print(
+            f"[green]Processed {result.processed}; wrote {result.written}; skipped {result.skipped}; "
+            f"dry_run={result.dry_run}.[/green]"
+        )
 
 
 @yahoo_app.command("import-cache")
@@ -519,10 +566,14 @@ def yahoo_import_cache(
         typer.Option("--cache-dir", help="Directory of legacy JSON files."),
     ] = DEFAULT_YAHOO_JSON_CACHE_DIR,
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
 ) -> None:
     """Import legacy Yahoo JSON files into SQLite."""
     result = import_yahoo_json_cache(cache_dir, db_path)
-    console.print(f"[green]Imported {result.imported}; skipped {result.skipped}.[/green]")
+    if json_output:
+        _emit_json(result)
+    else:
+        console.print(f"[green]Imported {result.imported}; skipped {result.skipped}.[/green]")
 
 
 app.add_typer(yahoo_app, name="yahoo")

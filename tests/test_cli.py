@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from datetime import date
 
@@ -35,6 +36,19 @@ def test_rebuild_dry_run_prints_summary_without_creating_database(tmp_path, mark
     assert "Dry run" in result.stdout
     assert "True" in result.stdout
     assert not db_path.exists()
+
+
+def test_rebuild_json_prints_result(tmp_path, market_csv_builder, runner) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "fresh.db"
+
+    result = runner.invoke(app, ["rebuild", *_rebuild_path_args(paths, db_path), "--dry-run", "--json"])
+
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 0
+    assert payload["rows"] == 1
+    assert payload["db_path"] == str(db_path)
+    assert payload["dry_run"] is True
 
 
 def test_rebuild_with_explicit_paths_writes_database_without_backup(
@@ -157,6 +171,19 @@ def test_status_prints_seeded_database(tmp_path, seed_consolidated, runner) -> N
     assert "None" in result.stdout
 
 
+def test_status_json_prints_database_status(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = runner.invoke(app, ["status", "--db-path", str(db_path), "--json"])
+
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 0
+    assert payload["db_path"] == str(db_path)
+    assert payload["consolidated_rows"] == 4
+    assert payload["coverage"][0] == {"column": "isin", "populated": 4}
+
+
 def test_status_reports_missing_database(tmp_path, runner) -> None:
     result = runner.invoke(app, ["status", "--db-path", str(tmp_path / "missing.db")])
 
@@ -186,6 +213,19 @@ def test_query_prints_hit_and_truncation(tmp_path, seed_consolidated, runner) ->
     assert "Matches for 'INFY'" in result.stdout
     assert "INE009A01021" in result.stdout
     assert "Showing 1 of 2 matches" in result.stdout
+
+
+def test_query_json_prints_term_and_search_result(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = runner.invoke(app, ["query", "INFY", "--limit", "1", "--db-path", str(db_path), "--json"])
+
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 0
+    assert payload["term"] == "INFY"
+    assert payload["total"] == 2
+    assert payload["matches"][0]["isin"] == "INE009A01021"
 
 
 def test_query_prints_no_hit(tmp_path, seed_consolidated, runner) -> None:
@@ -220,6 +260,19 @@ def test_lookup_prints_single_match_equivalents(tmp_path, seed_consolidated, run
     assert "Equivalents for '500325'" in result.stdout
     for value in ("INE002A01018", "equity", "RELIANCE", "500325", "RELIANCE INDUSTRIES"):
         assert value in result.stdout
+
+
+def test_lookup_json_prints_single_match(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = runner.invoke(app, ["lookup", "500325", "--db-path", str(db_path), "--json"])
+
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 0
+    assert payload["isin"] == "INE002A01018"
+    assert payload["zd_symbol"] == "RELIANCE"
+    assert payload["bse_sc_code"] == "500325"
 
 
 def test_lookup_reports_no_exact_match(tmp_path, seed_consolidated, runner) -> None:
@@ -296,6 +349,31 @@ def test_explore_searches_selects_and_reprompts(tmp_path, seed_consolidated, run
     assert "No direct matches; showing closest names." in result.stdout
     assert "RELIANCE" in result.stdout
     assert "Bye." in result.stdout
+
+
+def test_explore_json_prints_search_and_selection_documents(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = runner.invoke(
+        app,
+        ["explore", "--db-path", str(db_path), "--json"],
+        input="INFY\n1\n\n",
+    )
+
+    # CliRunner echoes piped input to stdout; a real terminal echoes it itself, so skip to each document start.
+    decoder = json.JSONDecoder()
+    documents = []
+    position = result.stdout.find("{")
+    while position != -1:
+        document, position = decoder.raw_decode(result.stdout, position)
+        documents.append(document)
+        position = result.stdout.find("{", position)
+
+    assert result.exit_code == 0
+    assert documents[0]["term"] == "INFY"
+    assert documents[0]["total"] == 2
+    assert documents[1]["isin"] == "INE009A01021"
 
 
 def test_explore_missing_database_exits(tmp_path, runner) -> None:
@@ -384,6 +462,27 @@ def test_yahoo_update_passes_options_and_prints_progress(tmp_path, monkeypatch, 
     assert "Processed 60; wrote 58; skipped 2; dry_run=False." in result.stdout
 
 
+def test_yahoo_update_json_prints_result_without_progress(tmp_path, monkeypatch, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+
+    class FakeManager:
+        def __init__(self, selected_db_path) -> None:
+            assert selected_db_path == db_path
+
+        def update_data(self, **options):
+            options["progress"](2, 2, 1, 1)
+            return YahooUpdateResult(processed=2, written=1, skipped=1, dry_run=False)
+
+    monkeypatch.setattr(cli, "YahooDataManager", FakeManager)
+
+    result = runner.invoke(app, ["yahoo", "update", "--db-path", str(db_path), "--json"])
+
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 0
+    assert payload == {"processed": 2, "written": 1, "skipped": 1, "dry_run": False}
+    assert "2/2 processed; 1 written; 1 skipped" not in result.stdout
+
+
 def test_yahoo_import_cache_skips_bad_file(tmp_path, runner) -> None:
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
@@ -404,6 +503,30 @@ def test_yahoo_import_cache_skips_bad_file(tmp_path, runner) -> None:
 
     assert result.exit_code == 0
     assert "Imported 1; skipped 1." in result.stdout
+
+
+def test_yahoo_import_cache_json_prints_result(tmp_path, runner) -> None:
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    (cache_dir / "GOOD.NS.json").write_text('{"price": 1}', encoding="utf-8")
+    (cache_dir / "BAD.NS.json").write_text("not json", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "yahoo",
+            "import-cache",
+            "--cache-dir",
+            str(cache_dir),
+            "--db-path",
+            str(tmp_path / "stocky.db"),
+            "--json",
+        ],
+    )
+
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 0
+    assert payload == {"imported": 1, "skipped": 1}
 
 
 def test_interactive_searches_once_then_quits(tmp_path, monkeypatch, seed_consolidated, runner) -> None:
