@@ -4,10 +4,12 @@ from pathlib import Path
 import pytest
 
 from stocky.sources import (
+    BhavcopyPair,
     BhavcopyPaths,
     bhavcopy_paths_for_date,
     bse_filename_for_date,
     discover_latest_bhavcopy_pair,
+    list_bhavcopy_pairs,
     nse_filename_for_date,
     parse_bse_bhavcopy_date,
     parse_nse_bhavcopy_date,
@@ -46,6 +48,35 @@ def test_discover_latest_bhavcopy_pair(tmp_path) -> None:
 
     assert paths.bse.name == "BSE-EQ_ISINCODE_300921.CSV"
     assert paths.nse.name == "NSE-cm30SEP2021bhav.csv"
+
+
+def test_list_bhavcopy_pairs_returns_complete_pairs_newest_first(tmp_path) -> None:
+    (tmp_path / "BSE-EQ_ISINCODE_030521.CSV").write_text("", encoding="utf-8")
+    (tmp_path / "NSE-cm03MAY2021bhav.csv").write_text("", encoding="utf-8")
+    (tmp_path / "BhavCopy_BSE_CM_0_0_0_20260717_F_0000.CSV").write_text("", encoding="utf-8")
+    (tmp_path / "BhavCopy_NSE_CM_0_0_0_20260717_F_0000.csv.zip").write_text("", encoding="utf-8")
+    # A BSE file without its NSE counterpart is not a usable pair.
+    (tmp_path / "BSE-EQ_ISINCODE_300921.CSV").write_text("", encoding="utf-8")
+    (tmp_path / "instruments.csv").write_text("", encoding="utf-8")
+
+    pairs = list_bhavcopy_pairs(tmp_path)
+
+    assert pairs == [
+        BhavcopyPair(
+            trade_date=date(2026, 7, 17),
+            bse=tmp_path / "BhavCopy_BSE_CM_0_0_0_20260717_F_0000.CSV",
+            nse=tmp_path / "BhavCopy_NSE_CM_0_0_0_20260717_F_0000.csv.zip",
+        ),
+        BhavcopyPair(
+            trade_date=date(2021, 5, 3),
+            bse=tmp_path / "BSE-EQ_ISINCODE_030521.CSV",
+            nse=tmp_path / "NSE-cm03MAY2021bhav.csv",
+        ),
+    ]
+
+
+def test_list_bhavcopy_pairs_returns_empty_list_for_missing_directory(tmp_path) -> None:
+    assert list_bhavcopy_pairs(tmp_path / "absent") == []
 
 
 def test_discover_latest_bhavcopy_pair_rejects_empty_directory(tmp_path) -> None:

@@ -49,6 +49,13 @@ class BhavcopyPaths:
     zerodha: Path
 
 
+@dataclass(frozen=True)
+class BhavcopyPair:
+    trade_date: date
+    bse: Path
+    nse: Path
+
+
 def bse_filename_for_date(trade_date: date) -> str:
     if trade_date >= UDIFF_START_DATE:
         return f"BhavCopy_BSE_CM_0_0_0_{trade_date:%Y%m%d}_F_0000.CSV"
@@ -112,10 +119,8 @@ def parse_nse_bhavcopy_date(path: Path) -> date | None:
     return None
 
 
-def discover_latest_bhavcopy_pair(
-    input_dir: Path = DEFAULT_BHAVCOPY_DIR,
-    zerodha: Path = DEFAULT_ZERODHA_INSTRUMENTS,
-) -> BhavcopyPaths:
+def list_bhavcopy_pairs(input_dir: Path = DEFAULT_BHAVCOPY_DIR) -> list[BhavcopyPair]:
+    """List every trade date with both a BSE and an NSE bhavcopy, newest first."""
     bse_files: dict[date, Path] = {}
     nse_files: dict[date, Path] = {}
 
@@ -133,11 +138,22 @@ def discover_latest_bhavcopy_pair(
             nse_files[nse_date] = candidate
 
     available_dates = sorted(set(bse_files).intersection(nse_files), reverse=True)
-    if not available_dates:
+    return [
+        BhavcopyPair(trade_date=trade_date, bse=bse_files[trade_date], nse=nse_files[trade_date])
+        for trade_date in available_dates
+    ]
+
+
+def discover_latest_bhavcopy_pair(
+    input_dir: Path = DEFAULT_BHAVCOPY_DIR,
+    zerodha: Path = DEFAULT_ZERODHA_INSTRUMENTS,
+) -> BhavcopyPaths:
+    pairs = list_bhavcopy_pairs(input_dir)
+    if not pairs:
         raise FileNotFoundError(f"No matching BSE/NSE bhavcopy pair found in {input_dir}")
 
-    latest = available_dates[0]
-    return BhavcopyPaths(bse=bse_files[latest], nse=nse_files[latest], zerodha=zerodha)
+    latest = pairs[0]
+    return BhavcopyPaths(bse=latest.bse, nse=latest.nse, zerodha=zerodha)
 
 
 def resolve_bhavcopy_paths(
