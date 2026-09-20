@@ -193,6 +193,56 @@ def test_search_exact_flag_disables_substring_matching(tmp_path, seed_consolidat
     assert search_instruments("INF", db_path, exact=True).total == 0
 
 
+def test_search_falls_back_to_fuzzy_name_matching(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = search_instruments("RELIANC INDUSTRES", db_path)
+
+    assert result.total == 1
+    assert result.matches[0].zd_symbol == "RELIANCE"
+    assert result.fuzzy is True
+
+
+def test_search_fuzzy_fallback_ignores_nonsense(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = search_instruments("ZXQWVUTSRQP", db_path)
+
+    assert result.total == 0
+    assert result.matches == []
+    assert result.fuzzy is False
+
+
+def test_search_exact_flag_never_uses_fuzzy_fallback(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = search_instruments("RELIANC INDUSTRES", db_path, exact=True)
+
+    assert result.total == 0
+    assert result.fuzzy is False
+
+
+def test_search_fuzzy_orders_by_ratio_then_isin_and_applies_limit(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(
+        db_path,
+        [
+            ("INE003", "equity", "THREE", None, None, None, "ALPHA INDUSTRIAL"),
+            ("INE002", "equity", "TWO", None, None, None, "ALPHA INDUSTRIES"),
+            ("INE001", "equity", "ONE", None, None, None, "ALPHA INDUSTRIES"),
+        ],
+    )
+
+    result = search_instruments("ALPHA INDUSTRES", db_path, limit=2)
+
+    assert result.total == 3
+    assert [match.isin for match in result.matches] == ["INE001", "INE002"]
+    assert result.fuzzy is True
+
+
 def test_search_limit_truncates_but_reports_total(tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path)
@@ -208,7 +258,7 @@ def test_search_escapes_like_wildcards(tmp_path, seed_consolidated) -> None:
     seed_consolidated(db_path)
 
     assert search_instruments("%", db_path).total == 0
-    assert search_instruments("INF_", db_path).total == 0
+    assert search_instruments("_", db_path).total == 0
 
 
 def test_search_rejects_blank_term_and_missing_table(tmp_path, seed_consolidated) -> None:
