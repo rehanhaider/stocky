@@ -164,6 +164,21 @@ def test_rebuild_database_dry_run_does_not_create_database(tmp_path, market_csv_
     assert not db_path.exists()
 
 
+def test_rebuild_database_dry_run_leaves_existing_database_untouched(
+    tmp_path, market_csv_builder, seed_consolidated
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "legacy.db"
+    seed_consolidated(db_path)
+    before = db_path.read_bytes()
+
+    result = rebuild_database(paths, db_path=db_path, backup_dir=tmp_path / "backups", dry_run=True)
+
+    assert result.dry_run is True
+    assert db_path.read_bytes() == before
+    assert not (tmp_path / "backups").exists()
+
+
 def test_rebuild_database_replaces_consolidated_table_without_backup(
     tmp_path, market_csv_builder, seed_consolidated
 ) -> None:

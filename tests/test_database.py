@@ -53,6 +53,17 @@ def test_import_yahoo_json_cache_to_sqlite(tmp_path) -> None:
     assert decode_response_json(stored_payload) == {"RELIANCE.NS": {"price": 1}}
 
 
+def test_read_available_yahoo_symbols_does_not_create_missing_table(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "legacy.db"
+    seed_consolidated(db_path)
+
+    assert read_available_yahoo_symbols(db_path) == set()
+
+    with sqlite3.connect(db_path) as con:
+        names = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert names == {"consolidated"}
+
+
 def test_import_yahoo_json_cache_skips_bad_file(tmp_path) -> None:
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
