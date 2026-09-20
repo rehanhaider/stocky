@@ -6,6 +6,7 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from stocky import __version__
@@ -22,11 +23,13 @@ from stocky.database import (
     read_status,
     search_instruments,
 )
+from stocky.export import export_consolidated
 from stocky.pipeline import RebuildResult, rebuild_database
 from stocky.sources import resolve_bhavcopy_paths
 from stocky.yahoo import YahooDataManager
 
 console = Console()
+error_console = Console(stderr=True)
 app = typer.Typer(help="Consolidate Indian market instrument symbols.", no_args_is_help=False)
 yahoo_app = typer.Typer(help="Manage Yahoo Finance cache data.")
 
@@ -48,6 +51,12 @@ _COLUMN_LABELS = {
     "bse_sc_code": "BSE scrip code",
     "bse_sc_name": "BSE scrip name",
 }
+
+
+def _split_columns(value: str | None) -> list[str] | None:
+    if value is None:
+        return None
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def _format_size(num_bytes: int) -> str:
@@ -320,6 +329,46 @@ def query(
         raise typer.Exit(1) from exc
 
     _print_search_result(term, result)
+
+
+@app.command()
+def export(
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="File to write. Omit to write to stdout."),
+    ] = None,
+    format: Annotated[
+        str | None,
+        typer.Option("--format", help="Output format: csv or json. Inferred from --output when omitted."),
+    ] = None,
+    columns: Annotated[
+        str | None,
+        typer.Option("--columns", help="Comma-separated columns to export, in the order given."),
+    ] = None,
+    require: Annotated[
+        str | None,
+        typer.Option("--require", help="Comma-separated columns that must be populated for a row to be exported."),
+    ] = None,
+    db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Export the consolidated table to CSV or JSON."""
+    try:
+        result = export_consolidated(
+            db_path,
+            output=output,
+            format=format,
+            columns=_split_columns(columns),
+            require=_split_columns(require),
+        )
+    except Exception as exc:
+        error_console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    if result.output is not None:
+        console.print(
+            f"[green]Wrote {result.rows} rows ({escape(', '.join(result.columns))}) "
+            f"to {escape(str(result.output))} as {result.format}.[/green]"
+        )
 
 
 @yahoo_app.command("update")

@@ -100,6 +100,28 @@ uv run stocky query "hdfc bank"
 uv run stocky query 500325 --exact
 ```
 
+### Exporting the consolidated table
+
+Export every row and column to CSV:
+
+```bash
+uv run stocky export -o data/output/consolidated.csv
+```
+
+Export a Zerodha plus Yahoo universe to JSON, keeping only rows where both symbols are populated:
+
+```bash
+uv run stocky export -o data/output/universe.json \
+  --columns isin,zd_symbol,yq_symbol \
+  --require zd_symbol,yq_symbol
+```
+
+Stream CSV to stdout so it can be piped into another command:
+
+```bash
+uv run stocky export --format csv
+```
+
 For compatibility, `python app.py` still launches the CLI after dependencies are installed.
 
 ## UI Options
