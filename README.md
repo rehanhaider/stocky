@@ -92,12 +92,24 @@ Show database statistics, per-column coverage, and Yahoo cache freshness:
 uv run stocky status
 ```
 
-Look up an instrument by symbol, ISIN, BSE scrip code, or name fragment:
+Look up an instrument by symbol, ISIN, BSE scrip code, or name fragment. When nothing matches directly, `query` shows the closest names:
 
 ```bash
 uv run stocky query RELIANCE
 uv run stocky query "hdfc bank"
 uv run stocky query 500325 --exact
+```
+
+Show every known identifier for one exact match:
+
+```bash
+uv run stocky lookup 500325
+```
+
+Search and inspect equivalent identifiers in a standalone explorer:
+
+```bash
+uv run stocky explore
 ```
 
 ### Exporting the consolidated table

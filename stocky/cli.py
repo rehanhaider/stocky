@@ -18,6 +18,7 @@ from stocky.config import (
 )
 from stocky.database import (
     DatabaseStatus,
+    InstrumentMatch,
     SearchResult,
     import_yahoo_json_cache,
     read_status,
@@ -125,16 +126,22 @@ def _print_status(status: DatabaseStatus) -> None:
     console.print(yahoo)
 
 
-def _print_search_result(term: str, result: SearchResult) -> None:
+def _print_search_result(term: str, result: SearchResult, *, numbered: bool = False) -> None:
     if result.total == 0:
         console.print(f"[yellow]No matches for '{term}'.[/yellow]")
         return
 
+    if result.fuzzy:
+        console.print("[dim]No direct matches; showing closest names.[/dim]")
+
     table = Table(title=f"Matches for '{term}'")
+    if numbered:
+        table.add_column("#", justify="right")
     for header in ("ISIN", "Type", "Zerodha", "Yahoo", "NSE", "BSE code", "BSE name"):
         table.add_column(header)
-    for match in result.matches:
+    for index, match in enumerate(result.matches, start=1):
         table.add_row(
+            *([str(index)] if numbered else []),
             match.isin or "-",
             match.ins_type or "-",
             match.zd_symbol or "-",
@@ -147,6 +154,21 @@ def _print_search_result(term: str, result: SearchResult) -> None:
 
     if result.total > len(result.matches):
         console.print(f"[dim]Showing {len(result.matches)} of {result.total} matches. Raise --limit to see more.[/dim]")
+
+
+def _print_equivalents(match: InstrumentMatch, term: str | None = None) -> None:
+    identifier = term or match.zd_symbol or match.nse_symbol or match.yq_symbol or match.isin or "-"
+    table = Table(title=f"Equivalents for '{identifier}'")
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("ISIN", match.isin or "-")
+    table.add_row("Type", match.ins_type or "-")
+    table.add_row("Zerodha", match.zd_symbol or "-")
+    table.add_row("Yahoo", match.yq_symbol or "-")
+    table.add_row("NSE", match.nse_symbol or "-")
+    table.add_row("BSE code", match.bse_sc_code or "-")
+    table.add_row("BSE name", match.bse_sc_name or "-")
+    console.print(table)
 
 
 def _print_rebuild_result(result: RebuildResult) -> None:
@@ -329,6 +351,79 @@ def query(
         raise typer.Exit(1) from exc
 
     _print_search_result(term, result)
+
+
+@app.command()
+def lookup(
+    identifier: Annotated[str, typer.Argument(help="Exact symbol, ISIN, BSE scrip code, or name.")],
+    db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Show every known identifier for one exact match."""
+    try:
+        result = search_instruments(identifier, db_path, exact=True)
+    except Exception as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    if result.total == 0:
+        console.print(
+            f"[red]No instrument matches '{identifier}' exactly. "
+            f"Try 'stocky query {identifier}' for a fuzzy search.[/red]"
+        )
+        raise typer.Exit(1)
+    if result.total > 1:
+        _print_search_result(identifier, result)
+        console.print("[dim]Multiple instruments match; refine the identifier.[/dim]")
+        return
+
+    _print_equivalents(result.matches[0], identifier)
+
+
+@app.command()
+def explore(
+    db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    limit: Annotated[int, typer.Option("--limit", help="Maximum number of matches to display.")] = 20,
+) -> None:
+    """Search instruments and inspect their equivalent identifiers."""
+    if not db_path.exists():
+        console.print(f"[red]Database not found: {db_path}. Run 'stocky rebuild' first.[/red]")
+        raise typer.Exit(1)
+
+    while True:
+        term = typer.prompt("Search (blank to quit)", default="", show_default=False).strip()
+        if not term:
+            console.print("[dim]Bye.[/dim]")
+            return
+
+        try:
+            result = search_instruments(term, db_path, limit=limit)
+        except FileNotFoundError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
+        except Exception as exc:
+            console.print(f"[red]{exc}[/red]")
+            continue
+
+        _print_search_result(term, result, numbered=True)
+        if not result.matches:
+            continue
+
+        while True:
+            selection = typer.prompt(
+                "Row number for equivalents (blank to search again)", default="", show_default=False
+            ).strip()
+            if not selection:
+                break
+            try:
+                row_number = int(selection)
+            except ValueError:
+                row_number = 0
+            if not 1 <= row_number <= len(result.matches):
+                console.print(f"[yellow]Enter a number between 1 and {len(result.matches)}.[/yellow]")
+                continue
+
+            _print_equivalents(result.matches[row_number - 1])
+            break
 
 
 @app.command()

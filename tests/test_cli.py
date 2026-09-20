@@ -197,6 +197,85 @@ def test_query_prints_no_hit(tmp_path, seed_consolidated, runner) -> None:
     assert "No matches for 'MISSING'." in result.stdout
 
 
+def test_query_prints_fuzzy_hint(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = runner.invoke(app, ["query", "RELIANC INDUSTRES", "--db-path", str(db_path)])
+
+    assert result.exit_code == 0
+    assert "No direct matches; showing closest names." in result.stdout
+    assert "RELIANCE" in result.stdout
+    assert "INDUSTRIES" in result.stdout
+
+
+def test_lookup_prints_single_match_equivalents(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = runner.invoke(app, ["lookup", "500325", "--db-path", str(db_path)])
+
+    assert result.exit_code == 0
+    assert "Equivalents for '500325'" in result.stdout
+    for value in ("INE002A01018", "equity", "RELIANCE", "500325", "RELIANCE INDUSTRIES"):
+        assert value in result.stdout
+
+
+def test_lookup_reports_no_exact_match(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = runner.invoke(app, ["lookup", "RELIANC", "--db-path", str(db_path)])
+
+    assert result.exit_code == 1
+    assert "No instrument matches 'RELIANC' exactly." in result.stdout
+    assert "Try 'stocky query RELIANC' for a fuzzy" in result.stdout
+
+
+def test_lookup_prints_multiple_match_hint(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(
+        db_path,
+        [
+            ("INE001", "equity", "SHARED", None, "ONE", None, "FIRST LTD"),
+            ("INE002", "equity", "TWO", None, "SHARED", None, "SECOND LTD"),
+        ],
+    )
+
+    result = runner.invoke(app, ["lookup", "SHARED", "--db-path", str(db_path)])
+
+    assert result.exit_code == 0
+    assert "INE001" in result.stdout
+    assert "INE002" in result.stdout
+    assert "Multiple instruments match; refine the identifier." in result.stdout
+
+
+def test_explore_searches_selects_and_reprompts(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = runner.invoke(
+        app,
+        ["explore", "--db-path", str(db_path)],
+        input="INFY\n3\n1\nRELIANC INDUSTRES\n\n\n",
+    )
+
+    assert result.exit_code == 0
+    assert "#" in result.stdout
+    assert "Enter a number between 1 and 2." in result.stdout
+    assert "Equivalents for 'INFY'" in result.stdout
+    assert "No direct matches; showing closest names." in result.stdout
+    assert "RELIANCE" in result.stdout
+    assert "Bye." in result.stdout
+
+
+def test_explore_missing_database_exits(tmp_path, runner) -> None:
+    result = runner.invoke(app, ["explore", "--db-path", str(tmp_path / "missing.db")])
+
+    assert result.exit_code == 1
+    assert "Database not found" in result.stdout
+
+
 def test_query_rejects_invalid_limit(tmp_path, seed_consolidated, runner) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path)
