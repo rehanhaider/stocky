@@ -649,7 +649,7 @@ def export(
     ] = None,
     format: Annotated[
         str | None,
-        typer.Option("--format", help="Output format: csv or json. Inferred from --output when omitted."),
+        typer.Option("--format", help="Output format: csv, json, or parquet. Inferred from --output when omitted."),
     ] = None,
     columns: Annotated[
         str | None,
@@ -661,7 +661,7 @@ def export(
     ] = None,
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
 ) -> None:
-    """Export the consolidated table to CSV or JSON."""
+    """Export the consolidated table to CSV, JSON, or Parquet."""
     try:
         result = export_consolidated(
             db_path,

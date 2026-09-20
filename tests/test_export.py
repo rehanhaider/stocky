@@ -1,6 +1,10 @@
 import json
 import sqlite3
+import sys
 
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from stocky.cli import app
@@ -73,6 +77,57 @@ def test_json_export_of_zero_rows_is_an_empty_list(tmp_path) -> None:
     assert json.loads(output.read_text(encoding="utf-8")) == []
 
 
+def test_parquet_export_preserves_schema_text_codes_and_nulls(tmp_path, seed_consolidated) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
+    output = tmp_path / "out" / "all.parquet"
+
+    result = export_consolidated(db_path, output=output, format=None)
+
+    assert result.rows == 4
+    assert result.columns == EXPORT_COLUMNS
+    assert result.format == "parquet"
+    frame = pd.read_parquet(output)
+    assert list(frame.columns) == list(EXPORT_COLUMNS)
+    assert pd.api.types.is_string_dtype(frame["bse_sc_code"].dtype)
+    assert frame.loc[0, "bse_sc_code"] == "500325"
+    assert pd.isna(frame.loc[3, "bse_sc_code"])
+    schema = pq.read_schema(output)
+    assert schema.names == list(EXPORT_COLUMNS)
+    assert all(field.type == pa.string() for field in schema)
+
+
+def test_parquet_export_of_zero_rows_keeps_full_schema(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "empty.db"
+    seed_consolidated(db_path, [])
+    output = tmp_path / "empty.parquet"
+
+    result = export_consolidated(db_path, output=output, format=None)
+
+    assert result.rows == 0
+    frame = pd.read_parquet(output)
+    assert frame.empty
+    assert list(frame.columns) == list(EXPORT_COLUMNS)
+    assert all(field.type == pa.string() for field in pq.read_schema(output))
+
+
+def test_parquet_export_honours_columns_and_require(tmp_path, seed_consolidated) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
+    output = tmp_path / "filtered.parquet"
+
+    result = export_consolidated(
+        db_path,
+        output=output,
+        format="parquet",
+        columns=["bse_sc_code", "isin"],
+        require=["zd_symbol", "yq_symbol"],
+    )
+
+    assert result.rows == 2
+    frame = pd.read_parquet(output)
+    assert list(frame.columns) == ["bse_sc_code", "isin"]
+    assert frame["bse_sc_code"].tolist() == ["500325", "500209"]
+
+
 def test_columns_subset_and_order_are_honoured(tmp_path, seed_consolidated) -> None:
     db_path = _seeded_db(tmp_path, seed_consolidated)
 
@@ -118,6 +173,7 @@ def test_format_inference_and_its_failures(tmp_path, seed_consolidated) -> None:
     upper = export_consolidated(db_path, output=tmp_path / "out.CSV", format=None)
     assert upper.format == "csv"
     assert export_consolidated(db_path, output=tmp_path / "out.json", format=None).format == "json"
+    assert export_consolidated(db_path, output=tmp_path / "out.parquet", format=None).format == "parquet"
 
     with pytest.raises(ValueError, match="Pass --format when writing to stdout."):
         export_consolidated(db_path, output=None, format=None)
@@ -160,6 +216,64 @@ def test_cli_export_to_file_prints_summary(tmp_path, seed_consolidated, runner) 
     assert output.exists()
 
 
+def test_cli_parquet_export_to_file_prints_summary(tmp_path, seed_consolidated, runner) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
+    output = tmp_path / "out.parquet"
+
+    result = runner.invoke(app, ["export", "-o", str(output), "--db-path", str(db_path)])
+
+    assert result.exit_code == 0
+    assert "Wrote 4 rows" in result.stdout
+    assert "as parquet." in result.stdout.replace("\n", "")
+    assert output.exists()
+
+
+def test_cli_parquet_export_to_stdout_writes_binary(tmp_path, seed_consolidated, runner) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
+
+    result = runner.invoke(app, ["export", "--format", "parquet", "--db-path", str(db_path)])
+
+    assert result.exit_code == 0
+    assert result.stdout_bytes.startswith(b"PAR1")
+
+
+def test_parquet_export_refuses_interactive_stdout_before_database_read(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "missing.db"
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    with pytest.raises(
+        ValueError,
+        match=r"^Parquet output is binary\. Pass --output FILE or redirect stdout to a file\.$",
+    ):
+        export_consolidated(db_path, output=None, format="parquet")
+
+    assert not db_path.exists()
+
+
+def test_parquet_export_writes_binary_to_piped_stdout(tmp_path, seed_consolidated, monkeypatch, capsysbinary) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+
+    result = export_consolidated(db_path, output=None, format="parquet")
+
+    assert result.rows == 4
+    assert capsysbinary.readouterr().out.startswith(b"PAR1")
+
+
+def test_cli_parquet_export_to_interactive_stdout_reports_error(tmp_path, monkeypatch, runner) -> None:
+    db_path = tmp_path / "missing.db"
+    with runner.isolation():
+        runner_stdout_type = type(sys.stdout)
+    monkeypatch.setattr(runner_stdout_type, "isatty", lambda self: True)
+
+    result = runner.invoke(app, ["export", "--format", "parquet", "--db-path", str(db_path)])
+
+    assert result.exit_code == 1
+    assert "Parquet output is binary. Pass --output FILE or redirect stdout to a file." in result.stderr
+    assert result.stdout == ""
+    assert not db_path.exists()
+
+
 def test_cli_export_to_stdout_writes_json(tmp_path, seed_consolidated, runner) -> None:
     db_path = _seeded_db(tmp_path, seed_consolidated)
 
@@ -193,6 +307,19 @@ def test_cli_export_with_missing_database_keeps_stdout_empty(tmp_path, runner) -
     assert "Database not found" in result.stderr
     assert "Database not found" not in result.stdout
     assert result.stdout == ""
+
+
+def test_missing_pyarrow_fails_before_database_read_or_output_creation(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "missing.db"
+    output = tmp_path / "out.parquet"
+    monkeypatch.setitem(sys.modules, "pyarrow", None)
+    monkeypatch.setitem(sys.modules, "pyarrow.parquet", None)
+
+    with pytest.raises(RuntimeError, match="uv sync --extra parquet"):
+        export_consolidated(db_path, output=output, format="parquet")
+
+    assert not db_path.exists()
+    assert not output.exists()
 
 
 def test_empty_columns_or_require_selection_raises_value_error(tmp_path, seed_consolidated) -> None:

@@ -4,6 +4,7 @@ import json
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
@@ -11,11 +12,11 @@ import pandas as pd
 from stocky.config import DEFAULT_DB_PATH
 from stocky.database import CONSOLIDATED_TABLE, connect, table_exists
 
-EXPORT_FORMATS = ("csv", "json")
+EXPORT_FORMATS = ("csv", "json", "parquet")
 EXPORT_COLUMNS = ("isin", "ins_type", "zd_symbol", "yq_symbol", "nse_symbol", "bse_sc_code", "bse_sc_name")
 REQUIRABLE_COLUMNS = ("zd_symbol", "yq_symbol", "nse_symbol", "bse_sc_code")
 
-_SUFFIX_FORMATS = {".csv": "csv", ".json": "json"}
+_SUFFIX_FORMATS = {".csv": "csv", ".json": "json", ".parquet": "parquet"}
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,17 @@ def _render_json(frame: pd.DataFrame) -> str:
     return json.dumps(records, indent=2, ensure_ascii=False) + "\n"
 
 
+def _render_parquet(frame: pd.DataFrame) -> bytes:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    schema = pa.schema((column, pa.string()) for column in frame.columns)
+    table = pa.Table.from_pandas(frame.astype("string"), schema=schema, preserve_index=False)
+    buffer = BytesIO()
+    pq.write_table(table, buffer)
+    return buffer.getvalue()
+
+
 def export_consolidated(
     db_path: Path = DEFAULT_DB_PATH,
     *,
@@ -117,15 +129,39 @@ def export_consolidated(
     require: Sequence[str] | None = None,
 ) -> ExportResult:
     resolved_format = _resolve_format(output, format)
+    if resolved_format == "parquet":
+        try:
+            import pyarrow
+
+            _ = pyarrow
+        except ImportError as exc:
+            raise RuntimeError(
+                "Parquet export needs pyarrow. Install it with 'uv sync --extra parquet' or "
+                "'pip install \"stocky[parquet]\"'."
+            ) from exc
+        if output is None and sys.stdout.isatty():
+            raise ValueError("Parquet output is binary. Pass --output FILE or redirect stdout to a file.")
+
     frame = read_consolidated(db_path, columns=columns, require=require)
 
-    payload = _render_csv(frame) if resolved_format == "csv" else _render_json(frame)
+    if resolved_format == "csv":
+        payload = _render_csv(frame)
+    elif resolved_format == "json":
+        payload = _render_json(frame)
+    else:
+        payload = _render_parquet(frame)
 
     if output is None:
-        sys.stdout.write(payload)
+        if resolved_format == "parquet":
+            sys.stdout.buffer.write(payload)
+        else:
+            sys.stdout.write(payload)
     else:
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(payload, encoding="utf-8")
+        if resolved_format == "parquet":
+            output.write_bytes(payload)
+        else:
+            output.write_text(payload, encoding="utf-8")
 
     return ExportResult(
         rows=len(frame.index),

@@ -142,6 +142,14 @@ uv run stocky export -o data/output/universe.json \
   --require zd_symbol,yq_symbol
 ```
 
+Export every row and column to Parquet:
+
+```bash
+uv run stocky export -o data/output/consolidated.parquet
+```
+
+Parquet needs the optional extra; install it with `uv sync --extra parquet` or `pip install "stocky[parquet]"`.
+
 Stream CSV to stdout so it can be piped into another command:
 
 ```bash
