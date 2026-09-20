@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from stocky.config import DEFAULT_BACKUP_DIR, DEFAULT_DB_PATH
@@ -57,6 +58,7 @@ class InstrumentMatch:
 class SearchResult:
     matches: list[InstrumentMatch]
     total: int
+    fuzzy: bool = False
 
 
 def connect(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
@@ -255,8 +257,46 @@ def search_instruments(
             {**params, "limit": limit},
         ).fetchall()
 
+        fuzzy_matches = False
+        if not exact and total == 0:
+            fuzzy_rows = []
+            for row in con.execute(
+                f"""
+                SELECT isin, ins_type, zd_symbol, yq_symbol, nse_symbol, bse_sc_code, bse_sc_name
+                FROM {CONSOLIDATED_TABLE}
+                """
+            ).fetchall():
+                name_candidates = []
+                if row[6] is not None:
+                    name = str(row[6]).upper()
+                    name_candidates = [name, *(word for word in name.split() if len(word) >= 3)]
+                name_score = max(
+                    (
+                        SequenceMatcher(None, cleaned.upper(), str(candidate).upper()).ratio()
+                        for candidate in name_candidates
+                    ),
+                    default=0.0,
+                )
+                symbol_score = max(
+                    (
+                        SequenceMatcher(None, cleaned.upper(), str(candidate).upper()).ratio()
+                        for candidate in (row[2], row[4], row[3])
+                        if candidate is not None
+                    ),
+                    default=0.0,
+                )
+                if name_score >= 0.6 or symbol_score >= 0.6:
+                    fuzzy_rows.append((name_score, symbol_score, row))
+
+            fuzzy_rows.sort(
+                key=lambda item: (-max(item[0], item[1]), -item[0], "" if item[2][0] is None else str(item[2][0]))
+            )
+            total = len(fuzzy_rows)
+            rows = [row for _, _, row in fuzzy_rows[:limit]]
+            fuzzy_matches = bool(rows)
+
     matches = [InstrumentMatch(*(str(value) if value is not None else None for value in row)) for row in rows]
-    return SearchResult(matches=matches, total=total)
+    return SearchResult(matches=matches, total=total, fuzzy=fuzzy_matches)
 
 
 def upsert_yahoo_response(
