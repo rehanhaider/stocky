@@ -1,5 +1,7 @@
 import json
 import sqlite3
+import sys
+import types
 from datetime import date
 
 import pytest
@@ -10,6 +12,28 @@ from stocky import __version__
 from stocky.cli import app
 from stocky.database import initialize_database
 from stocky.yahoo import YahooUpdateResult
+
+
+class _FakeTicker:
+    def __init__(self, symbol: str) -> None:
+        self.symbol = symbol
+
+    @property
+    def all_modules(self):
+        return {self.symbol: {"price": 100}}
+
+
+def _use_fake_yahooquery(monkeypatch) -> None:
+    fake_module = types.ModuleType("yahooquery")
+    fake_module.Ticker = _FakeTicker
+    monkeypatch.setitem(sys.modules, "yahooquery", fake_module)
+
+
+def _use_interactive_defaults(monkeypatch, paths, db_path) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(cli, "DEFAULT_BHAVCOPY_DIR", paths.bse.parent)
+    monkeypatch.setattr(cli, "DEFAULT_ZERODHA_INSTRUMENTS", paths.zerodha)
+    monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
 
 
 def _rebuild_path_args(paths, db_path) -> list[str]:
@@ -602,13 +626,211 @@ def test_interactive_reports_yahoo_update_errors_and_keeps_going(
     seed_consolidated(db_path, [("INE001", "equity", "", None, None, None, None)])
     monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
 
-    result = runner.invoke(app, ["interactive"], input="2\ny\n6\n")
+    result = runner.invoke(app, ["interactive"], input="2\nBSE\nzd_symbol\n\nn\n6\n")
 
     message = " ".join(result.stdout.split())
 
     assert result.exit_code == 0
     assert "No symbols found for --key zd_symbol" in message
     assert "run 'stocky rebuild' first." in message
+    assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_rebuild_previews_and_writes_database(tmp_path, market_csv_builder, monkeypatch, runner) -> None:
+    paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 5, 3))
+    db_path = tmp_path / "stocky.db"
+    _use_interactive_defaults(monkeypatch, paths, db_path)
+
+    result = runner.invoke(app, ["interactive"], input="1\n1\ny\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "Available bhavcopy pairs" in message
+    assert "2021-05-03" in message
+    assert paths.bse.name in message
+    assert paths.nse.name in message
+    assert "Rebuild preview" in message
+    assert str(paths.zerodha) in message
+    assert "Rebuild summary" in message
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("SELECT COUNT(*) FROM consolidated").fetchone()[0] == 1
+    assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_rebuild_reports_empty_input_directory(tmp_path, monkeypatch, runner) -> None:
+    empty_dir = tmp_path / "inputs"
+    empty_dir.mkdir()
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(cli, "DEFAULT_BHAVCOPY_DIR", empty_dir)
+    monkeypatch.setattr(cli, "DEFAULT_DB_PATH", tmp_path / "stocky.db")
+
+    result = runner.invoke(app, ["interactive"], input="1\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert f"No BSE/NSE bhavcopy pairs found in {empty_dir}" in message
+    assert "Download the bhavcopy files into that directory first." in message
+    assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_rebuild_reports_malformed_source_file(tmp_path, market_csv_builder, monkeypatch, runner) -> None:
+    paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 5, 3))
+    paths.bse.write_text("UNKNOWN,OTHER\nvalue,other\n", encoding="utf-8")
+    db_path = tmp_path / "stocky.db"
+    _use_interactive_defaults(monkeypatch, paths, db_path)
+
+    result = runner.invoke(app, ["interactive"], input="1\n1\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "Cannot rebuild: BSE bhavcopy is missing required columns" in message
+    assert str(paths.bse) in message
+    assert "Rebuild preview" not in message
+    assert not db_path.exists()
+    assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_rebuild_reports_date_without_files(tmp_path, market_csv_builder, monkeypatch, runner) -> None:
+    paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 5, 3))
+    db_path = tmp_path / "stocky.db"
+    _use_interactive_defaults(monkeypatch, paths, db_path)
+
+    result = runner.invoke(app, ["interactive"], input="1\n2021-05-04\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "Cannot rebuild: Required input files are missing" in message
+    assert not db_path.exists()
+    assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_rebuild_rejects_out_of_range_row(tmp_path, market_csv_builder, monkeypatch, runner) -> None:
+    paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 5, 3))
+    db_path = tmp_path / "stocky.db"
+    _use_interactive_defaults(monkeypatch, paths, db_path)
+
+    result = runner.invoke(app, ["interactive"], input="1\n4\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "Enter a number between 1 and 1." in message
+    assert not db_path.exists()
+
+
+def test_interactive_rebuild_rejects_unparseable_selection(tmp_path, market_csv_builder, monkeypatch, runner) -> None:
+    paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 5, 3))
+    db_path = tmp_path / "stocky.db"
+    _use_interactive_defaults(monkeypatch, paths, db_path)
+
+    result = runner.invoke(app, ["interactive"], input="1\nlatest\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "Enter a row number or a date like 2026-09-19." in message
+    assert not db_path.exists()
+
+
+def test_interactive_rebuild_declined_leaves_database_untouched(
+    tmp_path, market_csv_builder, monkeypatch, runner
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 5, 3))
+    db_path = tmp_path / "stocky.db"
+    _use_interactive_defaults(monkeypatch, paths, db_path)
+
+    result = runner.invoke(app, ["interactive"], input="1\n1\nn\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "Rebuild preview" in message
+    assert "Rebuild summary" not in message
+    assert not db_path.exists()
+    assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_yahoo_update_prompts_and_reports_progress(
+    tmp_path, monkeypatch, seed_consolidated, runner
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
+    _use_fake_yahooquery(monkeypatch)
+
+    result = runner.invoke(app, ["interactive"], input="2\nnse\nzd_symbol\n2\nn\ny\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "2 symbols to fetch from Yahoo Finance (NSE, key zd_symbol)." in message
+    assert "Processed 2; wrote 2; skipped 0." in message
+    assert "2/2 processed; 2 written; 0 skipped" in result.stderr
+    assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_yahoo_update_rejects_unknown_exchange(tmp_path, monkeypatch, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
+
+    result = runner.invoke(app, ["interactive"], input="2\nNYSE\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "Enter one of BSE, NSE." in message
+    assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_yahoo_update_rejects_unknown_key(tmp_path, monkeypatch, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
+
+    result = runner.invoke(app, ["interactive"], input="2\nBSE\nisin\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "Enter one of zd_symbol, yq_symbol, nse_symbol, bse_sc_code." in message
+
+
+def test_interactive_yahoo_update_rejects_non_numeric_limit(tmp_path, monkeypatch, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
+
+    result = runner.invoke(app, ["interactive"], input="2\nBSE\nzd_symbol\nmany\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "Enter a whole number of symbols, or leave it blank for all." in message
+
+
+def test_interactive_yahoo_update_stops_when_nothing_to_fetch(tmp_path, monkeypatch, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
+
+    result = runner.invoke(app, ["interactive"], input="2\nBSE\nzd_symbol\n0\nn\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "0 symbols to fetch from Yahoo Finance (BSE, key zd_symbol)." in message
+    assert "Nothing to fetch; every symbol already has a cached response." in message
+    assert "Start the update?" not in message
     assert result.stdout.count("Choose an option") == 2
 
 

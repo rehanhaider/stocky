@@ -5,6 +5,7 @@ import dataclasses
 import json
 import shlex
 import sys
+from collections.abc import Callable, Iterator
 from datetime import date
 from pathlib import Path
 from typing import Annotated
@@ -31,8 +32,8 @@ from stocky.database import (
     search_instruments,
 )
 from stocky.export import export_consolidated
-from stocky.pipeline import RebuildResult, rebuild_database
-from stocky.sources import resolve_bhavcopy_paths
+from stocky.pipeline import RebuildResult, SourcePreview, preview_sources, rebuild_database
+from stocky.sources import BhavcopyPaths, list_bhavcopy_pairs, resolve_bhavcopy_paths
 from stocky.yahoo import ProgressCallback, YahooDataManager
 
 console = Console()
@@ -41,6 +42,9 @@ app = typer.Typer(help="Consolidate Indian market instrument symbols.", no_args_
 yahoo_app = typer.Typer(help="Manage Yahoo Finance cache data.")
 
 PLAIN_PROGRESS_EVERY = 50
+MAX_LISTED_BHAVCOPY_PAIRS = 10
+YAHOO_EXCHANGES = ("BSE", "NSE")
+YAHOO_KEYS = ("zd_symbol", "yq_symbol", "nse_symbol", "bse_sc_code")
 
 
 def _emit_json(payload: object) -> None:
@@ -200,6 +204,157 @@ def _print_rebuild_result(result: RebuildResult) -> None:
     console.print(table)
 
 
+def _print_bhavcopy_pairs(pairs: list) -> int:
+    """Print the newest bhavcopy pairs and return how many rows are selectable."""
+    listed = pairs[:MAX_LISTED_BHAVCOPY_PAIRS]
+    table = Table(title="Available bhavcopy pairs")
+    table.add_column("#", justify="right")
+    table.add_column("Trade date")
+    table.add_column("BSE file")
+    table.add_column("NSE file")
+    for index, pair in enumerate(listed, start=1):
+        table.add_row(str(index), pair.trade_date.isoformat(), pair.bse.name, pair.nse.name)
+    console.print(table)
+
+    if len(pairs) > len(listed):
+        console.print(f"[dim]... and {len(pairs) - len(listed)} more[/dim]")
+    return len(listed)
+
+
+def _print_source_preview(preview: SourcePreview, db_path: Path) -> None:
+    table = Table(title="Rebuild preview")
+    table.add_column("Source")
+    table.add_column("File")
+    table.add_column("Rows", justify="right")
+    table.add_row("BSE bhavcopy", str(preview.bse_bhavcopy), str(preview.bse_rows))
+    table.add_row("NSE bhavcopy", str(preview.nse_bhavcopy), str(preview.nse_rows))
+    table.add_row("Zerodha instruments", str(preview.zerodha_instruments), str(preview.zerodha_rows))
+    table.add_row("Database", str(db_path), "-")
+    console.print(table)
+
+
+def _select_bhavcopy_paths() -> BhavcopyPaths | None:
+    """Ask which bhavcopy pair to rebuild from; return None to go back to the menu."""
+    pairs = list_bhavcopy_pairs(DEFAULT_BHAVCOPY_DIR)
+    if not pairs:
+        console.print(
+            f"[red]No BSE/NSE bhavcopy pairs found in {DEFAULT_BHAVCOPY_DIR}. "
+            "Download the bhavcopy files into that directory first.[/red]"
+        )
+        return None
+
+    listed = _print_bhavcopy_pairs(pairs)
+    selection = typer.prompt("Row number, or a trade date (YYYY-MM-DD)", default="1").strip()
+
+    if selection.isdigit():
+        row_number = int(selection)
+        if not 1 <= row_number <= listed:
+            console.print(f"[red]Enter a number between 1 and {listed}.[/red]")
+            return None
+        pair = pairs[row_number - 1]
+        return BhavcopyPaths(bse=pair.bse, nse=pair.nse, zerodha=DEFAULT_ZERODHA_INSTRUMENTS)
+
+    try:
+        trade_date = date.fromisoformat(selection)
+    except ValueError:
+        console.print("[red]Enter a row number or a date like 2026-09-19.[/red]")
+        return None
+
+    return resolve_bhavcopy_paths(
+        trade_date=trade_date,
+        input_dir=DEFAULT_BHAVCOPY_DIR,
+        zerodha=DEFAULT_ZERODHA_INSTRUMENTS,
+    )
+
+
+def _interactive_rebuild() -> None:
+    paths = _select_bhavcopy_paths()
+    if paths is None:
+        return
+
+    try:
+        with console.status("Reading source files..."):
+            preview = preview_sources(paths)
+    except Exception as exc:
+        console.print(f"[red]Cannot rebuild: {escape(str(exc))}[/red]")
+        return
+
+    _print_source_preview(preview, DEFAULT_DB_PATH)
+    if not typer.confirm("Rebuild the consolidated table from these files?"):
+        return
+
+    try:
+        with console.status("Rebuilding...") as spinner:
+            result = _rebuild_impl(
+                bse_bhavcopy=paths.bse,
+                nse_bhavcopy=paths.nse,
+                zerodha_instruments=paths.zerodha,
+                db_path=DEFAULT_DB_PATH,
+                progress=lambda stage: spinner.update(f"{stage}..."),
+            )
+    except Exception as exc:
+        console.print(f"[red]Rebuild failed: {escape(str(exc))}[/red]")
+        return
+
+    _print_rebuild_result(result)
+
+
+def _interactive_yahoo_update() -> None:
+    exchange = typer.prompt("Exchange", default="BSE").strip().upper()
+    if exchange not in YAHOO_EXCHANGES:
+        console.print(f"[red]Enter one of {', '.join(YAHOO_EXCHANGES)}.[/red]")
+        return
+
+    key = typer.prompt("Key", default="zd_symbol").strip()
+    if key not in YAHOO_KEYS:
+        console.print(f"[red]Enter one of {', '.join(YAHOO_KEYS)}.[/red]")
+        return
+
+    raw_limit = typer.prompt("Limit (blank = all)", default="", show_default=False).strip()
+    if raw_limit and not raw_limit.isdigit():
+        console.print("[red]Enter a whole number of symbols, or leave it blank for all.[/red]")
+        return
+    limit = int(raw_limit) if raw_limit else None
+
+    missing_only = typer.confirm("Only fetch symbols with no cached response?", default=False)
+
+    manager = YahooDataManager(DEFAULT_DB_PATH)
+    try:
+        planned = manager.update_data(
+            key=key,
+            exchange=exchange,
+            dry_run=True,
+            limit=limit,
+            missing_only=missing_only,
+        )
+    except Exception as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        return
+
+    console.print(f"[cyan]{planned.processed} symbols to fetch from Yahoo Finance ({exchange}, key {key}).[/cyan]")
+    if planned.processed == 0:
+        console.print("[green]Nothing to fetch; every symbol already has a cached response.[/green]")
+        return
+
+    if not typer.confirm("Start the update? This may take a long time."):
+        return
+
+    try:
+        with _yahoo_progress(exchange, json_output=False) as print_progress:
+            result = manager.update_data(
+                key=key,
+                exchange=exchange,
+                limit=limit,
+                missing_only=missing_only,
+                progress=print_progress,
+            )
+    except Exception as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        return
+
+    console.print(f"[green]Processed {result.processed}; wrote {result.written}; skipped {result.skipped}.[/green]")
+
+
 @app.callback(invoke_without_command=True)
 def root(
     ctx: typer.Context,
@@ -225,7 +380,7 @@ def interactive() -> None:
     while True:
         console.print("\n[green]Choose an option[/green]")
         console.print("1. Rebuild stocky.db from scratch")
-        console.print("2. Update all Yahoo data")
+        console.print("2. Update Yahoo data")
         console.print("3. Import Yahoo JSON cache into stocky.db")
         console.print("4. Show database status")
         console.print("5. Look up an instrument")
@@ -233,22 +388,9 @@ def interactive() -> None:
         choice = typer.prompt("Your choice", default="6").strip()
 
         if choice == "1":
-            if typer.confirm("Rebuilding will replace the consolidated table. Continue?"):
-                try:
-                    result = _rebuild_impl(latest=True)
-                    _print_rebuild_result(result)
-                except Exception as exc:
-                    console.print(f"[red]{exc}[/red]")
+            _interactive_rebuild()
         elif choice == "2":
-            if typer.confirm("This will call Yahoo Finance and may take a long time. Continue?"):
-                try:
-                    result = YahooDataManager(DEFAULT_DB_PATH).update_data(exchange="BSE")
-                    console.print(
-                        f"[green]Processed {result.processed}; wrote {result.written}; "
-                        f"skipped {result.skipped}.[/green]"
-                    )
-                except Exception as exc:
-                    console.print(f"[red]{escape(str(exc))}[/red]")
+            _interactive_yahoo_update()
         elif choice == "3":
             result = import_yahoo_json_cache(DEFAULT_YAHOO_JSON_CACHE_DIR, DEFAULT_DB_PATH)
             console.print(f"[green]Imported {result.imported}; skipped {result.skipped}.[/green]")
@@ -280,6 +422,7 @@ def _rebuild_impl(
     db_path: Path = DEFAULT_DB_PATH,
     dry_run: bool = False,
     no_backup: bool = False,
+    progress: Callable[[str], None] | None = None,
 ) -> RebuildResult:
     paths = resolve_bhavcopy_paths(
         bse_bhavcopy=bse_bhavcopy,
@@ -289,7 +432,7 @@ def _rebuild_impl(
         zerodha=zerodha_instruments,
         latest=latest,
     )
-    return rebuild_database(paths, db_path=db_path, backup=not no_backup, dry_run=dry_run)
+    return rebuild_database(paths, db_path=db_path, backup=not no_backup, dry_run=dry_run, progress=progress)
 
 
 @app.command()
@@ -522,6 +665,53 @@ def export(
         )
 
 
+@contextlib.contextmanager
+def _yahoo_progress(exchange: str, json_output: bool) -> Iterator[ProgressCallback]:
+    """Yield the progress callback that suits the output mode: JSON lines, a bar, or plain lines."""
+
+    def json_progress(index: int, total: int, written: int, skipped: int) -> None:
+        sys.stderr.write(
+            json.dumps(
+                {"event": "progress", "processed": index, "total": total, "written": written, "skipped": skipped}
+            )
+            + "\n"
+        )
+        sys.stderr.flush()
+
+    def plain_progress(index: int, total: int, written: int, skipped: int) -> None:
+        if index % PLAIN_PROGRESS_EVERY == 0 or index == total:
+            error_console.print(f"{index}/{total} processed; {written} written; {skipped} skipped")
+
+    if json_output:
+        yield json_progress
+        return
+
+    if not error_console.is_terminal:
+        yield plain_progress
+        return
+
+    bar = Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TextColumn("{task.fields[written]} written, {task.fields[skipped]} skipped"),
+        TimeRemainingColumn(),
+        console=error_console,
+    )
+    task_id: TaskID | None = None
+
+    def bar_progress(index: int, total: int, written: int, skipped: int) -> None:
+        nonlocal task_id
+        if task_id is None:
+            task_id = bar.add_task(
+                f"Fetching {exchange}", total=total, completed=index, written=written, skipped=skipped
+            )
+        bar.update(task_id, completed=index, written=written, skipped=skipped)
+
+    with bar:
+        yield bar_progress
+
+
 @yahoo_app.command("update")
 def yahoo_update(
     exchange: Annotated[str, typer.Option("--exchange", help="Exchange to query: BSE or NSE.")] = "BSE",
@@ -541,49 +731,8 @@ def yahoo_update(
     ] = False,
 ) -> None:
     """Update Yahoo Finance responses in SQLite."""
-    bar: Progress | None = None
-    task_id: TaskID | None = None
-
-    def json_progress(index: int, total: int, written: int, skipped: int) -> None:
-        sys.stderr.write(
-            json.dumps(
-                {"event": "progress", "processed": index, "total": total, "written": written, "skipped": skipped}
-            )
-            + "\n"
-        )
-        sys.stderr.flush()
-
-    def bar_progress(index: int, total: int, written: int, skipped: int) -> None:
-        nonlocal task_id
-        if bar is None:
-            return
-        if task_id is None:
-            task_id = bar.add_task(
-                f"Fetching {exchange}", total=total, completed=index, written=written, skipped=skipped
-            )
-        bar.update(task_id, completed=index, written=written, skipped=skipped)
-
-    def plain_progress(index: int, total: int, written: int, skipped: int) -> None:
-        if index % PLAIN_PROGRESS_EVERY == 0 or index == total:
-            error_console.print(f"{index}/{total} processed; {written} written; {skipped} skipped")
-
-    if json_output:
-        print_progress: ProgressCallback = json_progress
-    elif error_console.is_terminal:
-        bar = Progress(
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            TextColumn("{task.fields[written]} written, {task.fields[skipped]} skipped"),
-            TimeRemainingColumn(),
-            console=error_console,
-        )
-        print_progress = bar_progress
-    else:
-        print_progress = plain_progress
-
     try:
-        with bar if bar is not None else contextlib.nullcontext():
+        with _yahoo_progress(exchange, json_output) as print_progress:
             result = YahooDataManager(db_path).update_data(
                 key=key,
                 exchange=exchange,
