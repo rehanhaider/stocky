@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +29,16 @@ BSE_UDIFF_COLUMNS = {"SctySrs", "ISIN", "FinInstrmId", "FinInstrmNm"}
 # The legacy files' SC_TYPE "Q" filter kept every group except fixed income (F)
 # and gilts/SGBs (G); the UDiFF file has no SC_TYPE, so exclude those series instead.
 BSE_NON_EQUITY_UDIFF_SERIES = {"F", "G"}
+
+
+@dataclass(frozen=True)
+class SourcePreview:
+    bse_bhavcopy: Path
+    bse_rows: int
+    nse_bhavcopy: Path
+    nse_rows: int
+    zerodha_instruments: Path
+    zerodha_rows: int
 
 
 @dataclass(frozen=True)
@@ -76,7 +87,7 @@ def load_bse_equities(path: Path) -> pd.DataFrame:
 
     raise ValueError(
         "BSE bhavcopy is missing required columns for supported formats: "
-        f"legacy {sorted(BSE_LEGACY_COLUMNS)} or UDiFF {sorted(BSE_UDIFF_COLUMNS)}"
+        f"legacy {sorted(BSE_LEGACY_COLUMNS)} or UDiFF {sorted(BSE_UDIFF_COLUMNS)} ({path})"
     )
 
 
@@ -95,13 +106,13 @@ def load_nse_equities(path: Path) -> pd.DataFrame:
 
     raise ValueError(
         "NSE bhavcopy is missing required columns for supported formats: "
-        f"legacy {sorted(NSE_LEGACY_COLUMNS)} or UDiFF {sorted(NSE_UDIFF_COLUMNS)}"
+        f"legacy {sorted(NSE_LEGACY_COLUMNS)} or UDiFF {sorted(NSE_UDIFF_COLUMNS)} ({path})"
     )
 
 
 def load_zerodha_instruments(path: Path) -> pd.DataFrame:
     instruments = _strip_dataframe_strings(pd.read_csv(path))
-    _require_columns(instruments, {"segment", "exchange_token", "tradingsymbol"}, "Zerodha instruments")
+    _require_columns(instruments, {"segment", "exchange_token", "tradingsymbol"}, f"Zerodha instruments ({path})")
 
     instruments = instruments.query("segment == 'BSE' or segment == 'NSE'")[["exchange_token", "tradingsymbol"]].copy()
     instruments["exchange_token"] = instruments["exchange_token"].astype(str)
@@ -160,6 +171,20 @@ def build_consolidated_dataframe(
     return equities[["ins_type", "zd_symbol", "yq_symbol", "nse_symbol", "bse_sc_code", "bse_sc_name"]]
 
 
+def preview_sources(paths: BhavcopyPaths) -> SourcePreview:
+    """Load the three source files and report how many usable rows each holds."""
+    require_existing_files(paths)
+
+    return SourcePreview(
+        bse_bhavcopy=paths.bse,
+        bse_rows=len(load_bse_equities(paths.bse)),
+        nse_bhavcopy=paths.nse,
+        nse_rows=len(load_nse_equities(paths.nse)),
+        zerodha_instruments=paths.zerodha,
+        zerodha_rows=len(load_zerodha_instruments(paths.zerodha)),
+    )
+
+
 def rebuild_database(
     paths: BhavcopyPaths,
     *,
@@ -167,13 +192,26 @@ def rebuild_database(
     backup_dir: Path = DEFAULT_BACKUP_DIR,
     backup: bool = True,
     dry_run: bool = False,
+    progress: Callable[[str], None] | None = None,
 ) -> RebuildResult:
+    def report(stage: str) -> None:
+        if progress is not None:
+            progress(stage)
+
     require_existing_files(paths)
 
+    report("Loading BSE bhavcopy")
+    bse_equities = load_bse_equities(paths.bse)
+    report("Loading NSE bhavcopy")
+    nse_equities = load_nse_equities(paths.nse)
+    report("Loading Zerodha instruments")
+    zerodha_instruments = load_zerodha_instruments(paths.zerodha)
+
+    report("Consolidating")
     stocky = build_consolidated_dataframe(
-        bse_equities=load_bse_equities(paths.bse),
-        nse_equities=load_nse_equities(paths.nse),
-        zerodha_instruments=load_zerodha_instruments(paths.zerodha),
+        bse_equities=bse_equities,
+        nse_equities=nse_equities,
+        zerodha_instruments=zerodha_instruments,
         available_yahoo_symbols=read_available_yahoo_symbols(db_path),
     )
 
@@ -191,8 +229,10 @@ def rebuild_database(
 
     initialize_database(db_path)
     if backup:
+        report("Backing up database")
         backup_path = backup_database(db_path, backup_dir=backup_dir)
 
+    report("Writing consolidated table")
     initialize_database(db_path)
     with connect(db_path) as con:
         stocky.to_sql(CONSOLIDATED_TABLE, con, if_exists="replace", index=True, index_label="isin")

@@ -6,12 +6,14 @@ import pytest
 
 from stocky.database import CONSOLIDATED_TABLE
 from stocky.pipeline import (
+    SourcePreview,
     build_consolidated_dataframe,
     load_bse_equities,
     load_nse_equities,
     load_zerodha_instruments,
     match_yahoo_symbol,
     match_zerodha_symbol,
+    preview_sources,
     rebuild_database,
 )
 
@@ -248,3 +250,77 @@ def test_match_yahoo_symbol_uses_bo_after_nan_and_returns_none() -> None:
 
     assert match_yahoo_symbol(bse_only, {"RELIANCE.BO"}) == "RELIANCE"
     assert match_yahoo_symbol(unmatched, {"RELIANCE.BO"}) is None
+
+
+def test_preview_sources_reports_row_counts_per_file(tmp_path, market_csv_builder) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+
+    preview = preview_sources(paths)
+
+    assert preview == SourcePreview(
+        bse_bhavcopy=paths.bse,
+        bse_rows=1,
+        nse_bhavcopy=paths.nse,
+        nse_rows=1,
+        zerodha_instruments=paths.zerodha,
+        zerodha_rows=2,
+    )
+
+
+def test_preview_sources_rejects_missing_files(tmp_path, market_csv_builder) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    paths.nse.unlink()
+
+    with pytest.raises(FileNotFoundError, match="Required input files are missing"):
+        preview_sources(paths)
+
+
+def test_preview_sources_names_the_file_in_validation_errors(tmp_path, market_csv_builder) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    paths.bse.write_text("UNKNOWN,OTHER\nvalue,other\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="BSE bhavcopy is missing required columns") as error:
+        preview_sources(paths)
+
+    assert str(paths.bse) in str(error.value)
+
+
+def test_rebuild_database_reports_progress_stages(tmp_path, market_csv_builder, seed_consolidated) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    stages: list[str] = []
+
+    rebuild_database(paths, db_path=db_path, backup_dir=tmp_path / "backups", progress=stages.append)
+
+    assert stages == [
+        "Loading BSE bhavcopy",
+        "Loading NSE bhavcopy",
+        "Loading Zerodha instruments",
+        "Consolidating",
+        "Backing up database",
+        "Writing consolidated table",
+    ]
+
+
+def test_rebuild_database_progress_skips_write_stages_on_dry_run(tmp_path, market_csv_builder) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    stages: list[str] = []
+
+    rebuild_database(paths, db_path=tmp_path / "stocky.db", dry_run=True, progress=stages.append)
+
+    assert stages == [
+        "Loading BSE bhavcopy",
+        "Loading NSE bhavcopy",
+        "Loading Zerodha instruments",
+        "Consolidating",
+    ]
+
+
+def test_rebuild_database_progress_skips_backup_stage_when_disabled(tmp_path, market_csv_builder) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    stages: list[str] = []
+
+    rebuild_database(paths, db_path=tmp_path / "stocky.db", backup=False, progress=stages.append)
+
+    assert stages[-2:] == ["Consolidating", "Writing consolidated table"]
