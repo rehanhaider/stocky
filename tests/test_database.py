@@ -4,6 +4,7 @@ import pytest
 
 from stocky.database import (
     CONSOLIDATED_TABLE,
+    backup_database,
     connect,
     decode_response_json,
     encode_response_json,
@@ -14,27 +15,6 @@ from stocky.database import (
     search_instruments,
     upsert_yahoo_response,
 )
-
-
-def _seed_consolidated(db_path) -> None:
-    with sqlite3.connect(db_path) as con:
-        con.execute(
-            f"""
-            CREATE TABLE {CONSOLIDATED_TABLE} (
-                isin TEXT, ins_type TEXT, zd_symbol TEXT, yq_symbol TEXT,
-                nse_symbol TEXT, bse_sc_code TEXT, bse_sc_name TEXT
-            )
-            """
-        )
-        con.executemany(
-            f"INSERT INTO {CONSOLIDATED_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [
-                ("INE002A01018", "equity", "RELIANCE", "RELIANCE", "RELIANCE", "500325", "RELIANCE INDUSTRIES"),
-                ("INE009A01021", "equity", "INFY", "INFY", "INFY", "500209", "INFOSYS LTD"),
-                ("INE144J01027", "equity", "20MICRONS", None, None, "533022", "20 MICRONS LTD"),
-                ("INE999Z01019", "equity", "INFYBEES", "INFYBEES", None, None, "INFY ETF"),
-            ],
-        )
 
 
 def _seed_yahoo(db_path, yahoo_symbols: list[tuple[str, str, str]]) -> None:
@@ -82,9 +62,9 @@ def test_consolidated_table_name_is_the_db_contract(tmp_path) -> None:
     assert fetch_consolidated_symbols(db_path) == ["RELIANCE"]
 
 
-def test_read_status_reports_counts_and_coverage(tmp_path) -> None:
+def test_read_status_reports_counts_and_coverage(tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
-    _seed_consolidated(db_path)
+    seed_consolidated(db_path)
     _seed_yahoo(
         db_path,
         [
@@ -100,7 +80,7 @@ def test_read_status_reports_counts_and_coverage(tmp_path) -> None:
     assert {entry.column: entry.populated for entry in status.coverage} == {
         "isin": 4,
         "zd_symbol": 4,
-        "yq_symbol": 3,
+        "yq_symbol": 2,
         "nse_symbol": 2,
         "bse_sc_code": 3,
         "bse_sc_name": 4,
@@ -122,9 +102,9 @@ def test_read_status_missing_db_raises_without_creating_file(tmp_path) -> None:
     assert not db_path.exists()
 
 
-def test_search_exact_symbol_is_case_insensitive(tmp_path) -> None:
+def test_search_exact_symbol_is_case_insensitive(tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
-    _seed_consolidated(db_path)
+    seed_consolidated(db_path)
 
     result = search_instruments("reliance", db_path)
 
@@ -132,9 +112,9 @@ def test_search_exact_symbol_is_case_insensitive(tmp_path) -> None:
     assert result.matches[0].isin == "INE002A01018"
 
 
-def test_search_matches_name_fragment_and_bse_code(tmp_path) -> None:
+def test_search_matches_name_fragment_and_bse_code(tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
-    _seed_consolidated(db_path)
+    seed_consolidated(db_path)
 
     by_name = search_instruments("micron", db_path)
     assert [match.zd_symbol for match in by_name.matches] == ["20MICRONS"]
@@ -143,9 +123,9 @@ def test_search_matches_name_fragment_and_bse_code(tmp_path) -> None:
     assert [match.zd_symbol for match in by_code.matches] == ["INFY"]
 
 
-def test_search_ranks_exact_matches_first(tmp_path) -> None:
+def test_search_ranks_exact_matches_first(tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
-    _seed_consolidated(db_path)
+    seed_consolidated(db_path)
 
     result = search_instruments("INFY", db_path)
 
@@ -154,17 +134,17 @@ def test_search_ranks_exact_matches_first(tmp_path) -> None:
     assert result.matches[1].zd_symbol == "INFYBEES"
 
 
-def test_search_exact_flag_disables_substring_matching(tmp_path) -> None:
+def test_search_exact_flag_disables_substring_matching(tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
-    _seed_consolidated(db_path)
+    seed_consolidated(db_path)
 
     assert search_instruments("INFY", db_path, exact=True).total == 1
     assert search_instruments("INF", db_path, exact=True).total == 0
 
 
-def test_search_limit_truncates_but_reports_total(tmp_path) -> None:
+def test_search_limit_truncates_but_reports_total(tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
-    _seed_consolidated(db_path)
+    seed_consolidated(db_path)
 
     result = search_instruments("INE", db_path, limit=2)
 
@@ -172,17 +152,17 @@ def test_search_limit_truncates_but_reports_total(tmp_path) -> None:
     assert len(result.matches) == 2
 
 
-def test_search_escapes_like_wildcards(tmp_path) -> None:
+def test_search_escapes_like_wildcards(tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
-    _seed_consolidated(db_path)
+    seed_consolidated(db_path)
 
     assert search_instruments("%", db_path).total == 0
     assert search_instruments("INF_", db_path).total == 0
 
 
-def test_search_rejects_blank_term_and_missing_table(tmp_path) -> None:
+def test_search_rejects_blank_term_and_missing_table(tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
-    _seed_consolidated(db_path)
+    seed_consolidated(db_path)
 
     with pytest.raises(ValueError):
         search_instruments("   ", db_path)
@@ -191,3 +171,21 @@ def test_search_rejects_blank_term_and_missing_table(tmp_path) -> None:
     initialize_database(yahoo_only)
     with pytest.raises(RuntimeError):
         search_instruments("INFY", yahoo_only)
+
+
+def test_backup_database_copies_source_bytes(tmp_path) -> None:
+    db_path = tmp_path / "stocky.db"
+    db_path.write_bytes(b"sqlite source bytes")
+
+    backup_path = backup_database(db_path, tmp_path / "backups")
+
+    assert backup_path is not None
+    assert backup_path.exists()
+    assert backup_path.read_bytes() == db_path.read_bytes()
+
+
+def test_backup_database_returns_none_for_missing_source(tmp_path) -> None:
+    backup_dir = tmp_path / "backups"
+
+    assert backup_database(tmp_path / "missing.db", backup_dir) is None
+    assert not backup_dir.exists()

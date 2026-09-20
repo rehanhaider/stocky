@@ -1,4 +1,3 @@
-import sqlite3
 import sys
 import types
 
@@ -10,15 +9,6 @@ from stocky.database import (
     upsert_yahoo_response,
 )
 from stocky.yahoo import YahooDataManager
-
-
-def _seed_consolidated(db_path, zd_symbols: list[str]) -> None:
-    with sqlite3.connect(db_path) as con:
-        con.execute("CREATE TABLE consolidated (isin TEXT, zd_symbol TEXT)")
-        con.executemany(
-            "INSERT INTO consolidated VALUES (?, ?)",
-            [(f"INE{index:03d}", symbol) for index, symbol in enumerate(zd_symbols)],
-        )
 
 
 def _seed_cached_response(db_path, yahoo_symbol: str) -> None:
@@ -46,9 +36,15 @@ class _FakeTicker:
         return {self.symbol: {"price": 100}}
 
 
-def test_dry_run_missing_only_excludes_cached_symbols(tmp_path) -> None:
+def test_dry_run_missing_only_excludes_cached_symbols(tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
-    _seed_consolidated(db_path, ["RELIANCE", "INFY", "NEWIPO"])
+    seed_consolidated(
+        db_path,
+        [
+            (f"INE{index:03d}", "equity", symbol, None, None, None, None)
+            for index, symbol in enumerate(["RELIANCE", "INFY", "NEWIPO"])
+        ],
+    )
     _seed_cached_response(db_path, "RELIANCE.BO")
 
     manager = YahooDataManager(db_path)
@@ -59,9 +55,15 @@ def test_dry_run_missing_only_excludes_cached_symbols(tmp_path) -> None:
     assert manager.update_data(exchange="NSE", dry_run=True, missing_only=True).processed == 3
 
 
-def test_update_writes_responses_and_skips_unknown_symbols(tmp_path, monkeypatch) -> None:
+def test_update_writes_responses_and_skips_unknown_symbols(tmp_path, monkeypatch, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
-    _seed_consolidated(db_path, ["RELIANCE", "BADSYMBOL"])
+    seed_consolidated(
+        db_path,
+        [
+            (f"INE{index:03d}", "equity", symbol, None, None, None, None)
+            for index, symbol in enumerate(["RELIANCE", "BADSYMBOL"])
+        ],
+    )
 
     fake_module = types.ModuleType("yahooquery")
     fake_module.Ticker = _FakeTicker
