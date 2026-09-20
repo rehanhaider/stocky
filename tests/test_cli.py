@@ -232,6 +232,16 @@ def test_lookup_reports_no_exact_match(tmp_path, seed_consolidated, runner) -> N
     assert "Try 'stocky query RELIANC' for a fuzzy" in result.stdout
 
 
+def test_lookup_quotes_multi_word_identifier_in_query_hint(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = runner.invoke(app, ["lookup", "RELIANC INDUSTRIES", "--db-path", str(db_path)])
+
+    assert result.exit_code == 1
+    assert "stocky query 'RELIANC INDUSTRIES'" in result.stdout
+
+
 def test_lookup_prints_multiple_match_hint(tmp_path, seed_consolidated, runner) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(
@@ -274,6 +284,17 @@ def test_explore_missing_database_exits(tmp_path, runner) -> None:
 
     assert result.exit_code == 1
     assert "Database not found" in result.stdout
+
+
+def test_explore_rejects_invalid_limit_before_prompting(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = runner.invoke(app, ["explore", "--limit", "0", "--db-path", str(db_path)])
+
+    assert result.exit_code == 1
+    assert "Limit must be at least 1." in result.stdout
+    assert "Search" not in result.stdout
 
 
 def test_query_rejects_invalid_limit(tmp_path, seed_consolidated, runner) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 from datetime import date
 from pathlib import Path
 from typing import Annotated
@@ -367,8 +368,8 @@ def lookup(
 
     if result.total == 0:
         console.print(
-            f"[red]No instrument matches '{identifier}' exactly. "
-            f"Try 'stocky query {identifier}' for a fuzzy search.[/red]"
+            f"[red]No instrument matches '{identifier}' exactly.\n"
+            f"Try 'stocky query {shlex.quote(identifier)}' for a fuzzy search.[/red]"
         )
         raise typer.Exit(1)
     if result.total > 1:
@@ -385,6 +386,10 @@ def explore(
     limit: Annotated[int, typer.Option("--limit", help="Maximum number of matches to display.")] = 20,
 ) -> None:
     """Search instruments and inspect their equivalent identifiers."""
+    if limit < 1:
+        console.print("[red]Limit must be at least 1.[/red]")
+        raise typer.Exit(1)
+
     if not db_path.exists():
         console.print(f"[red]Database not found: {db_path}. Run 'stocky rebuild' first.[/red]")
         raise typer.Exit(1)

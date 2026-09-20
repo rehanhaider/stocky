@@ -266,21 +266,31 @@ def search_instruments(
                 FROM {CONSOLIDATED_TABLE}
                 """
             ).fetchall():
-                candidates = (row[6], row[2], row[4], row[3])
-                best_ratio = max(
+                name_candidates = []
+                if row[6] is not None:
+                    name = str(row[6]).upper()
+                    name_candidates = [name, *(word for word in name.split() if len(word) >= 3)]
+                name_score = max(
                     (
                         SequenceMatcher(None, cleaned.upper(), str(candidate).upper()).ratio()
-                        for candidate in candidates
+                        for candidate in name_candidates
+                    ),
+                    default=0.0,
+                )
+                symbol_score = max(
+                    (
+                        SequenceMatcher(None, cleaned.upper(), str(candidate).upper()).ratio()
+                        for candidate in (row[2], row[4], row[3])
                         if candidate is not None
                     ),
                     default=0.0,
                 )
-                if best_ratio >= 0.6:
-                    fuzzy_rows.append((best_ratio, row))
+                if name_score >= 0.6 or symbol_score >= 0.6:
+                    fuzzy_rows.append((name_score, symbol_score, row))
 
-            fuzzy_rows.sort(key=lambda item: (-item[0], "" if item[1][0] is None else str(item[1][0])))
+            fuzzy_rows.sort(key=lambda item: (-item[0], -item[1], "" if item[2][0] is None else str(item[2][0])))
             total = len(fuzzy_rows)
-            rows = [row for _, row in fuzzy_rows[:limit]]
+            rows = [row for _, _, row in fuzzy_rows[:limit]]
             fuzzy_matches = bool(rows)
 
     matches = [InstrumentMatch(*(str(value) if value is not None else None for value in row)) for row in rows]

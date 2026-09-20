@@ -204,6 +204,21 @@ def test_search_falls_back_to_fuzzy_name_matching(tmp_path, seed_consolidated) -
     assert result.fuzzy is True
 
 
+def test_search_fuzzy_name_word_outranks_short_symbol_collision(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(
+        db_path,
+        [
+            ("INE009A01021", "equity", "INFY", "INFY.NS", "INFY", "500209", "INFOSYS LTD"),
+            ("INE001", "equity", "NOVIS", "NOVIS", "NOVIS", None, "NOVIS PHARMA"),
+        ],
+    )
+
+    result = search_instruments("INFOSIS", db_path, limit=1)
+
+    assert result.matches[0].isin == "INE009A01021"
+
+
 def test_search_fuzzy_fallback_ignores_nonsense(tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path)
