@@ -1,8 +1,19 @@
+import sqlite3
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pandas as pd
+import pytest
 
-from stocky.pipeline import build_consolidated_dataframe, load_bse_equities, load_nse_equities
+from stocky.database import CONSOLIDATED_TABLE
+from stocky.pipeline import (
+    build_consolidated_dataframe,
+    load_bse_equities,
+    load_nse_equities,
+    load_zerodha_instruments,
+    match_yahoo_symbol,
+    match_zerodha_symbol,
+    rebuild_database,
+)
 
 
 def test_build_consolidated_dataframe_matches_symbols() -> None:
@@ -88,3 +99,86 @@ def test_load_nse_equities_legacy_includes_trade_for_trade_series(tmp_path) -> N
         {"isin": "INE111B01023", "nse_symbol": "63MOONS"},
         {"isin": "INE574I01035", "nse_symbol": "ARCOTECH"},
     ]
+
+
+def test_rebuild_database_dry_run_does_not_create_database(tmp_path, market_csv_builder) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "fresh.db"
+
+    result = rebuild_database(paths, db_path=db_path, backup_dir=tmp_path / "backups", dry_run=True)
+
+    assert result.rows == 1
+    assert result.dry_run is True
+    assert result.backup_path is None
+    assert not db_path.exists()
+
+
+def test_rebuild_database_replaces_consolidated_table_without_backup(
+    tmp_path, market_csv_builder, seed_consolidated
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    backup_dir = tmp_path / "backups"
+    seed_consolidated(db_path)
+
+    result = rebuild_database(paths, db_path=db_path, backup_dir=backup_dir, backup=False)
+
+    with sqlite3.connect(db_path) as con:
+        rows = con.execute(f"SELECT isin, zd_symbol FROM {CONSOLIDATED_TABLE}").fetchall()
+    assert rows == [("INE002A01018", "RELIANCE")]
+    assert result.backup_path is None
+    assert not backup_dir.exists()
+
+
+def test_rebuild_database_backs_up_existing_table_before_overwrite(
+    tmp_path, market_csv_builder, seed_consolidated
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = rebuild_database(paths, db_path=db_path, backup_dir=tmp_path / "backups", backup=True)
+
+    assert result.backup_path is not None
+    assert result.backup_path.exists()
+    with sqlite3.connect(result.backup_path) as backup_con:
+        backup_rows = backup_con.execute(f"SELECT COUNT(*) FROM {CONSOLIDATED_TABLE}").fetchone()[0]
+    with sqlite3.connect(db_path) as live_con:
+        live_rows = live_con.execute(f"SELECT COUNT(*) FROM {CONSOLIDATED_TABLE}").fetchone()[0]
+    assert backup_rows == 4
+    assert live_rows == 1
+
+
+def test_load_zerodha_instruments_filters_segments_and_normalizes_tokens(tmp_path, market_csv_builder) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+
+    result = load_zerodha_instruments(paths.zerodha)
+
+    assert result.to_dict("records") == [
+        {"exchange_token": "123", "tradingsymbol": "RELIANCE"},
+        {"exchange_token": "500325", "tradingsymbol": "RELIANCE"},
+    ]
+
+
+def test_load_zerodha_instruments_requires_expected_columns(tmp_path) -> None:
+    path = tmp_path / "instruments.csv"
+    path.write_text("segment,tradingsymbol\nNSE,RELIANCE\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="missing required columns: exchange_token"):
+        load_zerodha_instruments(path)
+
+
+def test_match_zerodha_symbol_uses_bse_token_then_returns_none() -> None:
+    bse_only = pd.Series({"nse_symbol": float("nan"), "bse_sc_code": "500325"})
+    unmatched = pd.Series({"nse_symbol": "UNKNOWN", "bse_sc_code": float("nan")})
+
+    assert match_zerodha_symbol(bse_only, set(), {"500325": "RELIANCE"}) == "RELIANCE"
+    assert match_zerodha_symbol(unmatched, {"RELIANCE"}, {}) is None
+
+
+def test_match_yahoo_symbol_uses_bo_after_nan_and_returns_none() -> None:
+    bse_only = pd.Series({"nse_symbol": float("nan"), "zd_symbol": "RELIANCE"})
+    unmatched = pd.Series({"nse_symbol": float("nan"), "zd_symbol": "UNKNOWN"})
+
+    assert match_yahoo_symbol(bse_only, {"RELIANCE.BO"}) == "RELIANCE"
+    assert match_yahoo_symbol(unmatched, {"RELIANCE.BO"}) is None
