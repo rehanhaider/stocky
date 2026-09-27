@@ -20,6 +20,7 @@ from stocky import __version__
 from stocky.config import (
     DEFAULT_BHAVCOPY_DIR,
     DEFAULT_DB_PATH,
+    DEFAULT_SNAPSHOT_DIR,
     DEFAULT_YAHOO_JSON_CACHE_DIR,
     DEFAULT_ZERODHA_INSTRUMENTS,
 )
@@ -38,7 +39,7 @@ from stocky.enrich import (
     read_yahoo_fields,
     screen_instruments,
 )
-from stocky.export import export_consolidated
+from stocky.export import SNAPSHOT_FORMATS, create_snapshot, export_consolidated, export_tickers
 from stocky.pipeline import RebuildResult, SourcePreview, preview_sources, rebuild_database
 from stocky.sources import BhavcopyPaths, list_bhavcopy_pairs, resolve_bhavcopy_paths
 from stocky.yahoo import ProgressCallback, YahooDataManager
@@ -721,22 +722,55 @@ def export(
         str | None,
         typer.Option("--require", help="Comma-separated columns that must be populated for a row to be exported."),
     ] = None,
+    tickers: Annotated[
+        str | None,
+        typer.Option(
+            "--tickers",
+            help="Write one ticker per line from this column (zd_symbol, yq_symbol, nse_symbol, or bse_sc_code).",
+        ),
+    ] = None,
+    suffix: Annotated[
+        str | None,
+        typer.Option("--suffix", help="Text appended to every ticker, such as .NS or .BO for Yahoo. Needs --tickers."),
+    ] = None,
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
 ) -> None:
-    """Export the consolidated table to CSV, JSON, or Parquet."""
+    """Export the consolidated table to CSV, JSON, or Parquet, or write a ticker list."""
     try:
-        result = export_consolidated(
-            db_path,
-            output=output,
-            format=format,
-            columns=_split_columns(columns),
-            require=_split_columns(require),
-        )
+        if tickers is not None:
+            if format is not None or columns is not None:
+                raise ValueError(
+                    "--tickers writes a plain ticker list; it cannot be combined with --format or --columns."
+                )
+            result = export_tickers(
+                db_path,
+                output=output,
+                column=tickers.strip(),
+                suffix=suffix or "",
+                require=_split_columns(require),
+            )
+        else:
+            if suffix is not None:
+                raise ValueError("--suffix only applies with --tickers.")
+            result = export_consolidated(
+                db_path,
+                output=output,
+                format=format,
+                columns=_split_columns(columns),
+                require=_split_columns(require),
+            )
     except Exception as exc:
         error_console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
 
-    if result.output is not None:
+    if result.output is None:
+        return
+    if result.format == "tickers":
+        console.print(
+            f"[green]Wrote {result.rows} tickers from {escape(result.columns[0])} "
+            f"to {escape(str(result.output))}.[/green]"
+        )
+    else:
         console.print(
             f"[green]Wrote {result.rows} rows ({escape(', '.join(result.columns))}) "
             f"to {escape(str(result.output))} as {result.format}.[/green]"
@@ -782,6 +816,40 @@ def screen(
         _emit_json(result)
     else:
         _print_screen_result(result)
+
+
+@app.command()
+def snapshot(
+    output_dir: Annotated[
+        Path, typer.Option("--output-dir", help="Directory that holds versioned snapshots.")
+    ] = DEFAULT_SNAPSHOT_DIR,
+    version: Annotated[
+        str | None,
+        typer.Option("--version", help="Snapshot version label. Defaults to today's UTC date (YYYY-MM-DD)."),
+    ] = None,
+    formats: Annotated[
+        str | None,
+        typer.Option("--formats", help=f"Comma-separated formats to write. Default: {','.join(SNAPSHOT_FORMATS)}."),
+    ] = None,
+    db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
+) -> None:
+    """Write a versioned, checksummed snapshot of the consolidated table that downstream projects can pin."""
+    try:
+        result = create_snapshot(db_path, output_dir=output_dir, version=version, formats=_split_columns(formats))
+    except Exception as exc:
+        error_console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    if json_output:
+        _emit_json(result)
+        return
+
+    console.print(
+        f"[green]Wrote snapshot {escape(result.version)} ({result.rows} rows) to {escape(str(result.directory))}.[/green]"
+    )
+    for file in result.files:
+        console.print(f"  {escape(file.name)}  sha256 {file.sha256}")
 
 
 @contextlib.contextmanager
