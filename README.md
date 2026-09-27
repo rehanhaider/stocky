@@ -59,6 +59,27 @@ option asks for the exchange, the key column, an optional limit, and whether to 
 how many symbols it will fetch and a progress bar while it runs. Both options run exactly what `stocky rebuild` and
 `stocky yahoo update` run.
 
+Open the full-screen terminal UI:
+
+```bash
+uv sync --extra tui
+uv run stocky tui
+```
+
+The TUI needs the optional Textual extra; install it with `uv sync --extra tui` or `pip install "stocky[tui]"`. It has four tabs
+over the same code as the commands:
+
+- **Rebuild** resolves the bhavcopies from the latest pair, a discovered trade date, or files you pick in the file tree,
+  previews each file's row count, and shows each stage and any validation failure while `stocky rebuild` runs.
+- **Yahoo update** takes the exchange, key, limit, and missing-only choices, counts the symbols to fetch, and shows a live
+  progress bar while `stocky yahoo update` runs.
+- **Status** shows the `stocky status` tables, opens the database folder, and exports the consolidated table to CSV, JSON,
+  or Parquet.
+- **Search** lists matches for a symbol, ISIN, BSE scrip code, or name; select a row to see its equivalents.
+
+A log panel under the tabs records every run's progress and errors. `stocky tui` accepts `--db-path`, `--input-dir`, and
+`--zerodha-instruments`. Press `q` to quit; a running rebuild or Yahoo update stops at its next step first.
+
 Rebuild the SQLite database using the latest matching BSE/NSE bhavcopy pair:
 
 ```bash

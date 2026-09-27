@@ -428,6 +428,31 @@ def interactive() -> None:
             console.print("[red]Not a valid selection.[/red]")
 
 
+@app.command()
+def tui(
+    db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    input_dir: Annotated[
+        Path, typer.Option("--input-dir", help="Directory containing bhavcopy files.")
+    ] = DEFAULT_BHAVCOPY_DIR,
+    zerodha_instruments: Annotated[
+        Path,
+        typer.Option("--zerodha-instruments", help="Zerodha instruments CSV path."),
+    ] = DEFAULT_ZERODHA_INSTRUMENTS,
+) -> None:
+    """Open the full-screen terminal UI."""
+    try:
+        from stocky.tui import StockyApp
+    except ModuleNotFoundError as exc:
+        if exc.name is None or exc.name.partition(".")[0] != "textual":
+            raise
+        error_console.print(
+            "[red]The TUI needs Textual. Install it with 'uv sync --extra tui' or 'pip install \"stocky[tui]\"'.[/red]"
+        )
+        raise typer.Exit(1) from exc
+
+    StockyApp(db_path=db_path, input_dir=input_dir, zerodha_instruments=zerodha_instruments).run()
+
+
 def _rebuild_impl(
     *,
     trade_date: str | None = None,

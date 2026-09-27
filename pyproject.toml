@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 parquet = ["pyarrow>=15"]
+tui = ["textual>=8.2"]
 
 [project.scripts]
 stocky = "stocky.cli:main"
@@ -28,6 +29,7 @@ dev = [
     "pyarrow>=15",
     "pytest>=8.0",
     "ruff>=0.8",
+    "textual>=8.2",
 ]
 
 [tool.hatch.build.targets.wheel]
