@@ -50,7 +50,7 @@ FIELD_SOURCES: dict[str, tuple[str, tuple[tuple[str, str], ...]]] = {
 EARNINGS_COLUMNS = ("earnings_date", "earnings_date_end")
 FIELD_COLUMNS = (*FIELD_SOURCES, *EARNINGS_COLUMNS)
 KEY_COLUMNS = ("yahoo_symbol", "symbol", "exchange", "fetched_at")
-SCREEN_EXCHANGES = ("BSE", "NSE")
+SCREEN_EXCHANGES = ("NSE",)
 
 
 @dataclass(frozen=True)
@@ -158,8 +158,10 @@ def _create_fields_table(con: sqlite3.Connection) -> None:
 
 
 def _create_enriched_view(con: sqlite3.Connection) -> None:
-    # One row per consolidated instrument and exchange with a usable cached response. The join
-    # mirrors how rebuild picks yq_symbol: the bare symbol behind a cached .NS or .BO ticker.
+    # One row per consolidated instrument with a usable cached NSE response. A .NS ticker is the
+    # NSE symbol, so the match is exact. A .BO ticker is not always the NSE symbol (GLOBE.BO is a
+    # different company from NSE's GLOBE) and the cache holds nothing that ties it to an ISIN, so
+    # BSE responses stay out of the view rather than risk attaching another company's data.
     selected = ", ".join(
         [
             "c.isin",
@@ -178,7 +180,7 @@ def _create_enriched_view(con: sqlite3.Connection) -> None:
         CREATE VIEW {ENRICHED_VIEW} AS
         SELECT {selected}
         FROM {CONSOLIDATED_TABLE} c
-        JOIN {YAHOO_FIELDS_TABLE} f ON f.symbol = c.yq_symbol
+        JOIN {YAHOO_FIELDS_TABLE} f ON f.symbol = c.nse_symbol AND f.exchange = 'NSE'
         WHERE f.available = 1
         """
     )
@@ -289,7 +291,10 @@ def screen_instruments(
     if exchange is not None:
         normalized = exchange.strip().upper()
         if normalized not in SCREEN_EXCHANGES:
-            raise ValueError(f"Unsupported exchange: {exchange}. Expected NSE or BSE.")
+            raise ValueError(
+                f"Unsupported exchange: {exchange}. Screening covers NSE quotes only, because a cached "
+                "BSE ticker cannot be tied to its ISIN reliably."
+            )
         conditions.append("exchange = :exchange")
         params["exchange"] = normalized
     if market_cap_gt is not None:

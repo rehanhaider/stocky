@@ -785,7 +785,9 @@ def screen(
     market_cap_lt: Annotated[
         float | None, typer.Option("--market-cap-lt", help="Market cap below this many crore INR.")
     ] = None,
-    exchange: Annotated[str | None, typer.Option("--exchange", help="Yahoo quote exchange: BSE or NSE.")] = None,
+    exchange: Annotated[
+        str | None, typer.Option("--exchange", help="Yahoo quote exchange. Only NSE is screened.")
+    ] = None,
     sector: Annotated[str | None, typer.Option("--sector", help="Exact sector name, case-insensitive.")] = None,
     industry: Annotated[str | None, typer.Option("--industry", help="Exact industry name, case-insensitive.")] = None,
     limit: Annotated[int, typer.Option("--limit", help="Maximum number of matches to display.")] = 50,

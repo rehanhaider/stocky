@@ -132,14 +132,17 @@ uv run stocky yahoo fields RELIANCE.NS --json
 ```
 
 Extract the fields from every cached response into the `yahoo_fields` table, and create the `consolidated_yahoo`
-view that joins them onto `consolidated` (one row per instrument and exchange with a usable response):
+view that joins them onto `consolidated`. The view holds one row per instrument with a usable NSE (`.NS`) response,
+matched on the exact NSE symbol. BSE (`.BO`) responses are left out: a `.BO` ticker is not always the NSE symbol
+(`GLOBE.BO` is a different company from NSE's `GLOBE`), and nothing in the cache ties it to an ISIN. `yahoo fields`
+still shows them per ticker.
 
 ```bash
 uv run stocky yahoo extract
 ```
 
-Screen instruments by those extracted fields. Market cap bounds are in crore INR, and results are sorted largest
-first:
+Screen instruments by those extracted fields. Screening covers NSE quotes only, market cap bounds are in crore INR,
+and results are sorted largest first:
 
 ```bash
 uv run stocky screen --market-cap-gt 10000 --exchange NSE

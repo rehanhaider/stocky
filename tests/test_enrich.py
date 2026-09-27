@@ -161,10 +161,9 @@ def test_materialize_writes_table_and_view(tmp_path, seed_consolidated) -> None:
         rows = con.execute(
             f"SELECT isin, yahoo_symbol, exchange, sector FROM {ENRICHED_VIEW} ORDER BY yahoo_symbol"
         ).fetchall()
-    # INFY.BO holds an error string and 20MICRONS has no yq_symbol, so neither joins.
+    # Only NSE responses join, on the exact NSE symbol; .BO tickers cannot be tied to an ISIN.
     assert rows == [
         ("INE009A01021", "INFY.NS", "NSE", "Technology"),
-        ("INE002A01018", "RELIANCE.BO", "BSE", None),
         ("INE002A01018", "RELIANCE.NS", "NSE", "Energy"),
     ]
 
@@ -258,10 +257,10 @@ def test_screen_orders_largest_first_and_limits(tmp_path, seed_consolidated) -> 
     _seed_screen_db(db_path, seed_consolidated)
     materialize_yahoo_fields(db_path)
 
-    result = screen_instruments(db_path, market_cap_lt=1_200_000, limit=1)
+    result = screen_instruments(db_path, market_cap_gt=100_000, limit=1)
 
     assert result.total == 2
-    assert [row["yahoo_symbol"] for row in result.rows] == ["RELIANCE.BO"]
+    assert [row["yahoo_symbol"] for row in result.rows] == ["RELIANCE.NS"]
 
 
 def test_screen_filters_by_sector_and_industry_case_insensitively(tmp_path, seed_consolidated) -> None:
@@ -294,7 +293,8 @@ def test_screen_requires_extraction(tmp_path, seed_consolidated) -> None:
 
 
 @pytest.mark.parametrize(
-    ("kwargs", "message"), [({"exchange": "LSE"}, "Unsupported exchange"), ({"limit": 0}, "Limit")]
+    ("kwargs", "message"),
+    [({"exchange": "LSE"}, "Unsupported exchange"), ({"exchange": "BSE"}, "NSE quotes only"), ({"limit": 0}, "Limit")],
 )
 def test_screen_rejects_bad_arguments(tmp_path, seed_consolidated, kwargs, message) -> None:
     db_path = tmp_path / "stocky.db"
@@ -335,4 +335,24 @@ def test_failed_materialize_keeps_previous_snapshot(tmp_path, seed_consolidated,
 
     with sqlite3.connect(db_path) as con:
         assert con.execute(f"SELECT COUNT(*) FROM {YAHOO_FIELDS_TABLE}").fetchone()[0] == 5
-        assert con.execute(f"SELECT COUNT(*) FROM {ENRICHED_VIEW}").fetchone()[0] == 3
+        assert con.execute(f"SELECT COUNT(*) FROM {ENRICHED_VIEW}").fetchone()[0] == 2
+
+
+def test_view_does_not_attach_bse_ticker_of_another_company(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    # Globe Textiles trades as GLOBE on NSE, but Yahoo's GLOBE.BO is a different company.
+    seed_consolidated(db_path, [("INE581X01021", "equity", "GLOBE", "GLOBE", "GLOBE", "543253", "GLOBE TEXTILES")])
+    _seed_responses(
+        db_path,
+        {
+            "GLOBE.NS": {"price": {"longName": "Globe Textiles (India) Limited", "marketCap": 493_225_088}},
+            "GLOBE.BO": {"price": {"longName": "Confidence Futuristic Energetech Limited", "marketCap": 10**14}},
+        },
+    )
+    materialize_yahoo_fields(db_path)
+
+    result = screen_instruments(db_path)
+
+    assert [(row["yahoo_symbol"], row["name"]) for row in result.rows] == [
+        ("GLOBE.NS", "Globe Textiles (India) Limited")
+    ]
