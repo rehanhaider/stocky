@@ -156,6 +156,25 @@ Stream CSV to stdout so it can be piped into another command:
 uv run stocky export --format csv
 ```
 
+### Ticker lists
+
+`--tickers COLUMN` writes one ticker per line from `zd_symbol`, `yq_symbol`, `nse_symbol`, or `bse_sc_code`, skipping rows where that column is empty and dropping repeats. `--suffix` appends text to every ticker, and `--require` still filters rows. Most backtesting setups can read the result directly: pandas, vectorbt, backtrader, and zipline-reloaded loaders take a plain list of tickers. Stocky has no price data, so building data feeds or bundles is left to those tools.
+
+Yahoo tickers for NSE-listed instruments, ready for `yfinance` or vectorbt's `YFData`:
+
+```bash
+uv run stocky export --tickers yq_symbol --suffix .NS --require nse_symbol -o data/output/yahoo_nse.txt
+```
+
+### Pinnable snapshots
+
+`stocky snapshot` writes every consolidated row to `data/output/snapshots/consolidated-<version>/` as CSV and Parquet, along with a `manifest.json` that records the version, row count, columns, Stocky version, and each file's size and SHA-256. The version defaults to today's UTC date. An existing snapshot is never overwritten, so a downstream project can pin a version and check its files against the manifest. Parquet needs the `parquet` extra; without it, pass `--formats csv`.
+
+```bash
+uv run stocky snapshot --version 2026-q3
+uv run stocky snapshot --version 2026-q3-csv --formats csv
+```
+
 For compatibility, `python app.py` still launches the CLI after dependencies are installed.
 
 ## UI Options

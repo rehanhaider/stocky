@@ -1,15 +1,25 @@
+import hashlib
 import json
 import sqlite3
 import sys
+from datetime import datetime, timezone
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from stocky import __version__
 from stocky.cli import app
 from stocky.database import CONSOLIDATED_TABLE
-from stocky.export import EXPORT_COLUMNS, export_consolidated, read_consolidated
+from stocky.export import (
+    EXPORT_COLUMNS,
+    SNAPSHOT_MANIFEST,
+    create_snapshot,
+    export_consolidated,
+    export_tickers,
+    read_consolidated,
+)
 
 
 def _seeded_db(tmp_path, seed_consolidated):
@@ -366,3 +376,250 @@ def test_cli_export_summary_escapes_markup_in_output_path(tmp_path, seed_consoli
     assert output.read_text(encoding="utf-8").split("\n")[0] == ",".join(EXPORT_COLUMNS)
     assert "Wrote 4 rows" in result.stdout
     assert "out[/red].csv" in result.stdout.replace("\n", "")
+
+
+def test_tickers_skip_unpopulated_rows_and_keep_isin_order(tmp_path, seed_consolidated) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
+    output = tmp_path / "out" / "yahoo.txt"
+
+    result = export_tickers(db_path, output=output, column="yq_symbol")
+
+    assert result.rows == 2
+    assert result.columns == ("yq_symbol",)
+    assert result.format == "tickers"
+    assert output.read_text(encoding="utf-8") == "RELIANCE\nINFY\n"
+
+
+def test_tickers_append_suffix_and_drop_repeats(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(
+        db_path,
+        [
+            ("INE001", "equity", "AAA", "AAA", None, "1", "A"),
+            ("INE002", "equity", "AAA", " AAA ", None, "2", "A2"),
+            ("INE003", "equity", "BBB", "BBB", None, None, "B"),
+        ],
+    )
+    output = tmp_path / "yahoo.txt"
+
+    result = export_tickers(db_path, output=output, column="yq_symbol", suffix=".NS")
+
+    assert result.rows == 2
+    assert output.read_text(encoding="utf-8") == "AAA.NS\nBBB.NS\n"
+
+
+def test_tickers_honour_extra_require_and_text_codes(tmp_path, seed_consolidated) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
+    output = tmp_path / "bse.txt"
+
+    result = export_tickers(db_path, output=output, column="bse_sc_code", require=["nse_symbol", "bse_sc_code"])
+
+    assert result.rows == 2
+    assert output.read_text(encoding="utf-8") == "500325\n500209\n"
+
+
+def test_tickers_reject_unknown_column(tmp_path, seed_consolidated) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
+
+    with pytest.raises(ValueError, match="Unknown tickers column 'isin'"):
+        export_tickers(db_path, output=None, column="isin")
+
+
+def test_tickers_of_zero_rows_write_an_empty_file(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path, [])
+    output = tmp_path / "none.txt"
+
+    result = export_tickers(db_path, output=output, column="zd_symbol")
+
+    assert result.rows == 0
+    assert output.read_text(encoding="utf-8") == ""
+
+
+def test_cli_tickers_to_stdout_write_only_tickers(tmp_path, seed_consolidated, runner) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
+
+    result = runner.invoke(
+        app,
+        ["export", "--tickers", "zd_symbol", "--suffix", ".NS", "--require", "nse_symbol", "--db-path", str(db_path)],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout == "RELIANCE.NS\nINFY.NS\n"
+
+
+def test_cli_tickers_to_file_prints_summary(tmp_path, seed_consolidated, runner) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
+    output = tmp_path / "zerodha.txt"
+
+    result = runner.invoke(app, ["export", "--tickers", "zd_symbol", "-o", str(output), "--db-path", str(db_path)])
+
+    assert result.exit_code == 0
+    assert "Wrote 4 tickers from zd_symbol" in result.stdout
+    assert output.read_text(encoding="utf-8").splitlines() == ["RELIANCE", "INFY", "20MICRONS", "INFYBEES"]
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["--tickers", "yq_symbol", "--format", "csv"], "cannot be combined with --format or --columns"),
+        (["--tickers", "yq_symbol", "--columns", "isin"], "cannot be combined with --format or --columns"),
+        (["--format", "csv", "--suffix", ".NS"], "--suffix only applies with --tickers"),
+    ],
+)
+def test_cli_tickers_reject_conflicting_options(tmp_path, seed_consolidated, runner, args, message) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
+
+    result = runner.invoke(app, ["export", *args, "--db-path", str(db_path)])
+
+    assert result.exit_code == 1
+    assert message in " ".join(result.stderr.split())
+    assert result.stdout == ""
+
+
+def test_snapshot_writes_versioned_files_and_checksummed_manifest(tmp_path, seed_consolidated) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
+    output_dir = tmp_path / "snapshots"
+
+    result = create_snapshot(db_path, output_dir=output_dir, version="2026.09")
+
+    directory = output_dir / "consolidated-2026.09"
+    assert result.directory == directory
+    assert result.version == "2026.09"
+    assert result.rows == 4
+    assert sorted(path.name for path in directory.iterdir()) == [
+        "consolidated.csv",
+        "consolidated.parquet",
+        SNAPSHOT_MANIFEST,
+    ]
+    assert [path.name for path in output_dir.iterdir()] == ["consolidated-2026.09"]
+
+    manifest = json.loads((directory / SNAPSHOT_MANIFEST).read_text(encoding="utf-8"))
+    assert manifest["version"] == "2026.09"
+    assert manifest["stocky_version"] == __version__
+    assert manifest["table"] == CONSOLIDATED_TABLE
+    assert manifest["rows"] == 4
+    assert manifest["columns"] == list(EXPORT_COLUMNS)
+    assert [entry["name"] for entry in manifest["files"]] == ["consolidated.csv", "consolidated.parquet"]
+    for entry in manifest["files"]:
+        data = (directory / entry["name"]).read_bytes()
+        assert entry["bytes"] == len(data)
+        assert entry["sha256"] == hashlib.sha256(data).hexdigest()
+
+    csv_lines = (directory / "consolidated.csv").read_text(encoding="utf-8").splitlines()
+    assert csv_lines[1] == "INE002A01018,equity,RELIANCE,RELIANCE,RELIANCE,500325,RELIANCE INDUSTRIES"
+    table = pq.read_table(directory / "consolidated.parquet")
+    assert table.num_rows == 4
+    assert all(field.type == pa.string() for field in table.schema)
+
+
+def test_snapshot_defaults_to_todays_utc_date(tmp_path, seed_consolidated) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
+
+    result = create_snapshot(db_path, output_dir=tmp_path, formats=["json"])
+
+    assert result.version == datetime.now(timezone.utc).date().isoformat()
+    assert [file.name for file in result.files] == ["consolidated.json"]
+    assert len(json.loads((result.directory / "consolidated.json").read_text(encoding="utf-8"))) == 4
+
+
+def test_snapshot_never_overwrites_an_existing_version(tmp_path, seed_consolidated) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
+    create_snapshot(db_path, output_dir=tmp_path / "snapshots", version="v1", formats=["csv"])
+    csv_path = tmp_path / "snapshots" / "consolidated-v1" / "consolidated.csv"
+    original = csv_path.read_bytes()
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        create_snapshot(db_path, output_dir=tmp_path / "snapshots", version="v1", formats=["csv"])
+
+    assert csv_path.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"version": "../escape"}, "Invalid snapshot version"),
+        ({"version": ""}, "Invalid snapshot version"),
+        ({"formats": ["xml"]}, "Unknown format 'xml'"),
+        ({"formats": []}, "--formats must name at least one format"),
+    ],
+)
+def test_snapshot_rejects_bad_version_or_formats_before_writing(tmp_path, seed_consolidated, kwargs, message) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
+    output_dir = tmp_path / "snapshots"
+
+    with pytest.raises(ValueError, match=message):
+        create_snapshot(db_path, output_dir=output_dir, **kwargs)
+
+    assert not output_dir.exists()
+
+
+def test_snapshot_failure_leaves_no_partial_version(tmp_path) -> None:
+    output_dir = tmp_path / "snapshots"
+    with sqlite3.connect(tmp_path / "stocky.db") as con:
+        con.execute(f"CREATE TABLE {CONSOLIDATED_TABLE} (isin TEXT)")
+
+    with pytest.raises(sqlite3.OperationalError):
+        create_snapshot(tmp_path / "stocky.db", output_dir=output_dir, version="v1", formats=["csv"])
+
+    assert not output_dir.exists() or list(output_dir.iterdir()) == []
+
+
+def test_snapshot_render_failure_removes_staging_directory(tmp_path, seed_consolidated, monkeypatch) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
+    output_dir = tmp_path / "snapshots"
+
+    def fail(frame):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("stocky.export._render_parquet", fail)
+
+    with pytest.raises(OSError, match="disk full"):
+        create_snapshot(db_path, output_dir=output_dir, version="v1")
+
+    assert list(output_dir.iterdir()) == []
+
+
+def test_snapshot_without_pyarrow_fails_before_writing(tmp_path, monkeypatch) -> None:
+    output_dir = tmp_path / "snapshots"
+    monkeypatch.setitem(sys.modules, "pyarrow", None)
+
+    with pytest.raises(RuntimeError, match="uv sync --extra parquet"):
+        create_snapshot(tmp_path / "missing.db", output_dir=output_dir, version="v1")
+
+    assert not output_dir.exists()
+
+
+def test_cli_snapshot_prints_summary_and_json(tmp_path, seed_consolidated, runner) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
+    output_dir = tmp_path / "snapshots"
+
+    result = runner.invoke(
+        app,
+        ["snapshot", "--output-dir", str(output_dir), "--version", "v1", "--formats", "csv", "--db-path", str(db_path)],
+    )
+    assert result.exit_code == 0
+    assert "Wrote snapshot v1 (4 rows)" in result.stdout
+    assert "consolidated.csv  sha256" in result.stdout
+
+    result = runner.invoke(
+        app,
+        ["snapshot", "--output-dir", str(output_dir), "--version", "v2", "--db-path", str(db_path), "--json"],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["version"] == "v2"
+    assert payload["rows"] == 4
+    assert [file["format"] for file in payload["files"]] == ["csv", "parquet"]
+
+
+def test_cli_snapshot_existing_version_reports_on_stderr(tmp_path, seed_consolidated, runner) -> None:
+    db_path = _seeded_db(tmp_path, seed_consolidated)
+    args = ["snapshot", "--output-dir", str(tmp_path), "--version", "v1", "--formats", "csv", "--db-path", str(db_path)]
+    assert runner.invoke(app, args).exit_code == 0
+
+    result = runner.invoke(app, args)
+
+    assert result.exit_code == 1
+    assert "already exists" in result.stderr
+    assert result.stdout == ""
