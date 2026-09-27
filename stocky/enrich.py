@@ -18,6 +18,7 @@ from stocky.database import (
 YAHOO_FIELDS_TABLE = "yahoo_fields"
 ENRICHED_VIEW = "consolidated_yahoo"
 CRORE = 10_000_000
+SQLITE_INTEGER_MAX = 2**63 - 1
 
 # Every extracted column, its SQLite type, and where it comes from. A column with several
 # sources takes the first one that holds a usable value, because not every module is
@@ -67,9 +68,12 @@ class ScreenResult:
 
 def _number(value: object) -> int | float | None:
     # Yahoo sometimes sends "Infinity" for P/E or an empty dict for market cap; neither is a number.
+    # An integer past SQLite's 64-bit range would abort the whole extraction, so it is dropped too.
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
     if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, int) and abs(value) > SQLITE_INTEGER_MAX:
         return None
     return value
 
@@ -194,6 +198,9 @@ def materialize_yahoo_fields(db_path: Path = DEFAULT_DB_PATH) -> ExtractResult:
                 "Run 'stocky yahoo update' or 'stocky yahoo import-cache' first."
             )
 
+        # sqlite3 commits DDL immediately outside a transaction. Opening one explicitly keeps the
+        # previous snapshot intact if extraction fails partway: the drop rolls back with the inserts.
+        con.execute("BEGIN")
         _create_fields_table(con)
         # Unusable responses are stored too, flagged unavailable, so screen can tell a
         # snapshot that is out of date from one that simply skipped Yahoo error strings.

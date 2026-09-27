@@ -303,3 +303,36 @@ def test_screen_rejects_bad_arguments(tmp_path, seed_consolidated, kwargs, messa
 
     with pytest.raises(ValueError, match=message):
         screen_instruments(db_path, **kwargs)
+
+
+def test_extract_fields_drops_integers_outside_sqlite_range() -> None:
+    fields = extract_fields({"price": {"marketCap": 2**63}})
+
+    assert fields is not None
+    assert fields["market_cap"] is None
+
+
+def test_failed_materialize_keeps_previous_snapshot(tmp_path, seed_consolidated, monkeypatch) -> None:
+    db_path = tmp_path / "stocky.db"
+    _seed_screen_db(db_path, seed_consolidated)
+    materialize_yahoo_fields(db_path)
+
+    import stocky.enrich as enrich
+
+    calls = 0
+    real_extract = enrich.extract_fields
+
+    def failing_extract(payload):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise RuntimeError("corrupt blob")
+        return real_extract(payload)
+
+    monkeypatch.setattr(enrich, "extract_fields", failing_extract)
+    with pytest.raises(RuntimeError, match="corrupt blob"):
+        materialize_yahoo_fields(db_path)
+
+    with sqlite3.connect(db_path) as con:
+        assert con.execute(f"SELECT COUNT(*) FROM {YAHOO_FIELDS_TABLE}").fetchone()[0] == 5
+        assert con.execute(f"SELECT COUNT(*) FROM {ENRICHED_VIEW}").fetchone()[0] == 3

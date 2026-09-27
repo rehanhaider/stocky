@@ -221,7 +221,7 @@ def _print_yahoo_fields(symbol: str, results: list[dict[str, object]]) -> None:
     table = Table(title=f"Yahoo fields for '{escape(symbol)}'")
     table.add_column("Field")
     for result in results:
-        table.add_column(str(result["yahoo_symbol"]))
+        table.add_column(escape(str(result["yahoo_symbol"])))
     for field in results[0]:
         if field == "yahoo_symbol":
             continue
