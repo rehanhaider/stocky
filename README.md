@@ -118,13 +118,47 @@ Search and inspect equivalent identifiers in a standalone explorer:
 uv run stocky explore
 ```
 
+### Fields from the Yahoo cache
+
+Every cached Yahoo response already holds market cap, sector and industry, quote data, key statistics, and earnings
+dates. None of the commands below call Yahoo Finance.
+
+Show those fields for one symbol, read straight from the cached response. A bare symbol shows both the `.NS` and
+`.BO` responses:
+
+```bash
+uv run stocky yahoo fields RELIANCE
+uv run stocky yahoo fields RELIANCE.NS --json
+```
+
+Extract the fields from every cached response into the `yahoo_fields` table, and create the `consolidated_yahoo`
+view that joins them onto `consolidated` (one row per instrument and exchange with a usable response):
+
+```bash
+uv run stocky yahoo extract
+```
+
+Screen instruments by those extracted fields. Market cap bounds are in crore INR, and results are sorted largest
+first:
+
+```bash
+uv run stocky screen --market-cap-gt 10000 --exchange NSE
+uv run stocky screen --sector Technology --market-cap-lt 5000 --limit 20
+```
+
+`yahoo_fields` is a snapshot. Re-run `stocky yahoo extract` after `yahoo update` or `yahoo import-cache`; `screen`
+warns when the cache has changed since the last extraction. Not every module is cached for every symbol, so missing
+fields are left empty. Yahoo occasionally reports implausible values (for example a market cap at the 64-bit integer
+limit), and these are stored as reported. The cached modules hold no price history, so there is no OHLCV export.
+
 ### JSON output
 
 ```bash
 uv run stocky status --json
 ```
 
-The `status`, `query`, `lookup`, `explore`, `rebuild`, `yahoo update`, and `yahoo import-cache` commands accept `--json` and print JSON on stdout. With `--json`, `yahoo update` also writes its progress and error events to stderr as JSON lines, one per line.
+The `status`, `query`, `lookup`, `explore`, `rebuild`, `screen`, `yahoo update`, `yahoo import-cache`, `yahoo extract`,
+and `yahoo fields` commands accept `--json` and print JSON on stdout. With `--json`, `yahoo update` also writes its progress and error events to stderr as JSON lines, one per line.
 
 ### Exporting the consolidated table
 
