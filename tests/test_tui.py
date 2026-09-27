@@ -363,10 +363,25 @@ def test_open_folder_launches_the_database_directory(tmp_path, seed_consolidated
 
     async def scenario(stocky_app, pilot) -> None:
         await _press(stocky_app, pilot, "#open-folder")
+        assert _squash(f"Opened {tmp_path.resolve()}.") in _log_text(stocky_app)
 
     _run(StockyApp(db_path=db_path, input_dir=tmp_path), scenario)
 
     assert launched == [str(tmp_path.resolve())]
+
+
+def test_open_folder_reports_when_no_file_manager_is_available(tmp_path, seed_consolidated, monkeypatch) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    monkeypatch.setattr(tui.typer, "launch", lambda target: 1)
+
+    async def scenario(stocky_app, pilot) -> None:
+        await _press(stocky_app, pilot, "#open-folder")
+        log = _log_text(stocky_app)
+        assert _squash(f"Could not open a file manager. The database folder is {tmp_path.resolve()}.") in log
+        assert _squash("Opened") not in log
+
+    _run(StockyApp(db_path=db_path, input_dir=tmp_path), scenario)
 
 
 def test_open_folder_reports_a_missing_directory(tmp_path, monkeypatch) -> None:

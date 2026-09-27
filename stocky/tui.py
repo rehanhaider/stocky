@@ -495,7 +495,10 @@ class StockyApp(App[None]):
         if not folder.is_dir():
             self.log_error(f"Database folder not found: {folder}. Run a rebuild first.")
             return
-        typer.launch(str(folder))
+        # typer.launch returns non-zero instead of raising when no opener (such as xdg-open) exists.
+        if typer.launch(str(folder)) != 0:
+            self.log_error(f"Could not open a file manager. The database folder is {folder}.")
+            return
         self.log_line(f"Opened {folder}.")
 
     @on(Button.Pressed, "#export-run")
