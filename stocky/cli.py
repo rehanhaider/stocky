@@ -31,6 +31,13 @@ from stocky.database import (
     read_status,
     search_instruments,
 )
+from stocky.enrich import (
+    CRORE,
+    ScreenResult,
+    materialize_yahoo_fields,
+    read_yahoo_fields,
+    screen_instruments,
+)
 from stocky.export import export_consolidated
 from stocky.pipeline import RebuildResult, SourcePreview, preview_sources, rebuild_database
 from stocky.sources import BhavcopyPaths, list_bhavcopy_pairs, resolve_bhavcopy_paths
@@ -188,6 +195,61 @@ def _print_equivalents(match: InstrumentMatch, term: str | None = None) -> None:
     table.add_row("BSE code", match.bse_sc_code or "-")
     table.add_row("BSE name", match.bse_sc_name or "-")
     console.print(table)
+
+
+def _format_optional(value: object) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, float):
+        # Ratios such as change percent and dividend yield are fractions; keep their digits.
+        return f"{value:,.2f}" if abs(value) >= 1 else f"{value:.4g}"
+    if isinstance(value, int):
+        return f"{value:,}"
+    return str(value)
+
+
+def _format_crore(market_cap: object) -> str:
+    if not isinstance(market_cap, int | float):
+        return "-"
+    return f"{market_cap / CRORE:,.0f}"
+
+
+def _print_yahoo_fields(symbol: str, results: list[dict[str, object]]) -> None:
+    table = Table(title=f"Yahoo fields for '{escape(symbol)}'")
+    table.add_column("Field")
+    for result in results:
+        table.add_column(str(result["yahoo_symbol"]))
+    for field in results[0]:
+        if field == "yahoo_symbol":
+            continue
+        table.add_row(field, *(escape(_format_optional(result[field])) for result in results))
+    console.print(table)
+
+
+def _print_screen_result(result: ScreenResult) -> None:
+    if result.total == 0:
+        console.print("[yellow]No instruments match these filters.[/yellow]")
+        return
+
+    table = Table(title="Screen results")
+    for header in ("ISIN", "Yahoo", "Exchange", "Name", "Sector", "Industry"):
+        table.add_column(header)
+    for header in ("Market cap (Cr)", "Price", "P/E"):
+        table.add_column(header, justify="right")
+    for row in result.rows:
+        table.add_row(
+            *(escape(_format_optional(row[key])) for key in ("isin", "yahoo_symbol", "exchange", "name", "sector")),
+            escape(_format_optional(row["industry"])),
+            _format_crore(row["market_cap"]),
+            _format_optional(row["regular_market_price"]),
+            _format_optional(row["trailing_pe"]),
+        )
+    console.print(table)
+
+    if result.total > len(result.rows):
+        console.print(f"[dim]Showing {len(result.rows)} of {result.total} matches. Raise --limit to see more.[/dim]")
 
 
 def _print_rebuild_result(result: RebuildResult) -> None:
@@ -681,6 +743,47 @@ def export(
         )
 
 
+@app.command()
+def screen(
+    market_cap_gt: Annotated[
+        float | None, typer.Option("--market-cap-gt", help="Market cap above this many crore INR.")
+    ] = None,
+    market_cap_lt: Annotated[
+        float | None, typer.Option("--market-cap-lt", help="Market cap below this many crore INR.")
+    ] = None,
+    exchange: Annotated[str | None, typer.Option("--exchange", help="Yahoo quote exchange: BSE or NSE.")] = None,
+    sector: Annotated[str | None, typer.Option("--sector", help="Exact sector name, case-insensitive.")] = None,
+    industry: Annotated[str | None, typer.Option("--industry", help="Exact industry name, case-insensitive.")] = None,
+    limit: Annotated[int, typer.Option("--limit", help="Maximum number of matches to display.")] = 50,
+    db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
+) -> None:
+    """Screen instruments by cached Yahoo fields. Run 'stocky yahoo extract' first."""
+    try:
+        result = screen_instruments(
+            db_path,
+            market_cap_gt=market_cap_gt,
+            market_cap_lt=market_cap_lt,
+            exchange=exchange,
+            sector=sector,
+            industry=industry,
+            limit=limit,
+        )
+    except Exception as exc:
+        (error_console if json_output else console).print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    if result.stale:
+        error_console.print(
+            "[yellow]The Yahoo cache changed since the last extraction. "
+            "Run 'stocky yahoo extract' to refresh the screened fields.[/yellow]"
+        )
+    if json_output:
+        _emit_json(result)
+    else:
+        _print_screen_result(result)
+
+
 @contextlib.contextmanager
 def _yahoo_progress(exchange: str, json_output: bool) -> Iterator[ProgressCallback]:
     """Yield the progress callback that suits the output mode: JSON lines, a bar, or plain lines."""
@@ -789,6 +892,53 @@ def yahoo_import_cache(
         _emit_json(result)
     else:
         console.print(f"[green]Imported {result.imported}; skipped {result.skipped}.[/green]")
+
+
+@yahoo_app.command("extract")
+def yahoo_extract(
+    db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
+) -> None:
+    """Extract fields from cached Yahoo responses into the yahoo_fields table and consolidated_yahoo view."""
+    try:
+        with contextlib.nullcontext() if json_output else console.status("Extracting Yahoo fields..."):
+            result = materialize_yahoo_fields(db_path)
+    except Exception as exc:
+        (error_console if json_output else console).print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    if json_output:
+        _emit_json(result)
+    else:
+        console.print(
+            f"[green]Extracted {result.extracted}; skipped {result.skipped} responses with no module data.[/green]"
+        )
+
+
+@yahoo_app.command("fields")
+def yahoo_fields(
+    symbol: Annotated[str, typer.Argument(help="Bare symbol (both exchanges) or Yahoo ticker such as RELIANCE.NS.")],
+    db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
+) -> None:
+    """Show market cap, sector, quote, key statistics, and earnings dates from the cached response."""
+    try:
+        results = read_yahoo_fields(symbol, db_path)
+    except Exception as exc:
+        (error_console if json_output else console).print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    if not results:
+        (error_console if json_output else console).print(
+            f"[red]No cached Yahoo response for '{escape(symbol)}'. "
+            f"Try 'stocky yahoo update' or check the symbol with 'stocky query'.[/red]"
+        )
+        raise typer.Exit(1)
+
+    if json_output:
+        _emit_json(results)
+    else:
+        _print_yahoo_fields(symbol, results)
 
 
 app.add_typer(yahoo_app, name="yahoo")

@@ -960,3 +960,163 @@ def test_format_percent(part, whole, expected) -> None:
 )
 def test_format_timestamp(value, expected) -> None:
     assert cli._format_timestamp(value) == expected
+
+
+def _seed_enrichment_db(db_path, seed_consolidated) -> None:
+    seed_consolidated(db_path)
+    initialize_database(db_path)
+    responses = {
+        ("RELIANCE.NS", "NSE"): {
+            "price": {"longName": "Reliance Industries Limited", "marketCap": 13_486_949_138_432},
+            "assetProfile": {"sector": "Energy", "industry": "Oil & Gas Refining & Marketing"},
+            "summaryDetail": {"trailingPE": 30.5, "dividendYield": 0.0032},
+        },
+        ("INFY.NS", "NSE"): {"price": {"shortName": "INFOSYS", "marketCap": 5_000_000_000_000}},
+        ("INFY.BO", "BSE"): "Quote not found for symbol: INFY.BO",
+    }
+    with connect(db_path) as con:
+        for (yahoo_symbol, exchange), payload in responses.items():
+            upsert_yahoo_response(
+                con,
+                yahoo_symbol=yahoo_symbol,
+                symbol=yahoo_symbol.split(".")[0],
+                exchange=exchange,
+                response_json=encode_response_json({yahoo_symbol: payload}),
+                source="test",
+            )
+
+
+def test_yahoo_extract_reports_counts(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    _seed_enrichment_db(db_path, seed_consolidated)
+
+    result = runner.invoke(app, ["yahoo", "extract", "--db-path", str(db_path)])
+
+    assert result.exit_code == 0
+    assert "Extracted 2; skipped 1" in result.stdout
+
+
+def test_yahoo_extract_json(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    _seed_enrichment_db(db_path, seed_consolidated)
+
+    result = runner.invoke(app, ["yahoo", "extract", "--db-path", str(db_path), "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {"extracted": 2, "skipped": 1}
+
+
+def test_yahoo_extract_reports_missing_database(tmp_path, runner) -> None:
+    result = runner.invoke(app, ["yahoo", "extract", "--db-path", str(tmp_path / "missing.db")])
+
+    assert result.exit_code == 1
+    assert "Database not found" in result.stdout
+
+
+def test_yahoo_fields_prints_both_exchanges(tmp_path, seed_consolidated, runner, monkeypatch) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    db_path = tmp_path / "stocky.db"
+    _seed_enrichment_db(db_path, seed_consolidated)
+
+    result = runner.invoke(app, ["yahoo", "fields", "INFY", "--db-path", str(db_path)])
+
+    assert result.exit_code == 0
+    assert "INFY.BO" in result.stdout
+    assert "INFY.NS" in result.stdout
+    assert "5,000,000,000,000" in result.stdout
+
+
+def test_yahoo_fields_json_keeps_fractions(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    _seed_enrichment_db(db_path, seed_consolidated)
+
+    result = runner.invoke(app, ["yahoo", "fields", "RELIANCE.NS", "--db-path", str(db_path), "--json"])
+
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 0
+    assert [entry["yahoo_symbol"] for entry in payload] == ["RELIANCE.NS"]
+    assert payload[0]["sector"] == "Energy"
+    assert payload[0]["dividend_yield"] == 0.0032
+
+
+def test_yahoo_fields_reports_unknown_symbol(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    _seed_enrichment_db(db_path, seed_consolidated)
+
+    result = runner.invoke(app, ["yahoo", "fields", "NOPE", "--db-path", str(db_path), "--json"])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "No cached Yahoo response for 'NOPE'" in result.stderr
+
+
+def test_screen_prints_matches_in_crore(tmp_path, seed_consolidated, runner, monkeypatch) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    db_path = tmp_path / "stocky.db"
+    _seed_enrichment_db(db_path, seed_consolidated)
+    runner.invoke(app, ["yahoo", "extract", "--db-path", str(db_path)])
+
+    result = runner.invoke(
+        app, ["screen", "--market-cap-gt", "10000", "--exchange", "NSE", "--limit", "1", "--db-path", str(db_path)]
+    )
+
+    assert result.exit_code == 0
+    assert "RELIANCE.NS" in result.stdout
+    assert "1,348,695" in result.stdout
+    assert "Showing 1 of 2 matches" in result.stdout
+
+
+def test_screen_json(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    _seed_enrichment_db(db_path, seed_consolidated)
+    runner.invoke(app, ["yahoo", "extract", "--db-path", str(db_path)])
+
+    result = runner.invoke(app, ["screen", "--sector", "energy", "--db-path", str(db_path), "--json"])
+
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 0
+    assert payload["total"] == 1
+    assert payload["stale"] is False
+    assert payload["rows"][0]["isin"] == "INE002A01018"
+
+
+def test_screen_reports_no_matches(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    _seed_enrichment_db(db_path, seed_consolidated)
+    runner.invoke(app, ["yahoo", "extract", "--db-path", str(db_path)])
+
+    result = runner.invoke(app, ["screen", "--market-cap-lt", "1", "--db-path", str(db_path)])
+
+    assert result.exit_code == 0
+    assert "No instruments match these filters." in result.stdout
+
+
+def test_screen_warns_when_cache_changed_since_extraction(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    _seed_enrichment_db(db_path, seed_consolidated)
+    runner.invoke(app, ["yahoo", "extract", "--db-path", str(db_path)])
+    _seed_cached_yahoo_responses(db_path, ["20MICRONS"])
+
+    result = runner.invoke(app, ["screen", "--db-path", str(db_path), "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["stale"] is True
+    assert "Run 'stocky yahoo extract'" in result.stderr
+
+
+def test_screen_requires_extraction(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    _seed_enrichment_db(db_path, seed_consolidated)
+
+    result = runner.invoke(app, ["screen", "--db-path", str(db_path)])
+
+    assert result.exit_code == 1
+    assert "stocky yahoo extract" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, "-"), (True, "yes"), (False, "no"), (1234, "1,234"), (1994.5, "1,994.50"), (-0.0146, "-0.0146")],
+)
+def test_format_optional(value, expected) -> None:
+    assert cli._format_optional(value) == expected
