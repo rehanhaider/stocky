@@ -978,7 +978,7 @@ wheels = [
 
 [[package]]
 name = "stocky"
-version = "0.2.0"
+version = "2.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "stocky"
-version = "0.2.0"
+version = "2.0.0"
 description = "Consolidate Indian market instrument symbols across BSE, NSE, Zerodha, and Yahoo Finance."
 readme = "README.md"
 requires-python = ">=3.10"

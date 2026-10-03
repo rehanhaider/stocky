@@ -1,6 +1,6 @@
-[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fjustgoodin%2Fstocky.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fjustgoodin%2Fstocky?ref=badge_shield)
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Frehanhaider%2Fstocky.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Frehanhaider%2Fstocky?ref=badge_shield)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-46a4ff.svg)](https://docs.astral.sh/ruff/)
-[![license](https://img.shields.io/github/license/justgoodin/stocky)](https://choosealicense.com/licenses/gpl-3.0/)
+[![license](https://img.shields.io/github/license/rehanhaider/stocky)](https://choosealicense.com/licenses/gpl-3.0/)
 
 # Stocky McStockface
 **Stocky Will help you generate a consolidated list of Instruments**
@@ -27,11 +27,17 @@ For example, Globe Textiles trades only on NSE, so it has `yq_ns = GLOBE.NS` and
 is a different company, and nothing links it to Globe Textiles. Legacy-format bhavcopies (`NSE-cm*bhav.csv`,
 `EQ_ISINCODE_*.CSV`) carry no BSE trading symbol, so a rebuild from them leaves `bse_symbol` and `yq_bo` empty.
 
+### Release data
+
+Release `v2.0.0` replaces the shared Zerodha and Yahoo symbol columns with exchange-specific columns. See the
+[release notes](docs/releases/v2.0.0.md) for the column changes, source trade date, and database row counts.
+`data/output/stocky.db` is versioned with the repository; pin the release tag to use that database version.
+
 # Installation
 Clone the repository.
 
 ```bash
-git clone https://github.com/justgoodin/stocky.git
+git clone https://github.com/rehanhaider/stocky.git
 cd stocky
 ```
 
@@ -245,4 +251,4 @@ Exit the program
 
 
 ## License
-[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fjustgoodin%2Fstocky.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fjustgoodin%2Fstocky?ref=badge_large)
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Frehanhaider%2Fstocky.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Frehanhaider%2Fstocky?ref=badge_large)
