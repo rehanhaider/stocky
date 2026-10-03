@@ -118,6 +118,48 @@ def test_read_status_reports_counts_and_coverage(tmp_path, seed_consolidated) ->
     assert status.db_size_bytes > 0
 
 
+def _index_names(db_path) -> set[str]:
+    with sqlite3.connect(db_path) as con:
+        return {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+
+
+def test_read_status_counts_cached_symbols_through_symbol_index(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    _seed_yahoo(
+        db_path,
+        [
+            ("RELIANCE.NS", "RELIANCE", "NSE"),
+            ("RELIANCE.BO", "RELIANCE", "BSE"),
+            ("UNLISTED.NS", "UNLISTED", "NSE"),
+        ],
+    )
+
+    assert "idx_yahoo_responses_symbol" in _index_names(db_path)
+    with sqlite3.connect(db_path) as con:
+        plan = " ".join(
+            str(row[3])
+            for row in con.execute(
+                "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM consolidated c "
+                "WHERE c.yq_symbol IN (SELECT symbol FROM yahoo_responses)"
+            )
+        )
+    assert "idx_yahoo_responses_symbol" in plan
+
+    assert read_status(db_path).yahoo_cached_yq_symbols == 1
+
+
+def test_read_status_counts_cached_symbols_without_symbol_index(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "legacy.db"
+    seed_consolidated(db_path)
+    _seed_yahoo(db_path, [("RELIANCE.NS", "RELIANCE", "NSE"), ("RELIANCE.BO", "RELIANCE", "BSE")])
+    with sqlite3.connect(db_path) as con:
+        con.execute("DROP INDEX idx_yahoo_responses_symbol")
+
+    assert read_status(db_path).yahoo_cached_yq_symbols == 1
+    assert "idx_yahoo_responses_symbol" not in _index_names(db_path)
+
+
 def test_read_status_missing_db_raises_without_creating_file(tmp_path) -> None:
     db_path = tmp_path / "missing.db"
 
