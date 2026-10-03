@@ -32,20 +32,22 @@ from textual.widgets import (
 
 from stocky.cli import (
     _COLUMN_LABELS,
+    _MATCH_FIELDS,
+    _SEARCH_FIELDS,
     PLAIN_PROGRESS_EVERY,
     YAHOO_EXCHANGES,
-    YAHOO_KEYS,
     _format_percent,
     _format_size,
     _format_timestamp,
     _rebuild_impl,
+    _yahoo_cached_rows,
 )
 from stocky.config import DEFAULT_BHAVCOPY_DIR, DEFAULT_DB_PATH, DEFAULT_ZERODHA_INSTRUMENTS
 from stocky.database import DatabaseStatus, InstrumentMatch, read_status, search_instruments
 from stocky.export import export_consolidated
 from stocky.pipeline import RebuildResult, preview_sources
 from stocky.sources import BhavcopyPair, list_bhavcopy_pairs, resolve_bhavcopy_paths
-from stocky.yahoo import YahooDataManager, YahooUpdateResult
+from stocky.yahoo import YahooDataManager, YahooUpdateResult, ticker_column
 
 SOURCE_LATEST = "latest"
 SOURCE_DATE = "date"
@@ -137,11 +139,10 @@ class StockyApp(App[None]):
                     yield Select(
                         [(item, item) for item in YAHOO_EXCHANGES], value="BSE", allow_blank=False, id="exchange"
                     )
-                    yield Select([(item, item) for item in YAHOO_KEYS], value="zd_symbol", allow_blank=False, id="key")
                     yield Input(placeholder="Limit (blank = all)", id="limit", type="integer")
                     yield Checkbox("Missing only", id="missing-only")
                 with Horizontal(classes="row"):
-                    yield Button("Count symbols", id="yahoo-plan")
+                    yield Button("Count tickers", id="yahoo-plan")
                     yield Button("Update", id="yahoo-run", variant="primary")
                 yield Static("Idle", id="yahoo-stage")
                 yield ProgressBar(total=1, id="yahoo-progress")
@@ -169,9 +170,7 @@ class StockyApp(App[None]):
     def on_mount(self) -> None:
         self.sub_title = str(self.db_path)
         self.query_one("#rebuild-preview-table", DataTable).add_columns("Source", "File", "Rows")
-        self.query_one("#search-results", DataTable).add_columns(
-            "ISIN", "Type", "Zerodha", "Yahoo", "NSE", "BSE code", "BSE name"
-        )
+        self.query_one("#search-results", DataTable).add_columns(*(label for label, _ in _SEARCH_FIELDS))
         self.query_one("#equivalents", DataTable).add_columns("Field", "Value")
         self.refresh_pairs()
         self.refresh_status()
@@ -355,10 +354,9 @@ class StockyApp(App[None]):
         raw_limit = self.query_one("#limit", Input).value.strip()
         limit = int(raw_limit) if raw_limit else None
         if limit is not None and limit < 1:
-            raise ValueError("Enter a positive limit, or leave it blank for all symbols.")
+            raise ValueError("Enter a positive limit, or leave it blank for all tickers.")
         return {
             "exchange": str(self.query_one("#exchange", Select).value),
-            "key": str(self.query_one("#key", Select).value),
             "limit": limit,
             "missing_only": self.query_one("#missing-only", Checkbox).value,
         }
@@ -371,7 +369,7 @@ class StockyApp(App[None]):
         except Exception as exc:
             self.log_error(str(exc))
             return
-        message = f"{planned.processed} symbols to fetch ({request['exchange']}, key {request['key']})."
+        message = f"{planned.processed} tickers to fetch ({request['exchange']}, {ticker_column(request['exchange'])})."
         self.query_one("#yahoo-stage", Static).update(message)
         self.log_line(message)
 
@@ -385,7 +383,7 @@ class StockyApp(App[None]):
         if not self.start_job():
             return
         self.query_one("#yahoo-progress", ProgressBar).update(total=None, progress=0)
-        self.log_line(f"Yahoo update started ({request['exchange']}, key {request['key']}).", "bold")
+        self.log_line(f"Yahoo update started ({request['exchange']}, {ticker_column(request['exchange'])}).", "bold")
         self.run_yahoo(request)
 
     @work(thread=True, group="job")
@@ -472,15 +470,11 @@ class StockyApp(App[None]):
                 _format_percent(entry.populated, status.consolidated_rows),
             )
 
-        yq_populated = next((entry.populated for entry in status.coverage if entry.column == "yq_symbol"), 0)
         yahoo.add_columns("Yahoo cache", "Value")
         yahoo.add_row("Newest fetch", _format_timestamp(status.yahoo_newest_fetch))
         yahoo.add_row("Oldest fetch", _format_timestamp(status.yahoo_oldest_fetch))
-        yahoo.add_row(
-            "Consolidated symbols cached",
-            f"{status.yahoo_cached_yq_symbols}/{yq_populated}"
-            f" ({_format_percent(status.yahoo_cached_yq_symbols, yq_populated)})",
-        )
+        for label, value in _yahoo_cached_rows(status):
+            yahoo.add_row(label, value)
 
     @on(Button.Pressed, "#status-refresh")
     def on_status_refresh(self) -> None:
@@ -535,20 +529,7 @@ class StockyApp(App[None]):
 
         self.matches = result.matches
         for match in result.matches:
-            results.add_row(
-                *(
-                    value or "-"
-                    for value in (
-                        match.isin,
-                        match.ins_type,
-                        match.zd_symbol,
-                        match.yq_symbol,
-                        match.nse_symbol,
-                        match.bse_sc_code,
-                        match.bse_sc_name,
-                    )
-                )
-            )
+            results.add_row(*(getattr(match, field) or "-" for _, field in _SEARCH_FIELDS))
 
         if result.total == 0:
             message.update(Text(f"No matches for '{term}'.", style="yellow"))
@@ -568,13 +549,5 @@ class StockyApp(App[None]):
     def show_equivalents(self, match: InstrumentMatch) -> None:
         table = self.query_one("#equivalents", DataTable)
         table.clear()
-        for field, value in (
-            ("ISIN", match.isin),
-            ("Type", match.ins_type),
-            ("Zerodha", match.zd_symbol),
-            ("Yahoo", match.yq_symbol),
-            ("NSE", match.nse_symbol),
-            ("BSE code", match.bse_sc_code),
-            ("BSE name", match.bse_sc_name),
-        ):
-            table.add_row(field, value or "-")
+        for label, field in _MATCH_FIELDS:
+            table.add_row(label, getattr(match, field) or "-")

@@ -6,12 +6,19 @@ import pytest
 import stocky.yahoo as yahoo
 from stocky.database import (
     connect,
+    decode_response_json,
     encode_response_json,
     initialize_database,
     read_available_yahoo_symbols,
     upsert_yahoo_response,
 )
-from stocky.yahoo import YahooDataManager, exchange_suffix
+from stocky.yahoo import YahooDataManager, ticker_column
+
+
+def _ticker_row(isin: str, symbol: str) -> tuple[object, ...]:
+    """A consolidated row that both exchanges list, with only the Yahoo tickers filled."""
+    tickers = (f"{symbol}.NS", f"{symbol}.BO") if symbol else ("", "")
+    return (isin, "equity", None, None, None, None, None, None, *tickers)
 
 
 def _seed_cached_response(db_path, yahoo_symbol: str) -> None:
@@ -36,17 +43,19 @@ class _FakeTicker:
     def all_modules(self):
         if "BAD" in self.symbol:
             return {self.symbol: f"Quote not found for symbol: {self.symbol}"}
-        return {self.symbol: {"price": 100}}
+        return {
+            self.symbol: {
+                "quoteType": {"quoteType": "EQUITY", "longName": self.symbol},
+                "price": {"regularMarketPrice": 100},
+            }
+        }
 
 
 def test_dry_run_missing_only_excludes_cached_symbols(tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(
         db_path,
-        [
-            (f"INE{index:03d}", "equity", symbol, None, None, None, None)
-            for index, symbol in enumerate(["RELIANCE", "INFY", "NEWIPO"])
-        ],
+        [_ticker_row(f"INE{index:03d}", symbol) for index, symbol in enumerate(["RELIANCE", "INFY", "NEWIPO"])],
     )
     _seed_cached_response(db_path, "RELIANCE.BO")
 
@@ -63,10 +72,7 @@ def test_update_writes_responses_and_skips_unknown_symbols(tmp_path, monkeypatch
     db_path = tmp_path / "stocky.db"
     seed_consolidated(
         db_path,
-        [
-            (f"INE{index:03d}", "equity", symbol, None, None, None, None)
-            for index, symbol in enumerate(["RELIANCE", "BADSYMBOL"])
-        ],
+        [_ticker_row(f"INE{index:03d}", symbol) for index, symbol in enumerate(["RELIANCE", "BADSYMBOL"])],
     )
 
     fake_module = types.ModuleType("yahooquery")
@@ -81,9 +87,96 @@ def test_update_writes_responses_and_skips_unknown_symbols(tmp_path, monkeypatch
     assert read_available_yahoo_symbols(db_path) == {"RELIANCE.BO"}
 
 
+def test_update_fetches_only_the_exchange_column_tickers(tmp_path, monkeypatch, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(
+        db_path,
+        [
+            (
+                "INE002A01018",
+                "equity",
+                "RELIANCE",
+                "RELIANCE",
+                "500325",
+                "R",
+                "RELIANCE",
+                "RELIANCE",
+                "RELIANCE.NS",
+                "RELIANCE.BO",
+            ),
+            ("INE581X01021", "equity", "GLOBE", None, None, None, "GLOBE", None, "GLOBE.NS", None),
+            ("INE198N01017", "equity", None, "CDG", "534796", "C", None, "CDG", None, "CDG.BO"),
+        ],
+    )
+    requested: list[str] = []
+
+    class RecordingTicker(_FakeTicker):
+        def __init__(self, symbol: str) -> None:
+            super().__init__(symbol)
+            requested.append(symbol)
+
+    fake_module = types.ModuleType("yahooquery")
+    fake_module.Ticker = RecordingTicker
+    monkeypatch.setitem(sys.modules, "yahooquery", fake_module)
+
+    YahooDataManager(db_path).update_data(exchange="BSE")
+    YahooDataManager(db_path).update_data(exchange="NSE")
+
+    # GLOBE is NSE-only, so no GLOBE.BO is ever requested; CDG is BSE-only, so no CDG.NS.
+    assert requested == ["RELIANCE.BO", "CDG.BO", "RELIANCE.NS", "GLOBE.NS"]
+    with connect(db_path) as con:
+        stored = con.execute(
+            "SELECT yahoo_symbol, symbol, exchange FROM yahoo_responses ORDER BY yahoo_symbol"
+        ).fetchall()
+    assert stored == [
+        ("CDG.BO", "CDG", "BSE"),
+        ("GLOBE.NS", "GLOBE", "NSE"),
+        ("RELIANCE.BO", "RELIANCE", "BSE"),
+        ("RELIANCE.NS", "RELIANCE", "NSE"),
+    ]
+
+
+def test_update_drops_a_saved_answer_when_yahoo_now_has_no_usable_data(
+    tmp_path, monkeypatch, seed_consolidated
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(
+        db_path,
+        [
+            ("INF769K01PR2", "equity", None, "ENERGY", "1", "M", None, "ENERGY", None, "ENERGY.BO"),
+            ("INE106T01025", "equity", None, "HITECH", "2", "H", None, "HITECH", None, "HITECH.BO"),
+        ],
+    )
+    # Earlier saved answers: an index under the ETF's ticker, and an out-of-date company name.
+    _seed_cached_response(db_path, "ENERGY.BO")
+    _seed_cached_response(db_path, "HITECH.BO")
+
+    class CurrentYahoo:
+        def __init__(self, symbol: str) -> None:
+            self.symbol = symbol
+
+        @property
+        def all_modules(self):
+            if self.symbol == "ENERGY.BO":
+                return {self.symbol: {"quoteType": {"quoteType": "INDEX", "longName": "S&P BSE ENERGY"}}}
+            return {self.symbol: {"quoteType": {"quoteType": "EQUITY", "longName": "Hi-Tech Pipes Limited"}}}
+
+    fake_module = types.ModuleType("yahooquery")
+    fake_module.Ticker = CurrentYahoo
+    monkeypatch.setitem(sys.modules, "yahooquery", fake_module)
+
+    result = YahooDataManager(db_path).update_data(exchange="BSE")
+
+    assert (result.written, result.skipped) == (1, 1)
+    assert read_available_yahoo_symbols(db_path) == {"HITECH.BO"}
+    with connect(db_path) as con:
+        (blob,) = con.execute("SELECT response_json FROM yahoo_responses WHERE yahoo_symbol = 'HITECH.BO'").fetchone()
+    assert decode_response_json(blob)["HITECH.BO"]["quoteType"]["longName"] == "Hi-Tech Pipes Limited"
+
+
 def test_update_skips_fetch_exceptions(tmp_path, monkeypatch, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
-    seed_consolidated(db_path, [("INE001", "equity", "BROKEN", None, None, None, None)])
+    seed_consolidated(db_path, [_ticker_row("INE001", "BROKEN")])
 
     class RaisingTicker:
         def __init__(self, symbol: str) -> None:
@@ -109,7 +202,7 @@ def test_update_commits_every_25_reports_progress_and_writes_nse(tmp_path, monke
     symbols = [f"SYM{index:02d}" for index in range(51)]
     seed_consolidated(
         db_path,
-        [(f"INE{index:03d}", "equity", symbol, None, None, None, None) for index, symbol in enumerate(symbols)],
+        [_ticker_row(f"INE{index:03d}", symbol) for index, symbol in enumerate(symbols)],
     )
 
     fake_module = types.ModuleType("yahooquery")
@@ -156,13 +249,13 @@ def test_update_commits_every_25_reports_progress_and_writes_nse(tmp_path, monke
 
 def test_update_rejects_empty_symbol_set(tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
-    seed_consolidated(db_path, [("INE001", "equity", "", None, None, None, None)])
+    seed_consolidated(db_path, [_ticker_row("INE001", "")])
 
     with pytest.raises(ValueError) as excinfo:
         YahooDataManager(db_path).update_data(dry_run=True)
 
     message = str(excinfo.value)
-    assert "--key" in message
+    assert "yq_bo" in message
     assert "stocky rebuild" in message
 
 
@@ -170,7 +263,7 @@ def test_update_aborts_after_five_consecutive_failures(tmp_path, monkeypatch, se
     db_path = tmp_path / "stocky.db"
     seed_consolidated(
         db_path,
-        [(f"INE{index:03d}", "equity", f"SYM{index:02d}", None, None, None, None) for index in range(8)],
+        [_ticker_row(f"INE{index:03d}", f"SYM{index:02d}") for index in range(8)],
     )
 
     attempts = []
@@ -207,10 +300,7 @@ def test_update_persists_rows_written_before_aborting(tmp_path, monkeypatch, see
     broken = [f"BROKEN{index}" for index in range(5)]
     seed_consolidated(
         db_path,
-        [
-            (f"INE{index:03d}", "equity", symbol, None, None, None, None)
-            for index, symbol in enumerate([*good, *broken])
-        ],
+        [_ticker_row(f"INE{index:03d}", symbol) for index, symbol in enumerate([*good, *broken])],
     )
 
     class PartlyRaisingTicker(_FakeTicker):
@@ -218,7 +308,12 @@ def test_update_persists_rows_written_before_aborting(tmp_path, monkeypatch, see
         def all_modules(self):
             if "BROKEN" in self.symbol:
                 raise RuntimeError("offline failure")
-            return {self.symbol: {"price": 100}}
+            return {
+                self.symbol: {
+                    "quoteType": {"quoteType": "EQUITY", "longName": self.symbol},
+                    "price": {"regularMarketPrice": 100},
+                }
+            }
 
     fake_module = types.ModuleType("yahooquery")
     fake_module.Ticker = PartlyRaisingTicker
@@ -234,7 +329,7 @@ def test_update_resets_failure_counter_after_a_success(tmp_path, monkeypatch, se
     db_path = tmp_path / "stocky.db"
     seed_consolidated(
         db_path,
-        [(f"INE{index:03d}", "equity", f"SYM{index:02d}", None, None, None, None) for index in range(9)],
+        [_ticker_row(f"INE{index:03d}", f"SYM{index:02d}") for index in range(9)],
     )
     # Four failures, one success, four more failures: without the counter reset
     # the ninth symbol would be the fifth consecutive failure and abort the run.
@@ -249,7 +344,12 @@ def test_update_resets_failure_counter_after_a_success(tmp_path, monkeypatch, se
         def all_modules(self):
             if not self.succeeds:
                 raise RuntimeError("temporary failure")
-            return {self.symbol: {"price": 100}}
+            return {
+                self.symbol: {
+                    "quoteType": {"quoteType": "EQUITY", "longName": self.symbol},
+                    "price": {"regularMarketPrice": 100},
+                }
+            }
 
     fake_module = types.ModuleType("yahooquery")
     fake_module.Ticker = FlakyTicker
@@ -266,7 +366,7 @@ def test_update_resets_failure_counter_after_a_not_found(tmp_path, monkeypatch, 
     db_path = tmp_path / "stocky.db"
     seed_consolidated(
         db_path,
-        [(f"INE{index:03d}", "equity", f"SYM{index:02d}", None, None, None, None) for index in range(9)],
+        [_ticker_row(f"INE{index:03d}", f"SYM{index:02d}") for index in range(9)],
     )
     # A symbol Yahoo does not know about is an answer, not a failure, so it
     # clears the counter the same way a successful fetch does.
@@ -298,7 +398,7 @@ def test_update_treats_error_payloads_as_failures(tmp_path, monkeypatch, seed_co
     db_path = tmp_path / "stocky.db"
     seed_consolidated(
         db_path,
-        [(f"INE{index:03d}", "equity", f"SYM{index:02d}", None, None, None, None) for index in range(8)],
+        [_ticker_row(f"INE{index:03d}", f"SYM{index:02d}") for index in range(8)],
     )
 
     class RateLimitedTicker:
@@ -323,7 +423,7 @@ def test_update_treats_missing_payloads_as_failures(tmp_path, monkeypatch, seed_
     db_path = tmp_path / "stocky.db"
     seed_consolidated(
         db_path,
-        [(f"INE{index:03d}", "equity", f"SYM{index:02d}", None, None, None, None) for index in range(8)],
+        [_ticker_row(f"INE{index:03d}", f"SYM{index:02d}") for index in range(8)],
     )
 
     class UndecodableTicker:
@@ -348,7 +448,7 @@ def test_update_treats_unexpected_payload_text_as_failure(tmp_path, monkeypatch,
     db_path = tmp_path / "stocky.db"
     seed_consolidated(
         db_path,
-        [(f"INE{index:03d}", "equity", f"SYM{index:02d}", None, None, None, None) for index in range(8)],
+        [_ticker_row(f"INE{index:03d}", f"SYM{index:02d}") for index in range(8)],
     )
 
     class ApiErrorTicker:
@@ -368,7 +468,14 @@ def test_update_treats_unexpected_payload_text_as_failure(tmp_path, monkeypatch,
 
 
 def test_classify_payload_maps_yahooquery_outcomes() -> None:
-    assert yahoo.classify_payload("RELIANCE.BO", {}, {"price": 1})[0] == "success"
+    listed = {"quoteType": {"quoteType": "EQUITY", "longName": "Reliance Industries Limited"}}
+    assert yahoo.classify_payload("RELIANCE.BO", {}, listed)[0] == "success"
+    # Yahoo answers with no named, listed security hold no data for the share.
+    assert yahoo.classify_payload("PAVNAIND.NS", {}, {"quoteType": {"quoteType": "NONE"}}) == ("not_found", "")
+    assert yahoo.classify_payload(
+        "ENERGY.BO", {}, {"quoteType": {"quoteType": "INDEX", "longName": "S&P BSE ENERGY"}}
+    ) == ("not_found", "")
+    assert yahoo.classify_payload("BHAGERIA.BO", {}, {"quoteType": {"quoteType": "MUTUALFUND"}}) == ("not_found", "")
     assert yahoo.classify_payload("RELIANCE.BO", {}, "Quote not found for symbol: RELIANCE.BO") == ("not_found", "")
     # Yahoo has also used this older wording, so both must classify the same way.
     assert yahoo.classify_payload("RELIANCE.BO", {}, "Quote not found for ticker symbol: RELIANCE.BO") == (
@@ -393,6 +500,6 @@ def test_update_allows_an_empty_result_for_limit_zero(tmp_path, seed_consolidate
     assert result.processed == 0
 
 
-def test_exchange_suffix_rejects_unknown_exchange() -> None:
+def test_ticker_column_rejects_unknown_exchange() -> None:
     with pytest.raises(ValueError, match="Unsupported exchange"):
-        exchange_suffix("MCX")
+        ticker_column("MCX")

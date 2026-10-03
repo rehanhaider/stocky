@@ -12,18 +12,32 @@ from stocky.sources import BhavcopyPaths, bse_filename_for_date, nse_filename_fo
 CONSOLIDATED_COLUMNS = (
     "isin",
     "ins_type",
-    "zd_symbol",
-    "yq_symbol",
     "nse_symbol",
+    "bse_symbol",
     "bse_sc_code",
     "bse_sc_name",
+    "zd_ns",
+    "zd_bo",
+    "yq_ns",
+    "yq_bo",
 )
 
 CONSOLIDATED_ROWS = (
-    ("INE002A01018", "equity", "RELIANCE", "RELIANCE", "RELIANCE", "500325", "RELIANCE INDUSTRIES"),
-    ("INE009A01021", "equity", "INFY", "INFY", "INFY", "500209", "INFOSYS LTD"),
-    ("INE144J01027", "equity", "20MICRONS", "", None, "533022", "20 MICRONS LTD"),
-    ("INE999Z01019", "equity", "INFYBEES", None, None, None, "INFY ETF"),
+    (
+        "INE002A01018",
+        "equity",
+        "RELIANCE",
+        "RELIANCE",
+        "500325",
+        "RELIANCE INDUSTRIES",
+        "RELIANCE",
+        "RELIANCE",
+        "RELIANCE.NS",
+        "RELIANCE.BO",
+    ),
+    ("INE009A01021", "equity", "INFY", "INFY", "500209", "INFOSYS LTD", "INFY", "INFY", "INFY.NS", "INFY.BO"),
+    ("INE144J01027", "equity", None, "20MICRONS", "533022", "20 MICRONS LTD", None, "20MICRONS", None, ""),
+    ("INE999Z01019", "equity", None, None, None, "INFY ETF", "INFYBEES", None, None, None),
 )
 
 
@@ -36,17 +50,12 @@ def runner() -> CliRunner:
 def seed_consolidated() -> Callable[[Path, Sequence[tuple[object, ...]] | None], None]:
     def seed(db_path: Path, rows: Sequence[tuple[object, ...]] | None = None) -> None:
         selected_rows = CONSOLIDATED_ROWS if rows is None else rows
+        column_definitions = ", ".join(f"{column} TEXT" for column in CONSOLIDATED_COLUMNS)
+        placeholders = ", ".join("?" for _ in CONSOLIDATED_COLUMNS)
         with sqlite3.connect(db_path) as con:
-            con.execute(
-                f"""
-                CREATE TABLE {CONSOLIDATED_TABLE} (
-                    isin TEXT, ins_type TEXT, zd_symbol TEXT, yq_symbol TEXT,
-                    nse_symbol TEXT, bse_sc_code TEXT, bse_sc_name TEXT
-                )
-                """
-            )
+            con.execute(f"CREATE TABLE {CONSOLIDATED_TABLE} ({column_definitions})")
             con.executemany(
-                f"INSERT INTO {CONSOLIDATED_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?)",
+                f"INSERT INTO {CONSOLIDATED_TABLE} VALUES ({placeholders})",
                 selected_rows,
             )
 

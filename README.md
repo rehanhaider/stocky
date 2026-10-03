@@ -10,6 +10,23 @@
     3. Zerodha symbols
     4. Yahoo symbols (Both .NS and .BO)
 
+## The consolidated table
+
+`data/output/stocky.db` holds one `consolidated` row per ISIN. A share keeps the same ISIN on NSE and BSE, but its
+symbol can differ, so every symbol column belongs to one exchange. A column stays empty when that exchange does not list
+the ISIN in the bhavcopy used for the rebuild.
+
+| Column | NSE | BSE | Source |
+| --- | --- | --- | --- |
+| `nse_symbol` / `bse_symbol` | yes | yes | `TckrSymb` in each exchange's bhavcopy |
+| `bse_sc_code`, `bse_sc_name` | | yes | BSE bhavcopy |
+| `zd_ns` / `zd_bo` | yes | yes | Zerodha instruments, matched by the exchange's instrument token, such as `AAREYDRUGS-BE`. When an NSE token has changed, the NSE symbol is looked up in Zerodha's NSE list only |
+| `yq_ns` / `yq_bo` | yes | yes | The exchange symbol plus `.NS` or `.BO`, such as `RELIANCE.NS` |
+
+For example, Globe Textiles trades only on NSE, so it has `yq_ns = GLOBE.NS` and an empty `yq_bo`. Yahoo's `GLOBE.BO`
+is a different company, and nothing links it to Globe Textiles. Legacy-format bhavcopies (`NSE-cm*bhav.csv`,
+`EQ_ISINCODE_*.CSV`) carry no BSE trading symbol, so a rebuild from them leaves `bse_symbol` and `yq_bo` empty.
+
 # Installation
 Clone the repository.
 
@@ -55,8 +72,8 @@ uv run stocky
 
 The rebuild option lists the BSE/NSE bhavcopy pairs it found in `data/marketData/bhavCopies`, lets you pick one by row
 number or trade date, and previews the resolved files and their row counts before you confirm the rebuild. The Yahoo
-option asks for the exchange, the key column, an optional limit, and whether to fetch only uncached symbols, then shows
-how many symbols it will fetch and a progress bar while it runs. Both options run exactly what `stocky rebuild` and
+option asks for the exchange, an optional limit, and whether to fetch only uncached tickers, then shows how many tickers
+it will fetch and a progress bar while it runs. Both options run exactly what `stocky rebuild` and
 `stocky yahoo update` run.
 
 Open the full-screen terminal UI:
@@ -71,7 +88,7 @@ over the same code as the commands:
 
 - **Rebuild** resolves the bhavcopies from the latest pair, a discovered trade date, or files you pick in the file tree,
   previews each file's row count, and shows each stage and any validation failure while `stocky rebuild` runs.
-- **Yahoo update** takes the exchange, key, limit, and missing-only choices, counts the symbols to fetch, and shows a live
+- **Yahoo update** takes the exchange, limit, and missing-only choices, counts the tickers to fetch, and shows a live
   progress bar while `stocky yahoo update` runs.
 - **Status** shows the `stocky status` tables, opens the database folder, and exports the consolidated table to CSV, JSON,
   or Parquet.
@@ -107,7 +124,11 @@ Import the legacy Yahoo JSON cache into SQLite:
 uv run stocky yahoo import-cache
 ```
 
-Update Yahoo responses in SQLite:
+Update Yahoo responses in SQLite. `--exchange NSE` fetches the `yq_ns` tickers and `--exchange BSE` fetches the `yq_bo`
+tickers, so a run only asks Yahoo for tickers that exchange lists. Only answers that name a listed security are saved.
+An error, an empty answer, or an index that Yahoo files under the same ticker (such as `ENERGY.BO`, the S&P BSE Energy
+index) is skipped, and any older saved answer for that ticker is removed. `stocky yahoo import-cache` applies the same
+rule. A run without `--missing-only` refreshes every saved answer:
 
 ```bash
 uv run stocky yahoo update --exchange BSE
@@ -155,12 +176,12 @@ Export every row and column to CSV:
 uv run stocky export -o data/output/consolidated.csv
 ```
 
-Export a Zerodha plus Yahoo universe to JSON, keeping only rows where both symbols are populated:
+Export an NSE universe with Zerodha and Yahoo tickers to JSON, keeping only rows where both are populated:
 
 ```bash
 uv run stocky export -o data/output/universe.json \
-  --columns isin,zd_symbol,yq_symbol \
-  --require zd_symbol,yq_symbol
+  --columns isin,zd_ns,yq_ns \
+  --require zd_ns,yq_ns
 ```
 
 Export every row and column to Parquet:
@@ -179,12 +200,12 @@ uv run stocky export --format csv
 
 ### Ticker lists
 
-`--tickers COLUMN` writes one ticker per line from `zd_symbol`, `yq_symbol`, `nse_symbol`, or `bse_sc_code`, skipping rows where that column is empty and dropping repeats. `--suffix` appends text to every ticker, and `--require` still filters rows. Most backtesting setups can read the result directly: pandas, vectorbt, backtrader, and zipline-reloaded loaders take a plain list of tickers. Stocky has no price data, so building data feeds or bundles is left to those tools.
+`--tickers COLUMN` writes one ticker per line from `nse_symbol`, `bse_symbol`, `bse_sc_code`, `zd_ns`, `zd_bo`, `yq_ns`, or `yq_bo`, skipping rows where that column is empty and dropping repeats. `--suffix` appends text to every ticker, and `--require` still filters rows. Most backtesting setups can read the result directly: pandas, vectorbt, backtrader, and zipline-reloaded loaders take a plain list of tickers. Stocky has no price data, so building data feeds or bundles is left to those tools.
 
 Yahoo tickers for NSE-listed instruments, ready for `yfinance` or vectorbt's `YFData`:
 
 ```bash
-uv run stocky export --tickers yq_symbol --suffix .NS --require nse_symbol -o data/output/yahoo_nse.txt
+uv run stocky export --tickers yq_ns -o data/output/yahoo_nse.txt
 ```
 
 ### Pinnable snapshots
@@ -207,8 +228,8 @@ resolved files with their row counts, and on confirmation backs up the existing 
 table. Requires bhavcopies and Zerodha instruments in their respective locations.
 
 **2. Update Yahoo data:**
-Asks for the exchange, key column, optional limit, and whether to fetch only uncached symbols, reports how many symbols
-it will fetch, then downloads Yahoo data using yahooquery and stores responses in `data/output/stocky.db`
+Asks for the exchange, optional limit, and whether to fetch only uncached tickers, reports how many tickers it will
+fetch, then downloads Yahoo data using yahooquery and stores responses in `data/output/stocky.db`
 
 **3. Import Yahoo JSON cache:**
 Imports legacy files from `data/marketData/yahoo/apiResponse` into the `yahoo_responses` SQLite table.
@@ -217,7 +238,7 @@ Imports legacy files from `data/marketData/yahoo/apiResponse` into the `yahoo_re
 Prints row counts, per-column coverage, and Yahoo cache freshness for `data/output/stocky.db`.
 
 **5. Look up an instrument:**
-Searches the `consolidated` table across all symbol namespaces (Zerodha, Yahoo, NSE, BSE, ISIN, name).
+Searches the `consolidated` table across every symbol column (NSE, BSE, Zerodha, Yahoo, ISIN, name).
 
 **6. Exit:**
 Exit the program

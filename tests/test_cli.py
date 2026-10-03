@@ -21,7 +21,12 @@ class _FakeTicker:
 
     @property
     def all_modules(self):
-        return {self.symbol: {"price": 100}}
+        return {
+            self.symbol: {
+                "quoteType": {"quoteType": "EQUITY", "longName": self.symbol},
+                "price": {"regularMarketPrice": 100},
+            }
+        }
 
 
 def _use_fake_yahooquery(monkeypatch) -> None:
@@ -208,6 +213,8 @@ def test_status_prints_seeded_database(tmp_path, seed_consolidated, runner) -> N
     assert "4" in result.stdout
     assert "50.0%" in result.stdout
     assert "None" in result.stdout
+    assert "Yahoo NSE tickers cached" in result.stdout
+    assert "Yahoo BSE tickers cached" in result.stdout
 
 
 def test_status_json_prints_database_status(tmp_path, seed_consolidated, runner) -> None:
@@ -221,6 +228,23 @@ def test_status_json_prints_database_status(tmp_path, seed_consolidated, runner)
     assert payload["db_path"] == str(db_path)
     assert payload["consolidated_rows"] == 4
     assert payload["coverage"][0] == {"column": "isin", "populated": 4}
+    assert payload["yahoo_cached_ns"] == 0
+    assert payload["yahoo_cached_bo"] == 0
+    assert "yahoo_cached_yq_symbols" not in payload
+
+
+def test_status_prints_cached_tickers_per_exchange(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    _seed_cached_yahoo_responses(db_path, ["RELIANCE", "INFY"], suffix="NS")
+    _seed_cached_yahoo_responses(db_path, ["INFY"], suffix="BO")
+
+    result = runner.invoke(app, ["status", "--db-path", str(db_path)], env={"COLUMNS": "200"})
+
+    lines = {" ".join(line.replace("│", " ").split()) for line in result.stdout.splitlines()}
+    assert result.exit_code == 0
+    assert "Yahoo NSE tickers cached 2/2 (100.0%)" in lines
+    assert "Yahoo BSE tickers cached 1/2 (50.0%)" in lines
 
 
 def test_status_reports_missing_database(tmp_path, runner) -> None:
@@ -299,6 +323,8 @@ def test_lookup_prints_single_match_equivalents(tmp_path, seed_consolidated, run
     assert "Equivalents for '500325'" in result.stdout
     for value in ("INE002A01018", "equity", "RELIANCE", "500325", "RELIANCE INDUSTRIES"):
         assert value in result.stdout
+    for value in ("Zerodha NSE", "Zerodha BSE", "Yahoo NSE", "RELIANCE.NS", "Yahoo BSE", "RELIANCE.BO"):
+        assert value in result.stdout
 
 
 def test_lookup_json_prints_single_match(tmp_path, seed_consolidated, runner) -> None:
@@ -310,7 +336,8 @@ def test_lookup_json_prints_single_match(tmp_path, seed_consolidated, runner) ->
     payload = json.loads(result.stdout)
     assert result.exit_code == 0
     assert payload["isin"] == "INE002A01018"
-    assert payload["zd_symbol"] == "RELIANCE"
+    assert payload["zd_bo"] == "RELIANCE"
+    assert payload["yq_ns"] == "RELIANCE.NS"
     assert payload["bse_sc_code"] == "500325"
 
 
@@ -340,8 +367,8 @@ def test_lookup_prints_multiple_match_hint(tmp_path, seed_consolidated, runner) 
     seed_consolidated(
         db_path,
         [
-            ("INE001", "equity", "SHARED", None, "ONE", None, "FIRST LTD"),
-            ("INE002", "equity", "TWO", None, "SHARED", None, "SECOND LTD"),
+            ("INE001", "equity", "ONE", None, None, "FIRST LTD", "SHARED", None, None, None),
+            ("INE002", "equity", "SHARED", None, None, "SECOND LTD", "TWO", None, None, None),
         ],
     )
 
@@ -356,7 +383,18 @@ def test_lookup_prints_multiple_match_hint(tmp_path, seed_consolidated, runner) 
 def test_lookup_limit_controls_ambiguous_candidates(tmp_path, seed_consolidated, runner) -> None:
     db_path = tmp_path / "stocky.db"
     rows = [
-        (f"INE{index:06d}01016", "equity", f"FUND{index}", None, None, str(500000 + index), "MIRAE ASSET MUTUAL FUND")
+        (
+            f"INE{index:06d}01016",
+            "equity",
+            None,
+            None,
+            str(500000 + index),
+            "MIRAE ASSET MUTUAL FUND",
+            f"FUND{index}",
+            None,
+            None,
+            None,
+        )
         for index in range(21)
     ]
     seed_consolidated(db_path, rows)
@@ -476,8 +514,6 @@ def test_yahoo_update_passes_options_and_prints_progress(tmp_path, monkeypatch, 
             "update",
             "--exchange",
             "NSE",
-            "--key",
-            "nse_symbol",
             "--db-path",
             str(db_path),
             "--limit",
@@ -489,7 +525,6 @@ def test_yahoo_update_passes_options_and_prints_progress(tmp_path, monkeypatch, 
     assert result.exit_code == 0
     assert calls[0] == ("init", db_path)
     assert calls[1][1] | {"progress": None} == {
-        "key": "nse_symbol",
         "exchange": "NSE",
         "dry_run": False,
         "limit": 60,
@@ -500,6 +535,13 @@ def test_yahoo_update_passes_options_and_prints_progress(tmp_path, monkeypatch, 
     assert "50/60 processed; 48 written; 2 skipped" in result.stderr
     assert "50/60 processed" not in result.stdout
     assert "Processed 60; wrote 58; skipped 2; dry_run=False." in result.stdout
+
+
+def test_yahoo_update_no_longer_accepts_key(tmp_path, runner) -> None:
+    result = runner.invoke(app, ["yahoo", "update", "--key", "zd_symbol", "--db-path", str(tmp_path / "stocky.db")])
+
+    assert result.exit_code == 2
+    assert "No such option" in result.output
 
 
 def test_yahoo_update_throttles_plain_progress_lines(tmp_path, monkeypatch, runner) -> None:
@@ -579,7 +621,9 @@ def test_yahoo_update_json_reports_missing_database_as_an_event(tmp_path, runner
 def test_yahoo_import_cache_skips_bad_file(tmp_path, runner) -> None:
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
-    (cache_dir / "GOOD.NS.json").write_text('{"price": 1}', encoding="utf-8")
+    (cache_dir / "GOOD.NS.json").write_text(
+        '{"GOOD.NS": {"quoteType": {"quoteType": "EQUITY", "longName": "Good Ltd"}}}', encoding="utf-8"
+    )
     (cache_dir / "BAD.NS.json").write_text("not json", encoding="utf-8")
 
     result = runner.invoke(
@@ -601,7 +645,9 @@ def test_yahoo_import_cache_skips_bad_file(tmp_path, runner) -> None:
 def test_yahoo_import_cache_json_prints_result(tmp_path, runner) -> None:
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
-    (cache_dir / "GOOD.NS.json").write_text('{"price": 1}', encoding="utf-8")
+    (cache_dir / "GOOD.NS.json").write_text(
+        '{"GOOD.NS": {"quoteType": {"quoteType": "EQUITY", "longName": "Good Ltd"}}}', encoding="utf-8"
+    )
     (cache_dir / "BAD.NS.json").write_text("not json", encoding="utf-8")
 
     result = runner.invoke(
@@ -627,10 +673,41 @@ def test_interactive_searches_once_then_quits(tmp_path, monkeypatch, seed_consol
     seed_consolidated(db_path)
     monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
 
-    result = runner.invoke(app, ["interactive"], input="5\nINFY\n6\n")
+    result = runner.invoke(app, ["interactive"], input="5\nINFY\n\n6\n")
 
     assert result.exit_code == 0
     assert "Matches for 'INFY'" in result.stdout
+    assert "Equivalents" not in result.stdout
+    assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_search_shows_tickers_for_a_selected_row(tmp_path, monkeypatch, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
+
+    result = runner.invoke(app, ["interactive"], input="5\nINFY\n2\n6\n")
+
+    assert result.exit_code == 0
+    assert "Matches for 'INFY'" in result.stdout
+    assert "Zerodha NSE" in result.stdout
+    assert "INFYBEES" in result.stdout
+    assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_search_shows_tickers_for_a_single_match(tmp_path, monkeypatch, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
+
+    result = runner.invoke(app, ["interactive"], input="5\n500325\n6\n")
+
+    assert result.exit_code == 0
+    assert "Equivalents for '500325'" in result.stdout
+    assert "RELIANCE.NS" in result.stdout
+    assert "RELIANCE.BO" in result.stdout
     assert result.stdout.count("Choose an option") == 2
 
 
@@ -638,16 +715,16 @@ def test_interactive_reports_yahoo_update_errors_and_keeps_going(
     tmp_path, monkeypatch, seed_consolidated, runner
 ) -> None:
     db_path = tmp_path / "stocky.db"
-    seed_consolidated(db_path, [("INE001", "equity", "", None, None, None, None)])
+    seed_consolidated(db_path, [("INE001", "equity", None, None, None, None, None, None, "", "")])
     monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
 
-    result = runner.invoke(app, ["interactive"], input="2\nBSE\nzd_symbol\n\nn\n6\n")
+    result = runner.invoke(app, ["interactive"], input="2\nBSE\n\nn\n6\n")
 
     message = " ".join(result.stdout.split())
 
     assert result.exit_code == 0
-    assert "No symbols found for --key zd_symbol" in message
-    assert "run 'stocky rebuild' first." in message
+    assert "No BSE tickers found in yq_bo" in message
+    assert "Run 'stocky rebuild' first." in message
     assert result.stdout.count("Choose an option") == 2
 
 
@@ -823,12 +900,12 @@ def test_interactive_yahoo_update_prompts_and_reports_progress(
     monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
     _use_fake_yahooquery(monkeypatch)
 
-    result = runner.invoke(app, ["interactive"], input="2\nnse\nzd_symbol\n2\nn\ny\n6\n")
+    result = runner.invoke(app, ["interactive"], input="2\nnse\n2\nn\ny\n6\n")
 
     message = " ".join(result.stdout.split())
 
     assert result.exit_code == 0
-    assert "2 symbols to fetch from Yahoo Finance (NSE, key zd_symbol)." in message
+    assert "2 tickers to fetch from Yahoo Finance (NSE, yq_ns)." in message
     assert "Processed 2; wrote 2; skipped 0." in message
     assert "2/2 processed; 2 written; 0 skipped" in result.stderr
     assert result.stdout.count("Choose an option") == 2
@@ -849,27 +926,13 @@ def test_interactive_yahoo_update_rejects_unknown_exchange(tmp_path, monkeypatch
     assert result.stdout.count("Choose an option") == 2
 
 
-def test_interactive_yahoo_update_rejects_unknown_key(tmp_path, monkeypatch, seed_consolidated, runner) -> None:
-    db_path = tmp_path / "stocky.db"
-    seed_consolidated(db_path)
-    monkeypatch.setenv("COLUMNS", "200")
-    monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
-
-    result = runner.invoke(app, ["interactive"], input="2\nBSE\nisin\n6\n")
-
-    message = " ".join(result.stdout.split())
-
-    assert result.exit_code == 0
-    assert "Enter one of zd_symbol, yq_symbol, nse_symbol, bse_sc_code." in message
-
-
 def test_interactive_yahoo_update_rejects_non_numeric_limit(tmp_path, monkeypatch, seed_consolidated, runner) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path)
     monkeypatch.setenv("COLUMNS", "200")
     monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
 
-    result = runner.invoke(app, ["interactive"], input="2\nBSE\nzd_symbol\nmany\n6\n")
+    result = runner.invoke(app, ["interactive"], input="2\nBSE\nmany\n6\n")
 
     message = " ".join(result.stdout.split())
 
@@ -884,13 +947,13 @@ def test_interactive_yahoo_update_stops_when_nothing_to_fetch(tmp_path, monkeypa
     monkeypatch.setenv("COLUMNS", "200")
     monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
 
-    result = runner.invoke(app, ["interactive"], input="2\nBSE\nzd_symbol\n\ny\n6\n")
+    result = runner.invoke(app, ["interactive"], input="2\nBSE\n\ny\n6\n")
 
     message = " ".join(result.stdout.split())
 
     assert result.exit_code == 0
-    assert "0 symbols to fetch from Yahoo Finance (BSE, key zd_symbol)." in message
-    assert "Nothing to fetch; every symbol already has a cached response." in message
+    assert "0 tickers to fetch from Yahoo Finance (BSE, yq_bo)." in message
+    assert "Nothing to fetch; every ticker already has a cached response." in message
     assert "Start the update?" not in message
     assert result.stdout.count("Choose an option") == 2
 
@@ -901,13 +964,13 @@ def test_interactive_yahoo_update_rejects_zero_limit(tmp_path, monkeypatch, seed
     monkeypatch.setenv("COLUMNS", "200")
     monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
 
-    result = runner.invoke(app, ["interactive"], input="2\nBSE\nzd_symbol\n0\n6\n")
+    result = runner.invoke(app, ["interactive"], input="2\nBSE\n0\n6\n")
 
     message = " ".join(result.stdout.split())
 
     assert result.exit_code == 0
     assert "Enter a positive number, or leave blank for all." in message
-    assert "symbols to fetch from Yahoo Finance" not in message
+    assert "tickers to fetch from Yahoo Finance" not in message
     assert result.stdout.count("Choose an option") == 2
 
 

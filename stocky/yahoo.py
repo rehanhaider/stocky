@@ -8,10 +8,13 @@ from typing import Literal
 from stocky.config import DEFAULT_DB_PATH
 from stocky.database import (
     connect,
+    delete_yahoo_response,
     encode_response_json,
     fetch_consolidated_symbols,
     initialize_database,
+    is_usable_yahoo_payload,
     read_available_yahoo_symbols,
+    split_yahoo_symbol,
     upsert_yahoo_response,
 )
 
@@ -40,13 +43,17 @@ def classify_payload(yahoo_symbol: str, data: object, payload: object) -> tuple[
 
     Yahoo answers an unlisted ticker with ``Quote not found for symbol: X`` and
     has also used ``Quote not found for ticker symbol: X``, so the prefix is
-    matched rather than one exact sentence.
+    matched rather than one exact sentence. A payload that does not name a listed
+    security, such as an empty answer or an index under the same ticker, is not
+    found too: it holds no data for the share.
     """
     if isinstance(payload, str) and payload.startswith(NOT_FOUND_PREFIX):
         return "not_found", ""
     if isinstance(payload, dict):
         if "error" in payload:
             return "failure", str(payload["error"])
+        if not is_usable_yahoo_payload(payload):
+            return "not_found", ""
         return "success", ""
     if payload is None:
         if isinstance(data, dict) and "error" in data:
@@ -63,13 +70,15 @@ class YahooUpdateResult:
     dry_run: bool
 
 
-def exchange_suffix(exchange: str) -> str:
-    normalized = exchange.upper()
-    if normalized == "NSE":
-        return "NS"
-    if normalized == "BSE":
-        return "BO"
-    raise ValueError(f"Unsupported exchange: {exchange}. Expected NSE or BSE.")
+# Each exchange reads the consolidated column that holds its full Yahoo tickers.
+TICKER_COLUMNS = {"NSE": "yq_ns", "BSE": "yq_bo"}
+
+
+def ticker_column(exchange: str) -> str:
+    column = TICKER_COLUMNS.get(exchange.upper())
+    if column is None:
+        raise ValueError(f"Unsupported exchange: {exchange}. Expected NSE or BSE.")
+    return column
 
 
 class YahooDataManager:
@@ -79,25 +88,23 @@ class YahooDataManager:
     def update_data(
         self,
         *,
-        key: str = "zd_symbol",
         exchange: str = "BSE",
         dry_run: bool = False,
         limit: int | None = None,
         missing_only: bool = False,
         progress: ProgressCallback | None = None,
     ) -> YahooUpdateResult:
-        suffix = exchange_suffix(exchange)
-        symbols = fetch_consolidated_symbols(self.db_path, key=key, limit=limit)
+        column = ticker_column(exchange)
+        symbols = fetch_consolidated_symbols(self.db_path, key=column, limit=limit)
 
         if not symbols and (limit is None or limit > 0):
             raise ValueError(
-                f"No symbols found for --key {key} in {self.db_path}. "
-                "Try another --key (zd_symbol, yq_symbol, nse_symbol, bse_sc_code) or run 'stocky rebuild' first."
+                f"No {exchange.upper()} tickers found in {column} in {self.db_path}. Run 'stocky rebuild' first."
             )
 
         if missing_only:
             available = read_available_yahoo_symbols(self.db_path)
-            symbols = [symbol for symbol in symbols if f"{symbol}.{suffix}" not in available]
+            symbols = [symbol for symbol in symbols if symbol not in available]
 
         if dry_run:
             return YahooUpdateResult(processed=len(symbols), written=0, skipped=0, dry_run=True)
@@ -113,8 +120,7 @@ class YahooDataManager:
         # writes after the last COMMIT_EVERY boundary are persisted there. The
         # abort path commits explicitly because that exit rolls back instead.
         with connect(self.db_path) as con:
-            for index, symbol in enumerate(symbols, start=1):
-                yahoo_symbol = f"{symbol}.{suffix}"
+            for index, yahoo_symbol in enumerate(symbols, start=1):
                 cause: Exception | None = None
                 try:
                     data = yq.Ticker(yahoo_symbol).all_modules
@@ -140,12 +146,14 @@ class YahooDataManager:
                 elif outcome == "not_found":
                     consecutive_failures = 0
                     skipped += 1
+                    # Drop an older answer, so status and --missing-only stop treating it as data.
+                    delete_yahoo_response(con, yahoo_symbol)
                 else:
                     consecutive_failures = 0
                     upsert_yahoo_response(
                         con,
                         yahoo_symbol=yahoo_symbol,
-                        symbol=symbol,
+                        symbol=split_yahoo_symbol(yahoo_symbol)[0],
                         exchange=exchange.upper(),
                         response_json=encode_response_json(data),
                         source="yahooquery",

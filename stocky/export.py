@@ -16,11 +16,17 @@ import pandas as pd
 
 from stocky import __version__
 from stocky.config import DEFAULT_DB_PATH, DEFAULT_SNAPSHOT_DIR
-from stocky.database import CONSOLIDATED_TABLE, connect, table_exists
+from stocky.database import (
+    CONSOLIDATED_COLUMNS,
+    CONSOLIDATED_TABLE,
+    SYMBOL_COLUMNS,
+    connect,
+    require_consolidated_table,
+)
 
 EXPORT_FORMATS = ("csv", "json", "parquet")
-EXPORT_COLUMNS = ("isin", "ins_type", "zd_symbol", "yq_symbol", "nse_symbol", "bse_sc_code", "bse_sc_name")
-REQUIRABLE_COLUMNS = ("zd_symbol", "yq_symbol", "nse_symbol", "bse_sc_code")
+EXPORT_COLUMNS = CONSOLIDATED_COLUMNS
+REQUIRABLE_COLUMNS = SYMBOL_COLUMNS
 
 SNAPSHOT_FORMATS = ("csv", "parquet")
 SNAPSHOT_MANIFEST = "manifest.json"
@@ -103,8 +109,7 @@ def read_consolidated(
     query += " ORDER BY isin"
 
     with connect(db_path) as con:
-        if not table_exists(con, CONSOLIDATED_TABLE):
-            raise RuntimeError(f"Database table '{CONSOLIDATED_TABLE}' does not exist in {db_path}")
+        require_consolidated_table(con, db_path, ("isin", *selected, *required))
         rows = con.execute(query, ()).fetchall()
 
     return pd.DataFrame(rows, columns=list(selected), dtype=object)
