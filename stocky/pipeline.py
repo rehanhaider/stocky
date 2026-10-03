@@ -104,7 +104,7 @@ def load_nse_equities(path: Path) -> pd.DataFrame:
     if NSE_LEGACY_COLUMNS.issubset(nse_bhavcopy.columns):
         equities = nse_bhavcopy[nse_bhavcopy["SERIES"].isin(NSE_EQUITY_SERIES)][["ISIN", "SYMBOL"]].copy()
         equities.rename(columns={"ISIN": "isin", "SYMBOL": "nse_symbol"}, inplace=True)
-        # Legacy files carry no instrument token, so Zerodha's NSE symbol cannot be matched.
+        # Legacy files carry no instrument token, so Zerodha's NSE symbol is matched by name only.
         equities["nse_token"] = None
         return equities
 
@@ -147,6 +147,25 @@ def match_zerodha_symbols(tokens: pd.Series, zerodha_instruments: pd.DataFrame, 
     return tokens.map(lambda token: token_to_symbol.get(str(token)) if pd.notna(token) else None)
 
 
+def match_zerodha_symbols_by_name(symbols: pd.Series, zerodha_instruments: pd.DataFrame, segment: str) -> pd.Series:
+    """Find an exchange symbol in one Zerodha segment, as listed or with Zerodha's -BE/-BZ series suffix.
+
+    NSE gives a share a new token when it moves between the EQ and BE series, so a Zerodha file from a
+    different day can hold the share under its other token. Searching only the named segment keeps the
+    symbol from matching a different company on the other exchange.
+    """
+    listed = set(zerodha_instruments.loc[zerodha_instruments["segment"] == segment, "tradingsymbol"])
+
+    def match(symbol: object) -> str | None:
+        if pd.isna(symbol) or not str(symbol):
+            return None
+        return next(
+            (candidate for candidate in (f"{symbol}", f"{symbol}-BE", f"{symbol}-BZ") if candidate in listed), None
+        )
+
+    return symbols.map(match)
+
+
 def yahoo_tickers(symbols: pd.Series, suffix: str) -> pd.Series:
     """Append Yahoo's exchange suffix to an exchange's own symbol, leaving unlisted rows empty."""
     return symbols.map(lambda symbol: f"{symbol}{suffix}" if pd.notna(symbol) and str(symbol) else None)
@@ -161,7 +180,9 @@ def build_consolidated_dataframe(
     equities = pd.merge(nse_equities, bse_equities, on="isin", how="outer")
     equities.set_index("isin", inplace=True)
     equities["ins_type"] = "equity"
-    equities["zd_ns"] = match_zerodha_symbols(equities["nse_token"], zerodha_instruments, "NSE")
+    equities["zd_ns"] = match_zerodha_symbols(equities["nse_token"], zerodha_instruments, "NSE").fillna(
+        match_zerodha_symbols_by_name(equities["nse_symbol"], zerodha_instruments, "NSE")
+    )
     equities["zd_bo"] = match_zerodha_symbols(equities["bse_sc_code"], zerodha_instruments, "BSE")
     equities["yq_ns"] = yahoo_tickers(equities["nse_symbol"], ".NS")
     equities["yq_bo"] = yahoo_tickers(equities["bse_symbol"], ".BO")

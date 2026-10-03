@@ -20,13 +20,12 @@ the ISIN in the bhavcopy used for the rebuild.
 | --- | --- | --- | --- |
 | `nse_symbol` / `bse_symbol` | yes | yes | `TckrSymb` in each exchange's bhavcopy |
 | `bse_sc_code`, `bse_sc_name` | | yes | BSE bhavcopy |
-| `zd_ns` / `zd_bo` | yes | yes | Zerodha instruments, matched by the exchange's instrument token, such as `AAREYDRUGS-BE` |
+| `zd_ns` / `zd_bo` | yes | yes | Zerodha instruments, matched by the exchange's instrument token, such as `AAREYDRUGS-BE`. When an NSE token has changed, the NSE symbol is looked up in Zerodha's NSE list only |
 | `yq_ns` / `yq_bo` | yes | yes | The exchange symbol plus `.NS` or `.BO`, such as `RELIANCE.NS` |
 
 For example, Globe Textiles trades only on NSE, so it has `yq_ns = GLOBE.NS` and an empty `yq_bo`. Yahoo's `GLOBE.BO`
 is a different company, and nothing links it to Globe Textiles. Legacy-format bhavcopies (`NSE-cm*bhav.csv`,
-`EQ_ISINCODE_*.CSV`) carry no NSE token and no BSE trading symbol, so a rebuild from them leaves `zd_ns`, `bse_symbol`,
-and `yq_bo` empty.
+`EQ_ISINCODE_*.CSV`) carry no BSE trading symbol, so a rebuild from them leaves `bse_symbol` and `yq_bo` empty.
 
 # Installation
 Clone the repository.

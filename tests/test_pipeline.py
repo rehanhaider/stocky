@@ -12,6 +12,7 @@ from stocky.pipeline import (
     load_nse_equities,
     load_zerodha_instruments,
     match_zerodha_symbols,
+    match_zerodha_symbols_by_name,
     preview_sources,
     rebuild_database,
 )
@@ -250,8 +251,9 @@ def test_rebuild_database_replaces_consolidated_table_without_backup(
 
     with sqlite3.connect(db_path) as con:
         rows = con.execute(f"SELECT isin, zd_ns, zd_bo, yq_ns, yq_bo FROM {CONSOLIDATED_TABLE}").fetchall()
-    # The fixture writes legacy files, which carry no NSE token and no BSE trading symbol.
-    assert rows == [("INE002A01018", None, "RELIANCE", "RELIANCE.NS", None)]
+    # The fixture writes legacy files: no NSE token, so zd_ns comes from the NSE symbol, and no BSE
+    # trading symbol, so yq_bo stays empty.
+    assert rows == [("INE002A01018", "RELIANCE", "RELIANCE", "RELIANCE.NS", None)]
     assert result.backup_path is None
     assert not backup_dir.exists()
 
@@ -311,6 +313,47 @@ def test_match_zerodha_symbols_reads_only_the_named_segment() -> None:
     assert nse[0] == "NSE-ONLY-TOKEN-CLASH"
     assert bse[1:].isna().all()
     assert nse[1:].isna().all()
+
+
+def test_build_consolidated_dataframe_falls_back_to_the_nse_symbol_when_the_token_changed() -> None:
+    nse = pd.DataFrame(
+        [
+            # NSE moved these to the BE series, so the bhavcopy token differs from Zerodha's.
+            {"isin": "INE07S101020", "nse_symbol": "PAVNAIND", "nse_token": "16201"},
+            {"isin": "INE00CE01017", "nse_symbol": "SVLL", "nse_token": "5000"},
+            {"isin": "INE000000001", "nse_symbol": "NSEONLY", "nse_token": "6000"},
+        ]
+    )
+    bse = pd.DataFrame(columns=["isin", "bse_sc_code", "bse_symbol", "bse_sc_name"])
+    zerodha = pd.DataFrame(
+        [
+            {"segment": "NSE", "exchange_token": "16192", "tradingsymbol": "PAVNAIND"},
+            {"segment": "NSE", "exchange_token": "5001", "tradingsymbol": "SVLL-BE"},
+            # A different company on BSE with the NSE share's symbol must not be picked up.
+            {"segment": "BSE", "exchange_token": "999999", "tradingsymbol": "NSEONLY"},
+        ]
+    )
+
+    result = build_consolidated_dataframe(bse_equities=bse, nse_equities=nse, zerodha_instruments=zerodha)
+
+    assert result.loc["INE07S101020", "zd_ns"] == "PAVNAIND"
+    assert result.loc["INE00CE01017", "zd_ns"] == "SVLL-BE"
+    assert pd.isna(result.loc["INE000000001", "zd_ns"])
+
+
+def test_match_zerodha_symbols_by_name_reads_only_the_named_segment() -> None:
+    zerodha = pd.DataFrame(
+        [
+            {"segment": "BSE", "exchange_token": "1", "tradingsymbol": "FOCUS"},
+            {"segment": "NSE", "exchange_token": "2", "tradingsymbol": "TAKE"},
+        ]
+    )
+
+    matched = match_zerodha_symbols_by_name(pd.Series(["FOCUS", "TAKE", float("nan")]), zerodha, "NSE")
+
+    assert pd.isna(matched[0])
+    assert matched[1] == "TAKE"
+    assert pd.isna(matched[2])
 
 
 def test_preview_sources_reports_row_counts_per_file(tmp_path, market_csv_builder) -> None:
