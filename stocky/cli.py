@@ -88,8 +88,8 @@ _MATCH_FIELDS = (
     ("Yahoo NSE", "yq_ns"),
     ("Yahoo BSE", "yq_bo"),
 )
-# Search results list the identity columns only, so the table fits a standard terminal; the
-# equivalents view shows every Zerodha and Yahoo ticker for the selected row.
+# Search results list the identity columns only, so the table fits a standard terminal; lookup,
+# explore, and the interactive menu's row selection show every Zerodha and Yahoo ticker.
 _SEARCH_FIELDS = _MATCH_FIELDS[:6]
 
 
@@ -323,6 +323,25 @@ def _interactive_rebuild() -> None:
     _print_rebuild_result(result)
 
 
+def _interactive_show_matches(term: str, result: SearchResult) -> None:
+    """Show one direct match in full, or list several and offer a row's Zerodha and Yahoo tickers."""
+    if result.total == 1 and not result.fuzzy:
+        _print_equivalents(result.matches[0], term)
+        return
+
+    _print_search_result(term, result, numbered=True)
+    if not result.matches:
+        return
+
+    selection = typer.prompt("Row number for equivalents (blank to skip)", default="", show_default=False).strip()
+    if not selection:
+        return
+    if selection.isdigit() and 1 <= int(selection) <= len(result.matches):
+        _print_equivalents(result.matches[int(selection) - 1])
+    else:
+        console.print(f"[yellow]Enter a number between 1 and {len(result.matches)}.[/yellow]")
+
+
 def _interactive_yahoo_update() -> None:
     exchange = typer.prompt("Exchange", default="BSE").strip().upper()
     if exchange not in YAHOO_EXCHANGES:
@@ -340,7 +359,7 @@ def _interactive_yahoo_update() -> None:
             console.print("[red]Enter a positive number, or leave blank for all.[/red]")
             return
 
-    missing_only = typer.confirm("Only fetch symbols with no cached response?", default=False)
+    missing_only = typer.confirm("Only fetch tickers with no cached response?", default=False)
 
     manager = YahooDataManager(DEFAULT_DB_PATH)
     try:
@@ -432,9 +451,11 @@ def interactive() -> None:
         elif choice == "5":
             term = typer.prompt("Search term").strip()
             try:
-                _print_search_result(term, search_instruments(term, DEFAULT_DB_PATH))
+                result = search_instruments(term, DEFAULT_DB_PATH)
             except Exception as exc:
                 console.print(f"[red]{exc}[/red]")
+            else:
+                _interactive_show_matches(term, result)
         elif choice == "6":
             raise typer.Exit()
         else:

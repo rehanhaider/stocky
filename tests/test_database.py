@@ -153,21 +153,25 @@ def test_read_status_counts_cached_tickers_per_exchange_by_full_ticker(tmp_path,
                 "RELIANCE.BO",
             ),
             ("INE581X01021", "equity", "GLOBE", None, None, None, "GLOBE", None, "GLOBE.NS", None),
+            ("INE198N01017", "equity", None, "CDG", "534796", "C", None, "CDG", None, "CDG.BO"),
         ],
     )
     _seed_yahoo(
         db_path,
         [
-            ("RELIANCE.BO", "RELIANCE", "BSE"),
+            ("RELIANCE.NS", "RELIANCE", "NSE"),
             ("GLOBE.NS", "GLOBE", "NSE"),
+            ("CDG.BO", "CDG", "BSE"),
             # A different company's BSE ticker that shares Globe's bare symbol must not count.
             ("GLOBE.BO", "GLOBE", "BSE"),
+            # A cached NSE ticker for a BSE-only share must not count either.
+            ("CDG.NS", "CDG", "NSE"),
         ],
     )
 
     status = read_status(db_path)
 
-    assert status.yahoo_cached_ns == 1
+    assert status.yahoo_cached_ns == 2
     assert status.yahoo_cached_bo == 1
 
 

@@ -223,6 +223,23 @@ def test_status_json_prints_database_status(tmp_path, seed_consolidated, runner)
     assert payload["db_path"] == str(db_path)
     assert payload["consolidated_rows"] == 4
     assert payload["coverage"][0] == {"column": "isin", "populated": 4}
+    assert payload["yahoo_cached_ns"] == 0
+    assert payload["yahoo_cached_bo"] == 0
+    assert "yahoo_cached_yq_symbols" not in payload
+
+
+def test_status_prints_cached_tickers_per_exchange(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    _seed_cached_yahoo_responses(db_path, ["RELIANCE", "INFY"], suffix="NS")
+    _seed_cached_yahoo_responses(db_path, ["INFY"], suffix="BO")
+
+    result = runner.invoke(app, ["status", "--db-path", str(db_path)], env={"COLUMNS": "200"})
+
+    lines = {" ".join(line.replace("│", " ").split()) for line in result.stdout.splitlines()}
+    assert result.exit_code == 0
+    assert "Yahoo NSE tickers cached 2/2 (100.0%)" in lines
+    assert "Yahoo BSE tickers cached 1/2 (50.0%)" in lines
 
 
 def test_status_reports_missing_database(tmp_path, runner) -> None:
@@ -300,6 +317,8 @@ def test_lookup_prints_single_match_equivalents(tmp_path, seed_consolidated, run
     assert result.exit_code == 0
     assert "Equivalents for '500325'" in result.stdout
     for value in ("INE002A01018", "equity", "RELIANCE", "500325", "RELIANCE INDUSTRIES"):
+        assert value in result.stdout
+    for value in ("Zerodha NSE", "Zerodha BSE", "Yahoo NSE", "RELIANCE.NS", "Yahoo BSE", "RELIANCE.BO"):
         assert value in result.stdout
 
 
@@ -645,10 +664,41 @@ def test_interactive_searches_once_then_quits(tmp_path, monkeypatch, seed_consol
     seed_consolidated(db_path)
     monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
 
-    result = runner.invoke(app, ["interactive"], input="5\nINFY\n6\n")
+    result = runner.invoke(app, ["interactive"], input="5\nINFY\n\n6\n")
 
     assert result.exit_code == 0
     assert "Matches for 'INFY'" in result.stdout
+    assert "Equivalents" not in result.stdout
+    assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_search_shows_tickers_for_a_selected_row(tmp_path, monkeypatch, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
+
+    result = runner.invoke(app, ["interactive"], input="5\nINFY\n2\n6\n")
+
+    assert result.exit_code == 0
+    assert "Matches for 'INFY'" in result.stdout
+    assert "Zerodha NSE" in result.stdout
+    assert "INFYBEES" in result.stdout
+    assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_search_shows_tickers_for_a_single_match(tmp_path, monkeypatch, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
+
+    result = runner.invoke(app, ["interactive"], input="5\n500325\n6\n")
+
+    assert result.exit_code == 0
+    assert "Equivalents for '500325'" in result.stdout
+    assert "RELIANCE.NS" in result.stdout
+    assert "RELIANCE.BO" in result.stdout
     assert result.stdout.count("Choose an option") == 2
 
 

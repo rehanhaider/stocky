@@ -354,7 +354,7 @@ class StockyApp(App[None]):
         raw_limit = self.query_one("#limit", Input).value.strip()
         limit = int(raw_limit) if raw_limit else None
         if limit is not None and limit < 1:
-            raise ValueError("Enter a positive limit, or leave it blank for all symbols.")
+            raise ValueError("Enter a positive limit, or leave it blank for all tickers.")
         return {
             "exchange": str(self.query_one("#exchange", Select).value),
             "limit": limit,

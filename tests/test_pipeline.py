@@ -303,10 +303,14 @@ def test_match_zerodha_symbols_reads_only_the_named_segment() -> None:
     )
     tokens = pd.Series(["500325", float("nan"), "404"])
 
-    matched = match_zerodha_symbols(tokens, zerodha, "BSE")
+    bse = match_zerodha_symbols(tokens, zerodha, "BSE")
+    nse = match_zerodha_symbols(tokens, zerodha, "NSE")
 
-    assert matched[0] == "RELIANCE"
-    assert matched[1:].isna().all()
+    # The same token in both segments resolves per segment, whichever row comes last.
+    assert bse[0] == "RELIANCE"
+    assert nse[0] == "NSE-ONLY-TOKEN-CLASH"
+    assert bse[1:].isna().all()
+    assert nse[1:].isna().all()
 
 
 def test_preview_sources_reports_row_counts_per_file(tmp_path, market_csv_builder) -> None:

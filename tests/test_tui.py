@@ -312,7 +312,7 @@ def test_yahoo_update_rejects_a_zero_limit(tmp_path, monkeypatch) -> None:
         await pilot.pause()
         await _press(stocky_app, pilot, "#yahoo-run")
 
-        assert _squash("Enter a positive limit, or leave it blank for all symbols.") in _log_text(stocky_app)
+        assert _squash("Enter a positive limit, or leave it blank for all tickers.") in _log_text(stocky_app)
 
     _run(stocky_app, scenario)
 
