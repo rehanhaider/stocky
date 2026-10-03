@@ -86,6 +86,12 @@ def initialize_database(db_path: Path = DEFAULT_DB_PATH) -> None:
             ON {YAHOO_RESPONSES_TABLE} (exchange)
             """
         )
+        con.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_{YAHOO_RESPONSES_TABLE}_symbol
+            ON {YAHOO_RESPONSES_TABLE} (symbol)
+            """
+        )
 
 
 def table_exists(con: sqlite3.Connection, table_name: str) -> bool:
@@ -190,12 +196,14 @@ def read_status(db_path: Path = DEFAULT_DB_PATH) -> DatabaseStatus:
                 ).fetchall()
             )
             if table_exists(con, CONSOLIDATED_TABLE):
+                # An uncorrelated IN reads yahoo_responses once, so databases created before the
+                # symbol index stay fast without this read-only query having to create it.
                 yahoo_cached_yq_symbols = con.execute(
                     f"""
                     SELECT COUNT(*)
                     FROM {CONSOLIDATED_TABLE} c
                     WHERE c.yq_symbol IS NOT NULL AND TRIM(c.yq_symbol) != ''
-                      AND EXISTS (SELECT 1 FROM {YAHOO_RESPONSES_TABLE} y WHERE y.symbol = c.yq_symbol)
+                      AND c.yq_symbol IN (SELECT symbol FROM {YAHOO_RESPONSES_TABLE})
                     """
                 ).fetchone()[0]
 
