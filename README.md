@@ -1,4 +1,3 @@
-[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Frehanhaider%2Fstocky.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Frehanhaider%2Fstocky?ref=badge_shield)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-46a4ff.svg)](https://docs.astral.sh/ruff/)
 [![license](https://img.shields.io/github/license/rehanhaider/stocky)](https://choosealicense.com/licenses/gpl-3.0/)
 
@@ -251,4 +250,5 @@ Exit the program
 
 
 ## License
-[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Frehanhaider%2Fstocky.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Frehanhaider%2Fstocky?ref=badge_large)
+
+[Read the license](LICENSE.md).
