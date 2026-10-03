@@ -28,7 +28,7 @@ This document captures additional feature ideas beyond the current implementatio
 - Export commands: `stocky export --format csv|parquet|json` (with column selection, only matched symbols, etc.).
 - Generate ready-to-use "universe" files for popular libraries (pandas, vectorbt, backtrader, zipline-reloaded, etc.).
 - Stable "master instruments" snapshot export that downstream projects can pin.
-- Optional views/tables for common use cases (e.g. only symbols with both zd_symbol and yq_symbol).
+- Optional views/tables for common use cases (e.g. only symbols with both zd_ns and yq_ns).
 
 ## Automation & Freshness
 
@@ -42,7 +42,7 @@ This document captures additional feature ideas beyond the current implementatio
 
 - Better conflict reporting: name mismatches between BSE/NSE, multiple mappings for same symbol, ISIN collisions.
 - Validation report as a command output (or artifact on rebuild).
-- Coverage tracking over time (e.g. % of consolidated rows with zd_symbol, yq_symbol, etc.).
+- Coverage tracking over time (e.g. % of consolidated rows with zd_ns, yq_ns, etc.).
 - Symbol change / corporate action awareness (hard problem, but even basic detection of previous symbols disappearing would help).
 
 ## Enrichment & Analytics (leveraging the Yahoo blob store)

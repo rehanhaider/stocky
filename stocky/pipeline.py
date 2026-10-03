@@ -8,23 +8,23 @@ import pandas as pd
 
 from stocky.config import DEFAULT_BACKUP_DIR, DEFAULT_DB_PATH
 from stocky.database import (
+    CONSOLIDATED_COLUMNS,
     CONSOLIDATED_TABLE,
     backup_database,
     connect,
     initialize_database,
-    read_available_yahoo_symbols,
 )
 from stocky.sources import BhavcopyPaths, require_existing_files
 
 NSE_LEGACY_COLUMNS = {"SERIES", "ISIN", "SYMBOL"}
-NSE_UDIFF_COLUMNS = {"SctySrs", "ISIN", "TckrSymb"}
+NSE_UDIFF_COLUMNS = {"SctySrs", "ISIN", "TckrSymb", "FinInstrmId"}
 
 # EQ = rolling-settlement equities; BE/BZ = trade-for-trade equities.
 # SME platform (SM/ST) and debt/bond/ETF series stay excluded.
 NSE_EQUITY_SERIES = {"EQ", "BE", "BZ"}
 
 BSE_LEGACY_COLUMNS = {"SC_TYPE", "ISIN_CODE", "SC_CODE", "SC_NAME"}
-BSE_UDIFF_COLUMNS = {"SctySrs", "ISIN", "FinInstrmId", "FinInstrmNm"}
+BSE_UDIFF_COLUMNS = {"SctySrs", "ISIN", "FinInstrmId", "TckrSymb", "FinInstrmNm"}
 
 # The legacy files' SC_TYPE "Q" filter kept every group except fixed income (F)
 # and gilts/SGBs (G); the UDiFF file has no SC_TYPE, so exclude those series instead.
@@ -72,14 +72,21 @@ def load_bse_equities(path: Path) -> pd.DataFrame:
             inplace=True,
         )
         equities["bse_sc_code"] = equities["bse_sc_code"].astype(str)
+        # Legacy files carry no BSE trading symbol.
+        equities["bse_symbol"] = None
         return equities
 
     if BSE_UDIFF_COLUMNS.issubset(bse_bhavcopy.columns):
         equities = bse_bhavcopy[~bse_bhavcopy["SctySrs"].isin(BSE_NON_EQUITY_UDIFF_SERIES)][
-            ["ISIN", "FinInstrmId", "FinInstrmNm"]
+            ["ISIN", "FinInstrmId", "TckrSymb", "FinInstrmNm"]
         ].copy()
         equities.rename(
-            columns={"ISIN": "isin", "FinInstrmId": "bse_sc_code", "FinInstrmNm": "bse_sc_name"},
+            columns={
+                "ISIN": "isin",
+                "FinInstrmId": "bse_sc_code",
+                "TckrSymb": "bse_symbol",
+                "FinInstrmNm": "bse_sc_name",
+            },
             inplace=True,
         )
         equities["bse_sc_code"] = equities["bse_sc_code"].astype(str)
@@ -97,11 +104,16 @@ def load_nse_equities(path: Path) -> pd.DataFrame:
     if NSE_LEGACY_COLUMNS.issubset(nse_bhavcopy.columns):
         equities = nse_bhavcopy[nse_bhavcopy["SERIES"].isin(NSE_EQUITY_SERIES)][["ISIN", "SYMBOL"]].copy()
         equities.rename(columns={"ISIN": "isin", "SYMBOL": "nse_symbol"}, inplace=True)
+        # Legacy files carry no instrument token, so Zerodha's NSE symbol cannot be matched.
+        equities["nse_token"] = None
         return equities
 
     if NSE_UDIFF_COLUMNS.issubset(nse_bhavcopy.columns):
-        equities = nse_bhavcopy[nse_bhavcopy["SctySrs"].isin(NSE_EQUITY_SERIES)][["ISIN", "TckrSymb"]].copy()
-        equities.rename(columns={"ISIN": "isin", "TckrSymb": "nse_symbol"}, inplace=True)
+        equities = nse_bhavcopy[nse_bhavcopy["SctySrs"].isin(NSE_EQUITY_SERIES)][
+            ["ISIN", "TckrSymb", "FinInstrmId"]
+        ].copy()
+        equities.rename(columns={"ISIN": "isin", "TckrSymb": "nse_symbol", "FinInstrmId": "nse_token"}, inplace=True)
+        equities["nse_token"] = equities["nse_token"].astype(str)
         return equities
 
     raise ValueError(
@@ -114,35 +126,30 @@ def load_zerodha_instruments(path: Path) -> pd.DataFrame:
     instruments = _strip_dataframe_strings(pd.read_csv(path))
     _require_columns(instruments, {"segment", "exchange_token", "tradingsymbol"}, f"Zerodha instruments ({path})")
 
-    instruments = instruments.query("segment == 'BSE' or segment == 'NSE'")[["exchange_token", "tradingsymbol"]].copy()
+    instruments = instruments.query("segment == 'BSE' or segment == 'NSE'")[
+        ["segment", "exchange_token", "tradingsymbol"]
+    ].copy()
     instruments["exchange_token"] = instruments["exchange_token"].astype(str)
     instruments["tradingsymbol"] = instruments["tradingsymbol"].astype(str)
     return instruments
 
 
-def match_zerodha_symbol(row: pd.Series, tradingsymbols: set[str], token_to_symbol: dict[str, str]) -> str | None:
-    nse_symbol = row.get("nse_symbol")
-    bse_code = row.get("bse_sc_code")
+def match_zerodha_symbols(tokens: pd.Series, zerodha_instruments: pd.DataFrame, segment: str) -> pd.Series:
+    """Map exchange tokens to Zerodha trading symbols from one segment only.
 
-    if pd.notna(nse_symbol) and str(nse_symbol) in tradingsymbols:
-        return str(nse_symbol)
+    Zerodha's exchange_token is the exchange's own instrument number: the NSE token for the NSE
+    segment and the BSE scrip code for the BSE segment. Matching by token rather than by symbol keeps
+    an NSE share from picking up a different company's BSE symbol, and yields Zerodha's own spelling,
+    such as AAREYDRUGS-BE for NSE trade-for-trade shares.
+    """
+    segment_rows = zerodha_instruments[zerodha_instruments["segment"] == segment]
+    token_to_symbol = dict(zip(segment_rows["exchange_token"], segment_rows["tradingsymbol"], strict=False))
+    return tokens.map(lambda token: token_to_symbol.get(str(token)) if pd.notna(token) else None)
 
-    if pd.notna(bse_code):
-        return token_to_symbol.get(str(bse_code))
 
-    return None
-
-
-def match_yahoo_symbol(row: pd.Series, available_yahoo_symbols: set[str]) -> str | None:
-    for candidate in (row.get("nse_symbol"), row.get("zd_symbol")):
-        if pd.isna(candidate):
-            continue
-
-        candidate = str(candidate)
-        if f"{candidate}.NS" in available_yahoo_symbols or f"{candidate}.BO" in available_yahoo_symbols:
-            return candidate
-
-    return None
+def yahoo_tickers(symbols: pd.Series, suffix: str) -> pd.Series:
+    """Append Yahoo's exchange suffix to an exchange's own symbol, leaving unlisted rows empty."""
+    return symbols.map(lambda symbol: f"{symbol}{suffix}" if pd.notna(symbol) and str(symbol) else None)
 
 
 def build_consolidated_dataframe(
@@ -150,25 +157,16 @@ def build_consolidated_dataframe(
     bse_equities: pd.DataFrame,
     nse_equities: pd.DataFrame,
     zerodha_instruments: pd.DataFrame,
-    available_yahoo_symbols: set[str],
 ) -> pd.DataFrame:
     equities = pd.merge(nse_equities, bse_equities, on="isin", how="outer")
     equities.set_index("isin", inplace=True)
     equities["ins_type"] = "equity"
+    equities["zd_ns"] = match_zerodha_symbols(equities["nse_token"], zerodha_instruments, "NSE")
+    equities["zd_bo"] = match_zerodha_symbols(equities["bse_sc_code"], zerodha_instruments, "BSE")
+    equities["yq_ns"] = yahoo_tickers(equities["nse_symbol"], ".NS")
+    equities["yq_bo"] = yahoo_tickers(equities["bse_symbol"], ".BO")
 
-    zerodha_symbols = zerodha_instruments.dropna(subset=["exchange_token", "tradingsymbol"])
-    tradingsymbols = set(zerodha_symbols["tradingsymbol"].astype(str))
-    token_to_symbol = dict(
-        zip(
-            zerodha_symbols["exchange_token"].astype(str),
-            zerodha_symbols["tradingsymbol"].astype(str),
-            strict=False,
-        )
-    )
-    equities["zd_symbol"] = equities.apply(match_zerodha_symbol, axis=1, args=(tradingsymbols, token_to_symbol))
-    equities["yq_symbol"] = equities.apply(match_yahoo_symbol, axis=1, args=(available_yahoo_symbols,))
-
-    return equities[["ins_type", "zd_symbol", "yq_symbol", "nse_symbol", "bse_sc_code", "bse_sc_name"]]
+    return equities[[column for column in CONSOLIDATED_COLUMNS if column != "isin"]]
 
 
 def preview_sources(paths: BhavcopyPaths) -> SourcePreview:
@@ -212,7 +210,6 @@ def rebuild_database(
         bse_equities=bse_equities,
         nse_equities=nse_equities,
         zerodha_instruments=zerodha_instruments,
-        available_yahoo_symbols=read_available_yahoo_symbols(db_path),
     )
 
     backup_path = None

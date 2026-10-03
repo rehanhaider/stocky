@@ -35,7 +35,7 @@ from stocky.database import (
 from stocky.export import SNAPSHOT_FORMATS, create_snapshot, export_consolidated, export_tickers
 from stocky.pipeline import RebuildResult, SourcePreview, preview_sources, rebuild_database
 from stocky.sources import BhavcopyPaths, list_bhavcopy_pairs, resolve_bhavcopy_paths
-from stocky.yahoo import ProgressCallback, YahooDataManager
+from stocky.yahoo import ProgressCallback, YahooDataManager, ticker_column
 
 console = Console()
 error_console = Console(stderr=True)
@@ -45,7 +45,6 @@ yahoo_app = typer.Typer(help="Manage Yahoo Finance cache data.")
 PLAIN_PROGRESS_EVERY = 50
 MAX_LISTED_BHAVCOPY_PAIRS = 10
 YAHOO_EXCHANGES = ("BSE", "NSE")
-YAHOO_KEYS = ("zd_symbol", "yq_symbol", "nse_symbol", "bse_sc_code")
 
 
 def _emit_json(payload: object) -> None:
@@ -66,12 +65,46 @@ def _parse_date(value: str | None) -> date | None:
 
 _COLUMN_LABELS = {
     "isin": "ISIN",
-    "zd_symbol": "Zerodha symbol",
-    "yq_symbol": "Yahoo symbol",
     "nse_symbol": "NSE symbol",
+    "bse_symbol": "BSE symbol",
     "bse_sc_code": "BSE scrip code",
     "bse_sc_name": "BSE scrip name",
+    "zd_ns": "Zerodha NSE",
+    "zd_bo": "Zerodha BSE",
+    "yq_ns": "Yahoo NSE",
+    "yq_bo": "Yahoo BSE",
 }
+
+# Field labels and InstrumentMatch attributes in display order for the equivalents view.
+_MATCH_FIELDS = (
+    ("ISIN", "isin"),
+    ("Type", "ins_type"),
+    ("NSE", "nse_symbol"),
+    ("BSE", "bse_symbol"),
+    ("BSE code", "bse_sc_code"),
+    ("BSE name", "bse_sc_name"),
+    ("Zerodha NSE", "zd_ns"),
+    ("Zerodha BSE", "zd_bo"),
+    ("Yahoo NSE", "yq_ns"),
+    ("Yahoo BSE", "yq_bo"),
+)
+# Search results list the identity columns only, so the table fits a standard terminal; the
+# equivalents view shows every Zerodha and Yahoo ticker for the selected row.
+_SEARCH_FIELDS = _MATCH_FIELDS[:6]
+
+
+def _yahoo_cached_rows(status: DatabaseStatus) -> list[tuple[str, str]]:
+    populated = {entry.column: entry.populated for entry in status.coverage}
+    return [
+        (
+            f"Yahoo {exchange} tickers cached",
+            f"{cached}/{populated.get(column, 0)} ({_format_percent(cached, populated.get(column, 0))})",
+        )
+        for exchange, column, cached in (
+            ("NSE", "yq_ns", status.yahoo_cached_ns),
+            ("BSE", "yq_bo", status.yahoo_cached_bo),
+        )
+    ]
 
 
 def _split_columns(value: str | None) -> list[str] | None:
@@ -132,17 +165,13 @@ def _print_status(status: DatabaseStatus) -> None:
         )
     console.print(coverage)
 
-    yq_populated = next((entry.populated for entry in status.coverage if entry.column == "yq_symbol"), 0)
     yahoo = Table(title="Yahoo cache")
     yahoo.add_column("Field")
     yahoo.add_column("Value")
     yahoo.add_row("Newest fetch", _format_timestamp(status.yahoo_newest_fetch))
     yahoo.add_row("Oldest fetch", _format_timestamp(status.yahoo_oldest_fetch))
-    yahoo.add_row(
-        "Consolidated symbols cached",
-        f"{status.yahoo_cached_yq_symbols}/{yq_populated}"
-        f" ({_format_percent(status.yahoo_cached_yq_symbols, yq_populated)})",
-    )
+    for label, value in _yahoo_cached_rows(status):
+        yahoo.add_row(label, value)
     console.print(yahoo)
 
 
@@ -157,18 +186,12 @@ def _print_search_result(term: str, result: SearchResult, *, numbered: bool = Fa
     table = Table(title=f"Matches for '{term}'")
     if numbered:
         table.add_column("#", justify="right")
-    for header in ("ISIN", "Type", "Zerodha", "Yahoo", "NSE", "BSE code", "BSE name"):
+    for header, _ in _SEARCH_FIELDS:
         table.add_column(header)
     for index, match in enumerate(result.matches, start=1):
         table.add_row(
             *([str(index)] if numbered else []),
-            match.isin or "-",
-            match.ins_type or "-",
-            match.zd_symbol or "-",
-            match.yq_symbol or "-",
-            match.nse_symbol or "-",
-            match.bse_sc_code or "-",
-            match.bse_sc_name or "-",
+            *(getattr(match, field) or "-" for _, field in _SEARCH_FIELDS),
         )
     console.print(table)
 
@@ -177,17 +200,12 @@ def _print_search_result(term: str, result: SearchResult, *, numbered: bool = Fa
 
 
 def _print_equivalents(match: InstrumentMatch, term: str | None = None) -> None:
-    identifier = term or match.zd_symbol or match.nse_symbol or match.yq_symbol or match.isin or "-"
+    identifier = term or match.nse_symbol or match.bse_symbol or match.isin or "-"
     table = Table(title=f"Equivalents for '{identifier}'")
     table.add_column("Field")
     table.add_column("Value")
-    table.add_row("ISIN", match.isin or "-")
-    table.add_row("Type", match.ins_type or "-")
-    table.add_row("Zerodha", match.zd_symbol or "-")
-    table.add_row("Yahoo", match.yq_symbol or "-")
-    table.add_row("NSE", match.nse_symbol or "-")
-    table.add_row("BSE code", match.bse_sc_code or "-")
-    table.add_row("BSE name", match.bse_sc_name or "-")
+    for label, field in _MATCH_FIELDS:
+        table.add_row(label, getattr(match, field) or "-")
     console.print(table)
 
 
@@ -311,11 +329,6 @@ def _interactive_yahoo_update() -> None:
         console.print(f"[red]Enter one of {', '.join(YAHOO_EXCHANGES)}.[/red]")
         return
 
-    key = typer.prompt("Key", default="zd_symbol").strip()
-    if key not in YAHOO_KEYS:
-        console.print(f"[red]Enter one of {', '.join(YAHOO_KEYS)}.[/red]")
-        return
-
     raw_limit = typer.prompt("Limit (blank = all)", default="", show_default=False).strip()
     limit: int | None = None
     if raw_limit:
@@ -332,7 +345,6 @@ def _interactive_yahoo_update() -> None:
     manager = YahooDataManager(DEFAULT_DB_PATH)
     try:
         planned = manager.update_data(
-            key=key,
             exchange=exchange,
             dry_run=True,
             limit=limit,
@@ -342,14 +354,16 @@ def _interactive_yahoo_update() -> None:
         console.print(f"[red]{escape(str(exc))}[/red]")
         return
 
-    console.print(f"[cyan]{planned.processed} symbols to fetch from Yahoo Finance ({exchange}, key {key}).[/cyan]")
+    console.print(
+        f"[cyan]{planned.processed} tickers to fetch from Yahoo Finance ({exchange}, {ticker_column(exchange)}).[/cyan]"
+    )
     if planned.processed == 0:
-        # update_data raises when the key holds no symbols at all, so an empty plan means
-        # missing_only filtered out every symbol it found.
+        # update_data raises when the column holds no tickers at all, so an empty plan means
+        # missing_only filtered out every ticker it found.
         console.print(
-            "[green]Nothing to fetch; every symbol already has a cached response.[/green]"
+            "[green]Nothing to fetch; every ticker already has a cached response.[/green]"
             if missing_only
-            else f"[green]No symbols found for key {key}.[/green]"
+            else f"[green]No {exchange} tickers found.[/green]"
         )
         return
 
@@ -359,7 +373,6 @@ def _interactive_yahoo_update() -> None:
     try:
         with _yahoo_progress(exchange, json_output=False) as print_progress:
             result = manager.update_data(
-                key=key,
                 exchange=exchange,
                 limit=limit,
                 missing_only=missing_only,
@@ -689,12 +702,15 @@ def export(
         str | None,
         typer.Option(
             "--tickers",
-            help="Write one ticker per line from this column (zd_symbol, yq_symbol, nse_symbol, or bse_sc_code).",
+            help=(
+                "Write one ticker per line from this column "
+                "(nse_symbol, bse_symbol, bse_sc_code, zd_ns, zd_bo, yq_ns, or yq_bo)."
+            ),
         ),
     ] = None,
     suffix: Annotated[
         str | None,
-        typer.Option("--suffix", help="Text appended to every ticker, such as .NS or .BO for Yahoo. Needs --tickers."),
+        typer.Option("--suffix", help="Text appended to every ticker. Needs --tickers."),
     ] = None,
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
 ) -> None:
@@ -823,16 +839,15 @@ def _yahoo_progress(exchange: str, json_output: bool) -> Iterator[ProgressCallba
 
 @yahoo_app.command("update")
 def yahoo_update(
-    exchange: Annotated[str, typer.Option("--exchange", help="Exchange to query: BSE or NSE.")] = "BSE",
-    key: Annotated[
-        str, typer.Option("--key", help="Column in consolidated table to use as the base symbol.")
-    ] = "zd_symbol",
+    exchange: Annotated[
+        str, typer.Option("--exchange", help="Exchange to query: BSE (yq_bo tickers) or NSE (yq_ns tickers).")
+    ] = "BSE",
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Count symbols without calling Yahoo Finance.")] = False,
-    limit: Annotated[int | None, typer.Option("--limit", help="Optional maximum number of symbols to process.")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Count tickers without calling Yahoo Finance.")] = False,
+    limit: Annotated[int | None, typer.Option("--limit", help="Optional maximum number of tickers to process.")] = None,
     missing_only: Annotated[
         bool,
-        typer.Option("--missing-only", help="Only fetch symbols that have no cached response yet."),
+        typer.Option("--missing-only", help="Only fetch tickers that have no cached response yet."),
     ] = False,
     json_output: Annotated[
         bool,
@@ -843,7 +858,6 @@ def yahoo_update(
     try:
         with _yahoo_progress(exchange, json_output) as print_progress:
             result = YahooDataManager(db_path).update_data(
-                key=key,
                 exchange=exchange,
                 dry_run=dry_run,
                 limit=limit,

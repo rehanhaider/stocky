@@ -12,6 +12,7 @@ from stocky.database import (
     fetch_consolidated_symbols,
     initialize_database,
     read_available_yahoo_symbols,
+    split_yahoo_symbol,
     upsert_yahoo_response,
 )
 
@@ -63,13 +64,15 @@ class YahooUpdateResult:
     dry_run: bool
 
 
-def exchange_suffix(exchange: str) -> str:
-    normalized = exchange.upper()
-    if normalized == "NSE":
-        return "NS"
-    if normalized == "BSE":
-        return "BO"
-    raise ValueError(f"Unsupported exchange: {exchange}. Expected NSE or BSE.")
+# Each exchange reads the consolidated column that holds its full Yahoo tickers.
+TICKER_COLUMNS = {"NSE": "yq_ns", "BSE": "yq_bo"}
+
+
+def ticker_column(exchange: str) -> str:
+    column = TICKER_COLUMNS.get(exchange.upper())
+    if column is None:
+        raise ValueError(f"Unsupported exchange: {exchange}. Expected NSE or BSE.")
+    return column
 
 
 class YahooDataManager:
@@ -79,25 +82,23 @@ class YahooDataManager:
     def update_data(
         self,
         *,
-        key: str = "zd_symbol",
         exchange: str = "BSE",
         dry_run: bool = False,
         limit: int | None = None,
         missing_only: bool = False,
         progress: ProgressCallback | None = None,
     ) -> YahooUpdateResult:
-        suffix = exchange_suffix(exchange)
-        symbols = fetch_consolidated_symbols(self.db_path, key=key, limit=limit)
+        column = ticker_column(exchange)
+        symbols = fetch_consolidated_symbols(self.db_path, key=column, limit=limit)
 
         if not symbols and (limit is None or limit > 0):
             raise ValueError(
-                f"No symbols found for --key {key} in {self.db_path}. "
-                "Try another --key (zd_symbol, yq_symbol, nse_symbol, bse_sc_code) or run 'stocky rebuild' first."
+                f"No {exchange.upper()} tickers found in {column} in {self.db_path}. Run 'stocky rebuild' first."
             )
 
         if missing_only:
             available = read_available_yahoo_symbols(self.db_path)
-            symbols = [symbol for symbol in symbols if f"{symbol}.{suffix}" not in available]
+            symbols = [symbol for symbol in symbols if symbol not in available]
 
         if dry_run:
             return YahooUpdateResult(processed=len(symbols), written=0, skipped=0, dry_run=True)
@@ -113,8 +114,7 @@ class YahooDataManager:
         # writes after the last COMMIT_EVERY boundary are persisted there. The
         # abort path commits explicitly because that exit rolls back instead.
         with connect(self.db_path) as con:
-            for index, symbol in enumerate(symbols, start=1):
-                yahoo_symbol = f"{symbol}.{suffix}"
+            for index, yahoo_symbol in enumerate(symbols, start=1):
                 cause: Exception | None = None
                 try:
                     data = yq.Ticker(yahoo_symbol).all_modules
@@ -145,7 +145,7 @@ class YahooDataManager:
                     upsert_yahoo_response(
                         con,
                         yahoo_symbol=yahoo_symbol,
-                        symbol=symbol,
+                        symbol=split_yahoo_symbol(yahoo_symbol)[0],
                         exchange=exchange.upper(),
                         response_json=encode_response_json(data),
                         source="yahooquery",

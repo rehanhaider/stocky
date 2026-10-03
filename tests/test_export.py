@@ -41,8 +41,11 @@ def test_csv_export_keeps_column_order_empty_nulls_and_text_codes(tmp_path, seed
 
     lines = output.read_text(encoding="utf-8").split("\n")
     assert lines[0] == ",".join(EXPORT_COLUMNS)
-    assert lines[1] == "INE002A01018,equity,RELIANCE,RELIANCE,RELIANCE,500325,RELIANCE INDUSTRIES"
-    assert lines[4] == "INE999Z01019,equity,INFYBEES,,,,INFY ETF"
+    assert (
+        lines[1]
+        == "INE002A01018,equity,RELIANCE,RELIANCE,500325,RELIANCE INDUSTRIES,RELIANCE,RELIANCE,RELIANCE.NS,RELIANCE.BO"
+    )
+    assert lines[4] == "INE999Z01019,equity,,,,INFY ETF,INFYBEES,,,"
 
 
 def test_csv_export_writes_header_for_zero_rows(tmp_path) -> None:
@@ -71,17 +74,18 @@ def test_json_export_preserves_key_order_and_nulls(tmp_path, seed_consolidated) 
     assert list(records[0]) == list(EXPORT_COLUMNS)
     assert records[0]["bse_sc_code"] == "500325"
     last = records[-1]
-    assert records[2]["yq_symbol"] == ""
+    assert records[2]["yq_bo"] == ""
+    assert records[2]["yq_ns"] is None
     assert last["bse_sc_code"] is None
 
 
 def test_json_export_of_zero_rows_is_an_empty_list(tmp_path) -> None:
     db_path = tmp_path / "empty.db"
     with sqlite3.connect(db_path) as con:
-        con.execute(f"CREATE TABLE {CONSOLIDATED_TABLE} (isin TEXT, zd_symbol TEXT)")
+        con.execute(f"CREATE TABLE {CONSOLIDATED_TABLE} (isin TEXT, zd_ns TEXT)")
     output = tmp_path / "empty.json"
 
-    result = export_consolidated(db_path, output=output, format=None, columns=["isin", "zd_symbol"])
+    result = export_consolidated(db_path, output=output, format=None, columns=["isin", "zd_ns"])
 
     assert result.rows == 0
     assert json.loads(output.read_text(encoding="utf-8")) == []
@@ -129,7 +133,7 @@ def test_parquet_export_honours_columns_and_require(tmp_path, seed_consolidated)
         output=output,
         format="parquet",
         columns=["bse_sc_code", "isin"],
-        require=["zd_symbol", "yq_symbol"],
+        require=["zd_bo", "yq_bo"],
     )
 
     assert result.rows == 2
@@ -141,9 +145,9 @@ def test_parquet_export_honours_columns_and_require(tmp_path, seed_consolidated)
 def test_columns_subset_and_order_are_honoured(tmp_path, seed_consolidated) -> None:
     db_path = _seeded_db(tmp_path, seed_consolidated)
 
-    frame = read_consolidated(db_path, columns=["zd_symbol", "isin"])
+    frame = read_consolidated(db_path, columns=["zd_ns", "isin"])
 
-    assert list(frame.columns) == ["zd_symbol", "isin"]
+    assert list(frame.columns) == ["zd_ns", "isin"]
     assert frame["isin"].tolist() == [
         "INE002A01018",
         "INE009A01021",
@@ -155,9 +159,10 @@ def test_columns_subset_and_order_are_honoured(tmp_path, seed_consolidated) -> N
 def test_require_filters_blank_and_null_values(tmp_path, seed_consolidated) -> None:
     db_path = _seeded_db(tmp_path, seed_consolidated)
 
-    frame = read_consolidated(db_path, require=["zd_symbol", "yq_symbol"])
+    # 20MICRONS has zd_bo but a blank yq_bo, and INFYBEES has neither.
+    frame = read_consolidated(db_path, require=["zd_bo", "yq_bo"])
 
-    assert frame["zd_symbol"].tolist() == ["RELIANCE", "INFY"]
+    assert frame["zd_bo"].tolist() == ["RELIANCE", "INFY"]
 
 
 def test_unknown_columns_raise_value_error_listing_valid_columns(tmp_path, seed_consolidated) -> None:
@@ -171,7 +176,7 @@ def test_unknown_columns_raise_value_error_listing_valid_columns(tmp_path, seed_
     with pytest.raises(ValueError) as require_error:
         read_consolidated(db_path, require=["bse_sc_name"])
     assert "Unknown require column 'bse_sc_name'" in str(require_error.value)
-    assert "zd_symbol, yq_symbol, nse_symbol, bse_sc_code" in str(require_error.value)
+    assert "nse_symbol, bse_symbol, bse_sc_code, zd_ns, zd_bo, yq_ns, yq_bo" in str(require_error.value)
 
     with pytest.raises(ValueError):
         read_consolidated(db_path, columns=["isin", "isin"])
@@ -289,12 +294,12 @@ def test_cli_export_to_stdout_writes_json(tmp_path, seed_consolidated, runner) -
 
     result = runner.invoke(
         app,
-        ["export", "--format", "json", "--columns", "isin, zd_symbol", "--db-path", str(db_path)],
+        ["export", "--format", "json", "--columns", "isin, zd_ns", "--db-path", str(db_path)],
     )
 
     assert result.exit_code == 0
     records = json.loads(result.stdout)
-    assert list(records[0]) == ["isin", "zd_symbol"]
+    assert list(records[0]) == ["isin", "zd_ns"]
 
 
 def test_cli_export_with_invalid_column_reports_on_stderr(tmp_path, seed_consolidated, runner) -> None:
@@ -382,12 +387,12 @@ def test_tickers_skip_unpopulated_rows_and_keep_isin_order(tmp_path, seed_consol
     db_path = _seeded_db(tmp_path, seed_consolidated)
     output = tmp_path / "out" / "yahoo.txt"
 
-    result = export_tickers(db_path, output=output, column="yq_symbol")
+    result = export_tickers(db_path, output=output, column="yq_bo")
 
     assert result.rows == 2
-    assert result.columns == ("yq_symbol",)
+    assert result.columns == ("yq_bo",)
     assert result.format == "tickers"
-    assert output.read_text(encoding="utf-8") == "RELIANCE\nINFY\n"
+    assert output.read_text(encoding="utf-8") == "RELIANCE.BO\nINFY.BO\n"
 
 
 def test_tickers_append_suffix_and_drop_repeats(tmp_path, seed_consolidated) -> None:
@@ -395,14 +400,14 @@ def test_tickers_append_suffix_and_drop_repeats(tmp_path, seed_consolidated) -> 
     seed_consolidated(
         db_path,
         [
-            ("INE001", "equity", "AAA", "AAA", None, "1", "A"),
-            ("INE002", "equity", "AAA", " AAA ", None, "2", "A2"),
-            ("INE003", "equity", "BBB", "BBB", None, None, "B"),
+            ("INE001", "equity", "AAA", None, "1", "A", None, None, None, None),
+            ("INE002", "equity", " AAA ", None, "2", "A2", None, None, None, None),
+            ("INE003", "equity", "BBB", None, None, "B", None, None, None, None),
         ],
     )
     output = tmp_path / "yahoo.txt"
 
-    result = export_tickers(db_path, output=output, column="yq_symbol", suffix=".NS")
+    result = export_tickers(db_path, output=output, column="nse_symbol", suffix=".NS")
 
     assert result.rows == 2
     assert output.read_text(encoding="utf-8") == "AAA.NS\nBBB.NS\n"
@@ -430,7 +435,7 @@ def test_tickers_of_zero_rows_write_an_empty_file(tmp_path, seed_consolidated) -
     seed_consolidated(db_path, [])
     output = tmp_path / "none.txt"
 
-    result = export_tickers(db_path, output=output, column="zd_symbol")
+    result = export_tickers(db_path, output=output, column="zd_ns")
 
     assert result.rows == 0
     assert output.read_text(encoding="utf-8") == ""
@@ -441,7 +446,7 @@ def test_cli_tickers_to_stdout_write_only_tickers(tmp_path, seed_consolidated, r
 
     result = runner.invoke(
         app,
-        ["export", "--tickers", "zd_symbol", "--suffix", ".NS", "--require", "nse_symbol", "--db-path", str(db_path)],
+        ["export", "--tickers", "zd_ns", "--suffix", ".NS", "--require", "nse_symbol", "--db-path", str(db_path)],
     )
 
     assert result.exit_code == 0
@@ -452,18 +457,18 @@ def test_cli_tickers_to_file_prints_summary(tmp_path, seed_consolidated, runner)
     db_path = _seeded_db(tmp_path, seed_consolidated)
     output = tmp_path / "zerodha.txt"
 
-    result = runner.invoke(app, ["export", "--tickers", "zd_symbol", "-o", str(output), "--db-path", str(db_path)])
+    result = runner.invoke(app, ["export", "--tickers", "zd_bo", "-o", str(output), "--db-path", str(db_path)])
 
     assert result.exit_code == 0
-    assert "Wrote 4 tickers from zd_symbol" in result.stdout
-    assert output.read_text(encoding="utf-8").splitlines() == ["RELIANCE", "INFY", "20MICRONS", "INFYBEES"]
+    assert "Wrote 3 tickers from zd_bo" in result.stdout
+    assert output.read_text(encoding="utf-8").splitlines() == ["RELIANCE", "INFY", "20MICRONS"]
 
 
 @pytest.mark.parametrize(
     ("args", "message"),
     [
-        (["--tickers", "yq_symbol", "--format", "csv"], "cannot be combined with --format or --columns"),
-        (["--tickers", "yq_symbol", "--columns", "isin"], "cannot be combined with --format or --columns"),
+        (["--tickers", "yq_ns", "--format", "csv"], "cannot be combined with --format or --columns"),
+        (["--tickers", "yq_ns", "--columns", "isin"], "cannot be combined with --format or --columns"),
         (["--format", "csv", "--suffix", ".NS"], "--suffix only applies with --tickers"),
     ],
 )
@@ -507,7 +512,10 @@ def test_snapshot_writes_versioned_files_and_checksummed_manifest(tmp_path, seed
         assert entry["sha256"] == hashlib.sha256(data).hexdigest()
 
     csv_lines = (directory / "consolidated.csv").read_text(encoding="utf-8").splitlines()
-    assert csv_lines[1] == "INE002A01018,equity,RELIANCE,RELIANCE,RELIANCE,500325,RELIANCE INDUSTRIES"
+    assert (
+        csv_lines[1]
+        == "INE002A01018,equity,RELIANCE,RELIANCE,500325,RELIANCE INDUSTRIES,RELIANCE,RELIANCE,RELIANCE.NS,RELIANCE.BO"
+    )
     table = pq.read_table(directory / "consolidated.parquet")
     assert table.num_rows == 4
     assert all(field.type == pa.string() for field in table.schema)
@@ -559,7 +567,7 @@ def test_snapshot_failure_leaves_no_partial_version(tmp_path) -> None:
     with sqlite3.connect(tmp_path / "stocky.db") as con:
         con.execute(f"CREATE TABLE {CONSOLIDATED_TABLE} (isin TEXT)")
 
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises(RuntimeError, match="older layout"):
         create_snapshot(tmp_path / "stocky.db", output_dir=output_dir, version="v1", formats=["csv"])
 
     assert not output_dir.exists() or list(output_dir.iterdir()) == []

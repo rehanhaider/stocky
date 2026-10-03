@@ -11,36 +11,87 @@ from stocky.pipeline import (
     load_bse_equities,
     load_nse_equities,
     load_zerodha_instruments,
-    match_yahoo_symbol,
-    match_zerodha_symbol,
+    match_zerodha_symbols,
     preview_sources,
     rebuild_database,
 )
 
 
-def test_build_consolidated_dataframe_matches_symbols() -> None:
+def test_build_consolidated_dataframe_fills_each_exchange_only_where_it_lists_the_isin() -> None:
     bse = pd.DataFrame(
         [
-            {
-                "isin": "INE002A01018",
-                "bse_sc_code": "500325",
-                "bse_sc_name": "RELIANCE",
-            }
+            {"isin": "INE002A01018", "bse_sc_code": "500325", "bse_symbol": "RELIANCE", "bse_sc_name": "RELIANCE"},
+            {"isin": "INE198N01017", "bse_sc_code": "534796", "bse_symbol": "CDG", "bse_sc_name": "CDG PETCHEM"},
         ]
     )
-    nse = pd.DataFrame([{"isin": "INE002A01018", "nse_symbol": "RELIANCE"}])
-    zerodha = pd.DataFrame([{"exchange_token": "500325", "tradingsymbol": "RELIANCE"}])
-
-    result = build_consolidated_dataframe(
-        bse_equities=bse,
-        nse_equities=nse,
-        zerodha_instruments=zerodha,
-        available_yahoo_symbols={"RELIANCE.NS"},
+    nse = pd.DataFrame(
+        [
+            {"isin": "INE002A01018", "nse_symbol": "RELIANCE", "nse_token": "2885"},
+            {"isin": "INE581X01021", "nse_symbol": "GLOBE", "nse_token": "1111"},
+            {"isin": "INE593W01028", "nse_symbol": "FOCUS", "nse_token": "2222"},
+        ]
+    )
+    zerodha = pd.DataFrame(
+        [
+            {"segment": "NSE", "exchange_token": "2885", "tradingsymbol": "RELIANCE"},
+            {"segment": "BSE", "exchange_token": "500325", "tradingsymbol": "RELIANCE"},
+            {"segment": "NSE", "exchange_token": "1111", "tradingsymbol": "GLOBE"},
+            {"segment": "BSE", "exchange_token": "534796", "tradingsymbol": "CDG"},
+            {"segment": "NSE", "exchange_token": "2222", "tradingsymbol": "FOCUS-BE"},
+            # A different company that BSE lists under the NSE share's symbol.
+            {"segment": "BSE", "exchange_token": "999999", "tradingsymbol": "FOCUS"},
+        ]
     )
 
-    row = result.loc["INE002A01018"]
-    assert row["zd_symbol"] == "RELIANCE"
-    assert row["yq_symbol"] == "RELIANCE"
+    result = build_consolidated_dataframe(bse_equities=bse, nse_equities=nse, zerodha_instruments=zerodha)
+
+    columns = ["nse_symbol", "bse_symbol", "zd_ns", "zd_bo", "yq_ns", "yq_bo"]
+    rows = result[columns].astype(object).where(result[columns].notna(), None).to_dict("index")
+    assert rows == {
+        "INE002A01018": {
+            "nse_symbol": "RELIANCE",
+            "bse_symbol": "RELIANCE",
+            "zd_ns": "RELIANCE",
+            "zd_bo": "RELIANCE",
+            "yq_ns": "RELIANCE.NS",
+            "yq_bo": "RELIANCE.BO",
+        },
+        "INE581X01021": {
+            "nse_symbol": "GLOBE",
+            "bse_symbol": None,
+            "zd_ns": "GLOBE",
+            "zd_bo": None,
+            "yq_ns": "GLOBE.NS",
+            "yq_bo": None,
+        },
+        "INE198N01017": {
+            "nse_symbol": None,
+            "bse_symbol": "CDG",
+            "zd_ns": None,
+            "zd_bo": "CDG",
+            "yq_ns": None,
+            "yq_bo": "CDG.BO",
+        },
+        "INE593W01028": {
+            "nse_symbol": "FOCUS",
+            "bse_symbol": None,
+            "zd_ns": "FOCUS-BE",
+            "zd_bo": None,
+            "yq_ns": "FOCUS.NS",
+            "yq_bo": None,
+        },
+    }
+    assert list(result.columns) == [
+        "ins_type",
+        "nse_symbol",
+        "bse_symbol",
+        "bse_sc_code",
+        "bse_sc_name",
+        "zd_ns",
+        "zd_bo",
+        "yq_ns",
+        "yq_bo",
+    ]
 
 
 def test_load_nse_equities_supports_udiff_zip(tmp_path) -> None:
@@ -58,8 +109,8 @@ def test_load_nse_equities_supports_udiff_zip(tmp_path) -> None:
     result = load_nse_equities(zip_path)
 
     assert result.to_dict("records") == [
-        {"isin": "INE002A01018", "nse_symbol": "RELIANCE"},
-        {"isin": "INE111B01023", "nse_symbol": "63MOONS"},
+        {"isin": "INE002A01018", "nse_symbol": "RELIANCE", "nse_token": "1"},
+        {"isin": "INE111B01023", "nse_symbol": "63MOONS", "nse_token": "2"},
     ]
 
 
@@ -77,8 +128,13 @@ def test_load_bse_equities_udiff_excludes_fixed_income_and_gilts(tmp_path) -> No
     result = load_bse_equities(csv_path)
 
     assert result.to_dict("records") == [
-        {"isin": "INE117A01022", "bse_sc_code": "500002", "bse_sc_name": "ABB INDIA LIMITED"},
-        {"isin": "INE111B01023", "bse_sc_code": "538565", "bse_sc_name": "63 MOONS TECHNOLOGIES"},
+        {"isin": "INE117A01022", "bse_sc_code": "500002", "bse_symbol": "ABB", "bse_sc_name": "ABB INDIA LIMITED"},
+        {
+            "isin": "INE111B01023",
+            "bse_sc_code": "538565",
+            "bse_symbol": "63MOONS",
+            "bse_sc_name": "63 MOONS TECHNOLOGIES",
+        },
     ]
 
 
@@ -97,9 +153,9 @@ def test_load_nse_equities_legacy_includes_trade_for_trade_series(tmp_path) -> N
     result = load_nse_equities(csv_path)
 
     assert result.to_dict("records") == [
-        {"isin": "INE002A01018", "nse_symbol": "RELIANCE"},
-        {"isin": "INE111B01023", "nse_symbol": "63MOONS"},
-        {"isin": "INE574I01035", "nse_symbol": "ARCOTECH"},
+        {"isin": "INE002A01018", "nse_symbol": "RELIANCE", "nse_token": None},
+        {"isin": "INE111B01023", "nse_symbol": "63MOONS", "nse_token": None},
+        {"isin": "INE574I01035", "nse_symbol": "ARCOTECH", "nse_token": None},
     ]
 
 
@@ -123,7 +179,7 @@ def test_load_bse_equities_legacy_filters_sc_type_q(tmp_path) -> None:
     result = load_bse_equities(csv_path)
 
     assert result.to_dict("records") == [
-        {"isin": "INE002A01018", "bse_sc_code": "500325", "bse_sc_name": "RELIANCE INDUSTRIES"}
+        {"isin": "INE002A01018", "bse_sc_code": "500325", "bse_sc_name": "RELIANCE INDUSTRIES", "bse_symbol": None}
     ]
 
 
@@ -135,23 +191,24 @@ def test_load_bse_equities_rejects_unknown_columns(tmp_path) -> None:
         load_bse_equities(csv_path)
 
 
-def test_build_consolidated_dataframe_keeps_exchange_only_isins_and_nan_fallbacks() -> None:
-    bse = pd.DataFrame([{"isin": "BSE_ONLY", "bse_sc_code": "500001", "bse_sc_name": "BSE ONLY"}])
-    nse = pd.DataFrame([{"isin": "NSE_ONLY", "nse_symbol": "NSEONLY"}])
-    zerodha = pd.DataFrame(columns=["exchange_token", "tradingsymbol"])
-
-    result = build_consolidated_dataframe(
-        bse_equities=bse,
-        nse_equities=nse,
-        zerodha_instruments=zerodha,
-        available_yahoo_symbols=set(),
+def test_build_consolidated_dataframe_keeps_exchange_only_isins_without_zerodha_matches() -> None:
+    bse = pd.DataFrame(
+        [{"isin": "BSE_ONLY", "bse_sc_code": "500001", "bse_symbol": "BSEONLY", "bse_sc_name": "BSE ONLY"}]
     )
+    nse = pd.DataFrame([{"isin": "NSE_ONLY", "nse_symbol": "NSEONLY", "nse_token": "1"}])
+    zerodha = pd.DataFrame(columns=["segment", "exchange_token", "tradingsymbol"])
+
+    result = build_consolidated_dataframe(bse_equities=bse, nse_equities=nse, zerodha_instruments=zerodha)
 
     assert set(result.index) == {"BSE_ONLY", "NSE_ONLY"}
     assert pd.isna(result.loc["BSE_ONLY", "nse_symbol"])
     assert pd.isna(result.loc["NSE_ONLY", "bse_sc_code"])
-    assert result.loc["BSE_ONLY", "zd_symbol"] is None
-    assert result.loc["NSE_ONLY", "yq_symbol"] is None
+    assert pd.isna(result.loc["BSE_ONLY", "zd_bo"])
+    assert pd.isna(result.loc["NSE_ONLY", "zd_ns"])
+    assert pd.isna(result.loc["BSE_ONLY", "yq_ns"])
+    assert result.loc["BSE_ONLY", "yq_bo"] == "BSEONLY.BO"
+    assert result.loc["NSE_ONLY", "yq_ns"] == "NSEONLY.NS"
+    assert pd.isna(result.loc["NSE_ONLY", "yq_bo"])
 
 
 def test_rebuild_database_dry_run_does_not_create_database(tmp_path, market_csv_builder) -> None:
@@ -192,8 +249,9 @@ def test_rebuild_database_replaces_consolidated_table_without_backup(
     result = rebuild_database(paths, db_path=db_path, backup_dir=backup_dir, backup=False)
 
     with sqlite3.connect(db_path) as con:
-        rows = con.execute(f"SELECT isin, zd_symbol FROM {CONSOLIDATED_TABLE}").fetchall()
-    assert rows == [("INE002A01018", "RELIANCE")]
+        rows = con.execute(f"SELECT isin, zd_ns, zd_bo, yq_ns, yq_bo FROM {CONSOLIDATED_TABLE}").fetchall()
+    # The fixture writes legacy files, which carry no NSE token and no BSE trading symbol.
+    assert rows == [("INE002A01018", None, "RELIANCE", "RELIANCE.NS", None)]
     assert result.backup_path is None
     assert not backup_dir.exists()
 
@@ -223,8 +281,8 @@ def test_load_zerodha_instruments_filters_segments_and_normalizes_tokens(tmp_pat
     result = load_zerodha_instruments(paths.zerodha)
 
     assert result.to_dict("records") == [
-        {"exchange_token": "123", "tradingsymbol": "RELIANCE"},
-        {"exchange_token": "500325", "tradingsymbol": "RELIANCE"},
+        {"segment": "NSE", "exchange_token": "123", "tradingsymbol": "RELIANCE"},
+        {"segment": "BSE", "exchange_token": "500325", "tradingsymbol": "RELIANCE"},
     ]
 
 
@@ -236,20 +294,19 @@ def test_load_zerodha_instruments_requires_expected_columns(tmp_path) -> None:
         load_zerodha_instruments(path)
 
 
-def test_match_zerodha_symbol_uses_bse_token_then_returns_none() -> None:
-    bse_only = pd.Series({"nse_symbol": float("nan"), "bse_sc_code": "500325"})
-    unmatched = pd.Series({"nse_symbol": "UNKNOWN", "bse_sc_code": float("nan")})
+def test_match_zerodha_symbols_reads_only_the_named_segment() -> None:
+    zerodha = pd.DataFrame(
+        [
+            {"segment": "NSE", "exchange_token": "500325", "tradingsymbol": "NSE-ONLY-TOKEN-CLASH"},
+            {"segment": "BSE", "exchange_token": "500325", "tradingsymbol": "RELIANCE"},
+        ]
+    )
+    tokens = pd.Series(["500325", float("nan"), "404"])
 
-    assert match_zerodha_symbol(bse_only, set(), {"500325": "RELIANCE"}) == "RELIANCE"
-    assert match_zerodha_symbol(unmatched, {"RELIANCE"}, {}) is None
+    matched = match_zerodha_symbols(tokens, zerodha, "BSE")
 
-
-def test_match_yahoo_symbol_uses_bo_after_nan_and_returns_none() -> None:
-    bse_only = pd.Series({"nse_symbol": float("nan"), "zd_symbol": "RELIANCE"})
-    unmatched = pd.Series({"nse_symbol": float("nan"), "zd_symbol": "UNKNOWN"})
-
-    assert match_yahoo_symbol(bse_only, {"RELIANCE.BO"}) == "RELIANCE"
-    assert match_yahoo_symbol(unmatched, {"RELIANCE.BO"}) is None
+    assert matched[0] == "RELIANCE"
+    assert matched[1:].isna().all()
 
 
 def test_preview_sources_reports_row_counts_per_file(tmp_path, market_csv_builder) -> None:

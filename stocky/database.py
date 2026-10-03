@@ -4,6 +4,7 @@ import gzip
 import json
 import shutil
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
@@ -14,7 +15,21 @@ from stocky.config import DEFAULT_BACKUP_DIR, DEFAULT_DB_PATH
 CONSOLIDATED_TABLE = "consolidated"
 YAHOO_RESPONSES_TABLE = "yahoo_responses"
 
-SEARCHABLE_COLUMNS = ("isin", "zd_symbol", "yq_symbol", "nse_symbol", "bse_sc_code", "bse_sc_name")
+# Every symbol column belongs to one exchange and stays empty when that exchange does not list the ISIN.
+SYMBOL_COLUMNS = ("nse_symbol", "bse_symbol", "bse_sc_code", "zd_ns", "zd_bo", "yq_ns", "yq_bo")
+CONSOLIDATED_COLUMNS = (
+    "isin",
+    "ins_type",
+    "nse_symbol",
+    "bse_symbol",
+    "bse_sc_code",
+    "bse_sc_name",
+    "zd_ns",
+    "zd_bo",
+    "yq_ns",
+    "yq_bo",
+)
+SEARCHABLE_COLUMNS = tuple(column for column in CONSOLIDATED_COLUMNS if column != "ins_type")
 
 
 @dataclass(frozen=True)
@@ -40,18 +55,22 @@ class DatabaseStatus:
     yahoo_exchange_counts: dict[str, int]
     yahoo_oldest_fetch: str | None
     yahoo_newest_fetch: str | None
-    yahoo_cached_yq_symbols: int
+    yahoo_cached_ns: int
+    yahoo_cached_bo: int
 
 
 @dataclass(frozen=True)
 class InstrumentMatch:
     isin: str | None
     ins_type: str | None
-    zd_symbol: str | None
-    yq_symbol: str | None
     nse_symbol: str | None
+    bse_symbol: str | None
     bse_sc_code: str | None
     bse_sc_name: str | None
+    zd_ns: str | None
+    zd_bo: str | None
+    yq_ns: str | None
+    yq_bo: str | None
 
 
 @dataclass(frozen=True)
@@ -86,17 +105,32 @@ def initialize_database(db_path: Path = DEFAULT_DB_PATH) -> None:
             ON {YAHOO_RESPONSES_TABLE} (exchange)
             """
         )
-        con.execute(
-            f"""
-            CREATE INDEX IF NOT EXISTS idx_{YAHOO_RESPONSES_TABLE}_symbol
-            ON {YAHOO_RESPONSES_TABLE} (symbol)
-            """
-        )
 
 
 def table_exists(con: sqlite3.Connection, table_name: str) -> bool:
     row = con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table_name,)).fetchone()
     return row is not None
+
+
+def require_consolidated_table(
+    con: sqlite3.Connection, db_path: Path, columns: Sequence[str] = CONSOLIDATED_COLUMNS
+) -> None:
+    if not table_exists(con, CONSOLIDATED_TABLE):
+        raise RuntimeError(f"Database table '{CONSOLIDATED_TABLE}' does not exist in {db_path}")
+    require_consolidated_columns(con, db_path, columns)
+
+
+def require_consolidated_columns(
+    con: sqlite3.Connection, db_path: Path, columns: Sequence[str] = CONSOLIDATED_COLUMNS
+) -> None:
+    """Fail with a rebuild hint when a table built before the per-exchange columns lacks ones a read needs."""
+    present = {row[1] for row in con.execute(f"PRAGMA table_info({CONSOLIDATED_TABLE})")}
+    missing = [column for column in columns if column not in present]
+    if missing:
+        raise RuntimeError(
+            f"The '{CONSOLIDATED_TABLE}' table in {db_path} has an older layout without {', '.join(missing)}. "
+            "Run 'stocky rebuild' to recreate it."
+        )
 
 
 def backup_database(
@@ -126,19 +160,18 @@ def read_available_yahoo_symbols(db_path: Path = DEFAULT_DB_PATH) -> set[str]:
 
 def fetch_consolidated_symbols(
     db_path: Path = DEFAULT_DB_PATH,
-    key: str = "zd_symbol",
+    *,
+    key: str,
     limit: int | None = None,
 ) -> list[str]:
-    allowed_keys = {"zd_symbol", "yq_symbol", "nse_symbol", "bse_sc_code"}
-    if key not in allowed_keys:
+    if key not in SYMBOL_COLUMNS:
         raise ValueError(f"Unsupported symbol key: {key}")
 
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {db_path}. Run 'stocky rebuild' first.")
 
     with connect(db_path) as con:
-        if not table_exists(con, CONSOLIDATED_TABLE):
-            raise RuntimeError(f"Database table '{CONSOLIDATED_TABLE}' does not exist in {db_path}")
+        require_consolidated_table(con, db_path, ("isin", key))
 
         query = f"""
             SELECT {key}
@@ -164,6 +197,7 @@ def read_status(db_path: Path = DEFAULT_DB_PATH) -> DatabaseStatus:
         ins_type_counts: dict[str, int] = {}
         coverage: list[ColumnCoverage] = []
         if table_exists(con, CONSOLIDATED_TABLE):
+            require_consolidated_columns(con, db_path)
             populated_sums = ", ".join(
                 f"SUM(CASE WHEN {column} IS NOT NULL AND TRIM(CAST({column} AS TEXT)) != '' THEN 1 ELSE 0 END)"
                 for column in SEARCHABLE_COLUMNS
@@ -185,7 +219,8 @@ def read_status(db_path: Path = DEFAULT_DB_PATH) -> DatabaseStatus:
         yahoo_exchange_counts: dict[str, int] = {}
         yahoo_oldest_fetch: str | None = None
         yahoo_newest_fetch: str | None = None
-        yahoo_cached_yq_symbols = 0
+        yahoo_cached_ns = 0
+        yahoo_cached_bo = 0
         if table_exists(con, YAHOO_RESPONSES_TABLE):
             yahoo_rows, yahoo_oldest_fetch, yahoo_newest_fetch = con.execute(
                 f"SELECT COUNT(*), MIN(fetched_at), MAX(fetched_at) FROM {YAHOO_RESPONSES_TABLE}"
@@ -196,16 +231,18 @@ def read_status(db_path: Path = DEFAULT_DB_PATH) -> DatabaseStatus:
                 ).fetchall()
             )
             if table_exists(con, CONSOLIDATED_TABLE):
-                # An uncorrelated IN reads yahoo_responses once, so databases created before the
-                # symbol index stay fast without this read-only query having to create it.
-                yahoo_cached_yq_symbols = con.execute(
-                    f"""
-                    SELECT COUNT(*)
-                    FROM {CONSOLIDATED_TABLE} c
-                    WHERE c.yq_symbol IS NOT NULL AND TRIM(c.yq_symbol) != ''
-                      AND c.yq_symbol IN (SELECT symbol FROM {YAHOO_RESPONSES_TABLE})
-                    """
-                ).fetchone()[0]
+                # yq_ns and yq_bo hold full tickers, so they match yahoo_symbol, the primary key.
+                yahoo_cached_ns, yahoo_cached_bo = (
+                    count or 0
+                    for count in con.execute(
+                        f"""
+                        SELECT
+                            SUM(c.yq_ns IN (SELECT yahoo_symbol FROM {YAHOO_RESPONSES_TABLE})),
+                            SUM(c.yq_bo IN (SELECT yahoo_symbol FROM {YAHOO_RESPONSES_TABLE}))
+                        FROM {CONSOLIDATED_TABLE} c
+                        """
+                    ).fetchone()
+                )
 
     return DatabaseStatus(
         db_path=db_path,
@@ -217,7 +254,8 @@ def read_status(db_path: Path = DEFAULT_DB_PATH) -> DatabaseStatus:
         yahoo_exchange_counts=yahoo_exchange_counts,
         yahoo_oldest_fetch=yahoo_oldest_fetch,
         yahoo_newest_fetch=yahoo_newest_fetch,
-        yahoo_cached_yq_symbols=yahoo_cached_yq_symbols,
+        yahoo_cached_ns=yahoo_cached_ns,
+        yahoo_cached_bo=yahoo_cached_bo,
     )
 
 
@@ -249,14 +287,14 @@ def search_instruments(
         where = f"({equality} OR {fuzzy})"
         params["fuzzy"] = f"%{_escape_like(cleaned.upper())}%"
 
+    selected = ", ".join(CONSOLIDATED_COLUMNS)
     with connect(db_path) as con:
-        if not table_exists(con, CONSOLIDATED_TABLE):
-            raise RuntimeError(f"Database table '{CONSOLIDATED_TABLE}' does not exist in {db_path}")
+        require_consolidated_table(con, db_path)
 
         total = con.execute(f"SELECT COUNT(*) FROM {CONSOLIDATED_TABLE} WHERE {where}", params).fetchone()[0]
         rows = con.execute(
             f"""
-            SELECT isin, ins_type, zd_symbol, yq_symbol, nse_symbol, bse_sc_code, bse_sc_name
+            SELECT {selected}
             FROM {CONSOLIDATED_TABLE}
             WHERE {where}
             ORDER BY CASE WHEN {equality} THEN 0 ELSE 1 END, isin
@@ -270,13 +308,14 @@ def search_instruments(
             fuzzy_rows = []
             for row in con.execute(
                 f"""
-                SELECT isin, ins_type, zd_symbol, yq_symbol, nse_symbol, bse_sc_code, bse_sc_name
+                SELECT {selected}
                 FROM {CONSOLIDATED_TABLE}
                 """
             ).fetchall():
+                record = dict(zip(CONSOLIDATED_COLUMNS, row, strict=True))
                 name_candidates = []
-                if row[6] is not None:
-                    name = str(row[6]).upper()
+                if record["bse_sc_name"] is not None:
+                    name = str(record["bse_sc_name"]).upper()
                     name_candidates = [name, *(word for word in name.split() if len(word) >= 3)]
                 name_score = max(
                     (
@@ -288,7 +327,7 @@ def search_instruments(
                 symbol_score = max(
                     (
                         SequenceMatcher(None, cleaned.upper(), str(candidate).upper()).ratio()
-                        for candidate in (row[2], row[4], row[3])
+                        for candidate in (record[column] for column in ("nse_symbol", "bse_symbol", "zd_ns", "zd_bo"))
                         if candidate is not None
                     ),
                     default=0.0,

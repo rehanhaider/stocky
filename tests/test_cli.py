@@ -208,6 +208,8 @@ def test_status_prints_seeded_database(tmp_path, seed_consolidated, runner) -> N
     assert "4" in result.stdout
     assert "50.0%" in result.stdout
     assert "None" in result.stdout
+    assert "Yahoo NSE tickers cached" in result.stdout
+    assert "Yahoo BSE tickers cached" in result.stdout
 
 
 def test_status_json_prints_database_status(tmp_path, seed_consolidated, runner) -> None:
@@ -310,7 +312,8 @@ def test_lookup_json_prints_single_match(tmp_path, seed_consolidated, runner) ->
     payload = json.loads(result.stdout)
     assert result.exit_code == 0
     assert payload["isin"] == "INE002A01018"
-    assert payload["zd_symbol"] == "RELIANCE"
+    assert payload["zd_bo"] == "RELIANCE"
+    assert payload["yq_ns"] == "RELIANCE.NS"
     assert payload["bse_sc_code"] == "500325"
 
 
@@ -340,8 +343,8 @@ def test_lookup_prints_multiple_match_hint(tmp_path, seed_consolidated, runner) 
     seed_consolidated(
         db_path,
         [
-            ("INE001", "equity", "SHARED", None, "ONE", None, "FIRST LTD"),
-            ("INE002", "equity", "TWO", None, "SHARED", None, "SECOND LTD"),
+            ("INE001", "equity", "ONE", None, None, "FIRST LTD", "SHARED", None, None, None),
+            ("INE002", "equity", "SHARED", None, None, "SECOND LTD", "TWO", None, None, None),
         ],
     )
 
@@ -356,7 +359,18 @@ def test_lookup_prints_multiple_match_hint(tmp_path, seed_consolidated, runner) 
 def test_lookup_limit_controls_ambiguous_candidates(tmp_path, seed_consolidated, runner) -> None:
     db_path = tmp_path / "stocky.db"
     rows = [
-        (f"INE{index:06d}01016", "equity", f"FUND{index}", None, None, str(500000 + index), "MIRAE ASSET MUTUAL FUND")
+        (
+            f"INE{index:06d}01016",
+            "equity",
+            None,
+            None,
+            str(500000 + index),
+            "MIRAE ASSET MUTUAL FUND",
+            f"FUND{index}",
+            None,
+            None,
+            None,
+        )
         for index in range(21)
     ]
     seed_consolidated(db_path, rows)
@@ -476,8 +490,6 @@ def test_yahoo_update_passes_options_and_prints_progress(tmp_path, monkeypatch, 
             "update",
             "--exchange",
             "NSE",
-            "--key",
-            "nse_symbol",
             "--db-path",
             str(db_path),
             "--limit",
@@ -489,7 +501,6 @@ def test_yahoo_update_passes_options_and_prints_progress(tmp_path, monkeypatch, 
     assert result.exit_code == 0
     assert calls[0] == ("init", db_path)
     assert calls[1][1] | {"progress": None} == {
-        "key": "nse_symbol",
         "exchange": "NSE",
         "dry_run": False,
         "limit": 60,
@@ -500,6 +511,13 @@ def test_yahoo_update_passes_options_and_prints_progress(tmp_path, monkeypatch, 
     assert "50/60 processed; 48 written; 2 skipped" in result.stderr
     assert "50/60 processed" not in result.stdout
     assert "Processed 60; wrote 58; skipped 2; dry_run=False." in result.stdout
+
+
+def test_yahoo_update_no_longer_accepts_key(tmp_path, runner) -> None:
+    result = runner.invoke(app, ["yahoo", "update", "--key", "zd_symbol", "--db-path", str(tmp_path / "stocky.db")])
+
+    assert result.exit_code == 2
+    assert "No such option" in result.output
 
 
 def test_yahoo_update_throttles_plain_progress_lines(tmp_path, monkeypatch, runner) -> None:
@@ -638,16 +656,16 @@ def test_interactive_reports_yahoo_update_errors_and_keeps_going(
     tmp_path, monkeypatch, seed_consolidated, runner
 ) -> None:
     db_path = tmp_path / "stocky.db"
-    seed_consolidated(db_path, [("INE001", "equity", "", None, None, None, None)])
+    seed_consolidated(db_path, [("INE001", "equity", None, None, None, None, None, None, "", "")])
     monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
 
-    result = runner.invoke(app, ["interactive"], input="2\nBSE\nzd_symbol\n\nn\n6\n")
+    result = runner.invoke(app, ["interactive"], input="2\nBSE\n\nn\n6\n")
 
     message = " ".join(result.stdout.split())
 
     assert result.exit_code == 0
-    assert "No symbols found for --key zd_symbol" in message
-    assert "run 'stocky rebuild' first." in message
+    assert "No BSE tickers found in yq_bo" in message
+    assert "Run 'stocky rebuild' first." in message
     assert result.stdout.count("Choose an option") == 2
 
 
@@ -823,12 +841,12 @@ def test_interactive_yahoo_update_prompts_and_reports_progress(
     monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
     _use_fake_yahooquery(monkeypatch)
 
-    result = runner.invoke(app, ["interactive"], input="2\nnse\nzd_symbol\n2\nn\ny\n6\n")
+    result = runner.invoke(app, ["interactive"], input="2\nnse\n2\nn\ny\n6\n")
 
     message = " ".join(result.stdout.split())
 
     assert result.exit_code == 0
-    assert "2 symbols to fetch from Yahoo Finance (NSE, key zd_symbol)." in message
+    assert "2 tickers to fetch from Yahoo Finance (NSE, yq_ns)." in message
     assert "Processed 2; wrote 2; skipped 0." in message
     assert "2/2 processed; 2 written; 0 skipped" in result.stderr
     assert result.stdout.count("Choose an option") == 2
@@ -849,27 +867,13 @@ def test_interactive_yahoo_update_rejects_unknown_exchange(tmp_path, monkeypatch
     assert result.stdout.count("Choose an option") == 2
 
 
-def test_interactive_yahoo_update_rejects_unknown_key(tmp_path, monkeypatch, seed_consolidated, runner) -> None:
-    db_path = tmp_path / "stocky.db"
-    seed_consolidated(db_path)
-    monkeypatch.setenv("COLUMNS", "200")
-    monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
-
-    result = runner.invoke(app, ["interactive"], input="2\nBSE\nisin\n6\n")
-
-    message = " ".join(result.stdout.split())
-
-    assert result.exit_code == 0
-    assert "Enter one of zd_symbol, yq_symbol, nse_symbol, bse_sc_code." in message
-
-
 def test_interactive_yahoo_update_rejects_non_numeric_limit(tmp_path, monkeypatch, seed_consolidated, runner) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path)
     monkeypatch.setenv("COLUMNS", "200")
     monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
 
-    result = runner.invoke(app, ["interactive"], input="2\nBSE\nzd_symbol\nmany\n6\n")
+    result = runner.invoke(app, ["interactive"], input="2\nBSE\nmany\n6\n")
 
     message = " ".join(result.stdout.split())
 
@@ -884,13 +888,13 @@ def test_interactive_yahoo_update_stops_when_nothing_to_fetch(tmp_path, monkeypa
     monkeypatch.setenv("COLUMNS", "200")
     monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
 
-    result = runner.invoke(app, ["interactive"], input="2\nBSE\nzd_symbol\n\ny\n6\n")
+    result = runner.invoke(app, ["interactive"], input="2\nBSE\n\ny\n6\n")
 
     message = " ".join(result.stdout.split())
 
     assert result.exit_code == 0
-    assert "0 symbols to fetch from Yahoo Finance (BSE, key zd_symbol)." in message
-    assert "Nothing to fetch; every symbol already has a cached response." in message
+    assert "0 tickers to fetch from Yahoo Finance (BSE, yq_bo)." in message
+    assert "Nothing to fetch; every ticker already has a cached response." in message
     assert "Start the update?" not in message
     assert result.stdout.count("Choose an option") == 2
 
@@ -901,13 +905,13 @@ def test_interactive_yahoo_update_rejects_zero_limit(tmp_path, monkeypatch, seed
     monkeypatch.setenv("COLUMNS", "200")
     monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
 
-    result = runner.invoke(app, ["interactive"], input="2\nBSE\nzd_symbol\n0\n6\n")
+    result = runner.invoke(app, ["interactive"], input="2\nBSE\n0\n6\n")
 
     message = " ".join(result.stdout.split())
 
     assert result.exit_code == 0
     assert "Enter a positive number, or leave blank for all." in message
-    assert "symbols to fetch from Yahoo Finance" not in message
+    assert "tickers to fetch from Yahoo Finance" not in message
     assert result.stdout.count("Choose an option") == 2
 
 

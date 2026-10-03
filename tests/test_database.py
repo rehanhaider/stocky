@@ -76,15 +76,28 @@ def test_import_yahoo_json_cache_skips_bad_file(tmp_path) -> None:
     assert result.skipped == 1
 
 
-def test_consolidated_table_name_is_the_db_contract(tmp_path) -> None:
+def test_consolidated_table_name_is_the_db_contract(tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
     with sqlite3.connect(db_path) as con:
-        con.execute(f"CREATE TABLE {CONSOLIDATED_TABLE} (isin TEXT, zd_symbol TEXT, yq_symbol TEXT)")
-        con.execute(f"INSERT INTO {CONSOLIDATED_TABLE} VALUES ('INE1', 'RELIANCE', 'RELIANCE')")
+        assert con.execute(f"SELECT COUNT(*) FROM {CONSOLIDATED_TABLE}").fetchone()[0] == 4
+    assert fetch_consolidated_symbols(db_path, key="yq_ns") == ["RELIANCE.NS", "INFY.NS"]
 
-    from stocky.database import fetch_consolidated_symbols
 
-    assert fetch_consolidated_symbols(db_path) == ["RELIANCE"]
+def test_older_consolidated_layout_asks_for_a_rebuild(tmp_path) -> None:
+    db_path = tmp_path / "old.db"
+    with sqlite3.connect(db_path) as con:
+        con.execute(f"CREATE TABLE {CONSOLIDATED_TABLE} (isin TEXT, ins_type TEXT, zd_symbol TEXT, yq_symbol TEXT)")
+        con.execute(f"INSERT INTO {CONSOLIDATED_TABLE} VALUES ('INE1', 'equity', 'RELIANCE', 'RELIANCE')")
+
+    for read in (
+        lambda: read_status(db_path),
+        lambda: search_instruments("RELIANCE", db_path),
+        lambda: fetch_consolidated_symbols(db_path, key="yq_bo"),
+    ):
+        with pytest.raises(RuntimeError, match="older layout without .*Run 'stocky rebuild'"):
+            read()
 
 
 def test_read_status_reports_counts_and_coverage(tmp_path, seed_consolidated) -> None:
@@ -104,60 +117,58 @@ def test_read_status_reports_counts_and_coverage(tmp_path, seed_consolidated) ->
     assert status.ins_type_counts == {"equity": 4}
     assert {entry.column: entry.populated for entry in status.coverage} == {
         "isin": 4,
-        "zd_symbol": 4,
-        "yq_symbol": 2,
         "nse_symbol": 2,
+        "bse_symbol": 3,
         "bse_sc_code": 3,
         "bse_sc_name": 4,
+        "zd_ns": 3,
+        "zd_bo": 3,
+        "yq_ns": 2,
+        "yq_bo": 2,
     }
     assert status.yahoo_rows == 2
     assert status.yahoo_exchange_counts == {"NSE": 1, "BSE": 1}
     assert status.yahoo_oldest_fetch is not None
     assert status.yahoo_newest_fetch is not None
-    assert status.yahoo_cached_yq_symbols == 1
+    assert status.yahoo_cached_ns == 1
+    assert status.yahoo_cached_bo == 1
     assert status.db_size_bytes > 0
 
 
-def _index_names(db_path) -> set[str]:
-    with sqlite3.connect(db_path) as con:
-        return {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
-
-
-def test_read_status_counts_cached_symbols_through_symbol_index(tmp_path, seed_consolidated) -> None:
+def test_read_status_counts_cached_tickers_per_exchange_by_full_ticker(tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
-    seed_consolidated(db_path)
+    seed_consolidated(
+        db_path,
+        [
+            (
+                "INE002A01018",
+                "equity",
+                "RELIANCE",
+                "RELIANCE",
+                "500325",
+                "R",
+                "RELIANCE",
+                "RELIANCE",
+                "RELIANCE.NS",
+                "RELIANCE.BO",
+            ),
+            ("INE581X01021", "equity", "GLOBE", None, None, None, "GLOBE", None, "GLOBE.NS", None),
+        ],
+    )
     _seed_yahoo(
         db_path,
         [
-            ("RELIANCE.NS", "RELIANCE", "NSE"),
             ("RELIANCE.BO", "RELIANCE", "BSE"),
-            ("UNLISTED.NS", "UNLISTED", "NSE"),
+            ("GLOBE.NS", "GLOBE", "NSE"),
+            # A different company's BSE ticker that shares Globe's bare symbol must not count.
+            ("GLOBE.BO", "GLOBE", "BSE"),
         ],
     )
 
-    assert "idx_yahoo_responses_symbol" in _index_names(db_path)
-    with sqlite3.connect(db_path) as con:
-        plan = " ".join(
-            str(row[3])
-            for row in con.execute(
-                "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM consolidated c "
-                "WHERE c.yq_symbol IN (SELECT symbol FROM yahoo_responses)"
-            )
-        )
-    assert "idx_yahoo_responses_symbol" in plan
+    status = read_status(db_path)
 
-    assert read_status(db_path).yahoo_cached_yq_symbols == 1
-
-
-def test_read_status_counts_cached_symbols_without_symbol_index(tmp_path, seed_consolidated) -> None:
-    db_path = tmp_path / "legacy.db"
-    seed_consolidated(db_path)
-    _seed_yahoo(db_path, [("RELIANCE.NS", "RELIANCE", "NSE"), ("RELIANCE.BO", "RELIANCE", "BSE")])
-    with sqlite3.connect(db_path) as con:
-        con.execute("DROP INDEX idx_yahoo_responses_symbol")
-
-    assert read_status(db_path).yahoo_cached_yq_symbols == 1
-    assert "idx_yahoo_responses_symbol" not in _index_names(db_path)
+    assert status.yahoo_cached_ns == 1
+    assert status.yahoo_cached_bo == 1
 
 
 def test_read_status_missing_db_raises_without_creating_file(tmp_path) -> None:
@@ -179,7 +190,8 @@ def test_read_status_without_consolidated_table(tmp_path) -> None:
     assert status.ins_type_counts == {}
     assert status.coverage == []
     assert status.yahoo_rows == 1
-    assert status.yahoo_cached_yq_symbols == 0
+    assert status.yahoo_cached_ns == 0
+    assert status.yahoo_cached_bo == 0
 
 
 def test_read_status_without_yahoo_table(tmp_path, seed_consolidated) -> None:
@@ -210,10 +222,18 @@ def test_search_matches_name_fragment_and_bse_code(tmp_path, seed_consolidated) 
     seed_consolidated(db_path)
 
     by_name = search_instruments("micron", db_path)
-    assert [match.zd_symbol for match in by_name.matches] == ["20MICRONS"]
+    assert [match.bse_symbol for match in by_name.matches] == ["20MICRONS"]
 
     by_code = search_instruments("500209", db_path)
-    assert [match.zd_symbol for match in by_code.matches] == ["INFY"]
+    assert [match.nse_symbol for match in by_code.matches] == ["INFY"]
+
+
+def test_search_matches_full_yahoo_and_zerodha_tickers(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    assert [match.isin for match in search_instruments("INFY.BO", db_path, exact=True).matches] == ["INE009A01021"]
+    assert [match.isin for match in search_instruments("INFYBEES", db_path, exact=True).matches] == ["INE999Z01019"]
 
 
 def test_search_ranks_exact_matches_first(tmp_path, seed_consolidated) -> None:
@@ -223,8 +243,8 @@ def test_search_ranks_exact_matches_first(tmp_path, seed_consolidated) -> None:
     result = search_instruments("INFY", db_path)
 
     assert result.total == 2
-    assert result.matches[0].zd_symbol == "INFY"
-    assert result.matches[1].zd_symbol == "INFYBEES"
+    assert result.matches[0].nse_symbol == "INFY"
+    assert result.matches[1].zd_ns == "INFYBEES"
 
 
 def test_search_exact_flag_disables_substring_matching(tmp_path, seed_consolidated) -> None:
@@ -242,7 +262,7 @@ def test_search_falls_back_to_fuzzy_name_matching(tmp_path, seed_consolidated) -
     result = search_instruments("RELIANC INDUSTRES", db_path)
 
     assert result.total == 1
-    assert result.matches[0].zd_symbol == "RELIANCE"
+    assert result.matches[0].isin == "INE002A01018"
     assert result.fuzzy is True
 
 
@@ -251,8 +271,8 @@ def test_search_fuzzy_name_word_outranks_short_symbol_collision(tmp_path, seed_c
     seed_consolidated(
         db_path,
         [
-            ("INE009A01021", "equity", "INFY", "INFY.NS", "INFY", "500209", "INFOSYS LTD"),
-            ("INE001", "equity", "NOVIS", "NOVIS", "NOVIS", None, "NOVIS PHARMA"),
+            ("INE009A01021", "equity", "INFY", "INFY", "500209", "INFOSYS LTD", "INFY", "INFY", "INFY.NS", "INFY.BO"),
+            ("INE001", "equity", "NOVIS", None, None, "NOVIS PHARMA", "NOVIS", None, "NOVIS.NS", None),
         ],
     )
 
@@ -287,9 +307,9 @@ def test_search_fuzzy_orders_by_ratio_then_isin_and_applies_limit(tmp_path, seed
     seed_consolidated(
         db_path,
         [
-            ("INE003", "equity", "THREE", None, None, None, "ALPHA INDUSTRIAL"),
-            ("INE002", "equity", "TWO", None, None, None, "ALPHA INDUSTRIES"),
-            ("INE001", "equity", "ONE", None, None, None, "ALPHA INDUSTRIES"),
+            ("INE003", "equity", None, None, None, "ALPHA INDUSTRIAL", "THREE", None, None, None),
+            ("INE002", "equity", None, None, None, "ALPHA INDUSTRIES", "TWO", None, None, None),
+            ("INE001", "equity", None, None, None, "ALPHA INDUSTRIES", "ONE", None, None, None),
         ],
     )
 
@@ -348,13 +368,13 @@ def test_fetch_consolidated_symbols_limit_and_failures(tmp_path, seed_consolidat
     with pytest.raises(ValueError, match="Unsupported symbol key"):
         fetch_consolidated_symbols(db_path, key="bad_key")
     with pytest.raises(FileNotFoundError, match="Database not found") as missing_db:
-        fetch_consolidated_symbols(tmp_path / "missing.db")
+        fetch_consolidated_symbols(tmp_path / "missing.db", key="yq_ns")
     assert "Run 'stocky rebuild' first." in str(missing_db.value)
 
     yahoo_only = tmp_path / "yahoo-only.db"
     initialize_database(yahoo_only)
     with pytest.raises(RuntimeError, match="does not exist"):
-        fetch_consolidated_symbols(yahoo_only)
+        fetch_consolidated_symbols(yahoo_only, key="yq_ns")
 
 
 def test_split_yahoo_symbol_without_suffix_uses_unknown_exchange() -> None:
@@ -384,12 +404,34 @@ def test_search_instruments_fuzzy_ranks_strongest_score_first(tmp_path, seed_con
     seed_consolidated(
         db_path,
         [
-            ("INE467B01029", "equity", "TCS", "TCS.NS", "TCS", "532540", "TATA CONSULTANCY SERVICES LTD."),
-            ("INE0QVA01016", "equity", "TRACXN", "TRACXN.NS", "TRACXN", "543638", "TRACXN TECHNOLOGIES LTD"),
+            (
+                "INE467B01029",
+                "equity",
+                "TCS",
+                "TCS",
+                "532540",
+                "TATA CONSULTANCY SERVICES LTD.",
+                "TCS",
+                "TCS",
+                "TCS.NS",
+                "TCS.BO",
+            ),
+            (
+                "INE0QVA01016",
+                "equity",
+                "TRACXN",
+                "TRACXN",
+                "543638",
+                "TRACXN TECHNOLOGIES LTD",
+                "TRACXN",
+                "TRACXN",
+                "TRACXN.NS",
+                "TRACXN.BO",
+            ),
         ],
     )
 
     result = search_instruments("TCSX", db_path, limit=1)
 
     assert result.fuzzy is True
-    assert [match.zd_symbol for match in result.matches] == ["TCS"]
+    assert [match.nse_symbol for match in result.matches] == ["TCS"]

@@ -232,13 +232,12 @@ def test_yahoo_update_drives_the_progress_bar(tmp_path, monkeypatch) -> None:
 
     async def scenario(stocky_app, pilot) -> None:
         stocky_app.query_one("#exchange", Select).value = "NSE"
-        stocky_app.query_one("#key", Select).value = "nse_symbol"
         stocky_app.query_one("#limit", Input).value = "3"
         stocky_app.query_one("#missing-only", Checkbox).value = True
         await pilot.pause()
 
         await _press(stocky_app, pilot, "#yahoo-plan")
-        assert _static_text(stocky_app, "#yahoo-stage") == "3 symbols to fetch (NSE, key nse_symbol)."
+        assert _static_text(stocky_app, "#yahoo-stage") == "3 tickers to fetch (NSE, yq_ns)."
 
         await _press(stocky_app, pilot, "#yahoo-run")
         bar = stocky_app.query_one("#yahoo-progress", ProgressBar)
@@ -250,7 +249,7 @@ def test_yahoo_update_drives_the_progress_bar(tmp_path, monkeypatch) -> None:
 
     _run(stocky_app, scenario)
 
-    request = {"exchange": "NSE", "key": "nse_symbol", "limit": 3, "missing_only": True}
+    request = {"exchange": "NSE", "limit": 3, "missing_only": True}
     assert calls == [request | {"dry_run": True}, request]
 
 
@@ -331,8 +330,10 @@ def test_status_tab_shows_tables_or_the_missing_database(tmp_path, seed_consolid
 
     async def present(stocky_app, pilot) -> None:
         assert ["Consolidated rows", "4"] in _rows(stocky_app.query_one("#status-overview", DataTable))
-        assert ["Yahoo symbol", "2", "2", "50.0%"] in _rows(stocky_app.query_one("#status-coverage", DataTable))
-        assert ["Consolidated symbols cached", "0/2 (0.0%)"] in _rows(stocky_app.query_one("#status-yahoo", DataTable))
+        assert ["Yahoo BSE", "2", "2", "50.0%"] in _rows(stocky_app.query_one("#status-coverage", DataTable))
+        yahoo_rows = _rows(stocky_app.query_one("#status-yahoo", DataTable))
+        assert ["Yahoo NSE tickers cached", "0/2 (0.0%)"] in yahoo_rows
+        assert ["Yahoo BSE tickers cached", "0/2 (0.0%)"] in yahoo_rows
 
     _run(StockyApp(db_path=db_path, input_dir=tmp_path), present)
 
@@ -406,13 +407,16 @@ def test_search_lists_matches_and_shows_equivalents(tmp_path, seed_consolidated)
         await pilot.pause()
 
         results = stocky_app.query_one("#search-results", DataTable)
-        assert [row[2] for row in _rows(results)] == ["INFY", "INFYBEES"]
+        assert [row[0] for row in _rows(results)] == ["INE009A01021", "INE999Z01019"]
         assert "2 matches" in _static_text(stocky_app, "#search-message")
 
         results.move_cursor(row=1)
         results.action_select_cursor()
         await pilot.pause()
-        assert ["ISIN", "INE999Z01019"] in _rows(stocky_app.query_one("#equivalents", DataTable))
+        equivalents = _rows(stocky_app.query_one("#equivalents", DataTable))
+        assert ["ISIN", "INE999Z01019"] in equivalents
+        assert ["Zerodha NSE", "INFYBEES"] in equivalents
+        assert ["Yahoo NSE", "-"] in equivalents
 
         stocky_app.query_one("#search-exact", Checkbox).value = True
         search.value = "500325"
