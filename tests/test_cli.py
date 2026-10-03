@@ -21,7 +21,12 @@ class _FakeTicker:
 
     @property
     def all_modules(self):
-        return {self.symbol: {"price": 100}}
+        return {
+            self.symbol: {
+                "quoteType": {"quoteType": "EQUITY", "longName": self.symbol},
+                "price": {"regularMarketPrice": 100},
+            }
+        }
 
 
 def _use_fake_yahooquery(monkeypatch) -> None:
@@ -616,7 +621,9 @@ def test_yahoo_update_json_reports_missing_database_as_an_event(tmp_path, runner
 def test_yahoo_import_cache_skips_bad_file(tmp_path, runner) -> None:
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
-    (cache_dir / "GOOD.NS.json").write_text('{"price": 1}', encoding="utf-8")
+    (cache_dir / "GOOD.NS.json").write_text(
+        '{"GOOD.NS": {"quoteType": {"quoteType": "EQUITY", "longName": "Good Ltd"}}}', encoding="utf-8"
+    )
     (cache_dir / "BAD.NS.json").write_text("not json", encoding="utf-8")
 
     result = runner.invoke(
@@ -638,7 +645,9 @@ def test_yahoo_import_cache_skips_bad_file(tmp_path, runner) -> None:
 def test_yahoo_import_cache_json_prints_result(tmp_path, runner) -> None:
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
-    (cache_dir / "GOOD.NS.json").write_text('{"price": 1}', encoding="utf-8")
+    (cache_dir / "GOOD.NS.json").write_text(
+        '{"GOOD.NS": {"quoteType": {"quoteType": "EQUITY", "longName": "Good Ltd"}}}', encoding="utf-8"
+    )
     (cache_dir / "BAD.NS.json").write_text("not json", encoding="utf-8")
 
     result = runner.invoke(

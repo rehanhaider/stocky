@@ -8,9 +8,11 @@ from typing import Literal
 from stocky.config import DEFAULT_DB_PATH
 from stocky.database import (
     connect,
+    delete_yahoo_response,
     encode_response_json,
     fetch_consolidated_symbols,
     initialize_database,
+    is_usable_yahoo_payload,
     read_available_yahoo_symbols,
     split_yahoo_symbol,
     upsert_yahoo_response,
@@ -41,13 +43,17 @@ def classify_payload(yahoo_symbol: str, data: object, payload: object) -> tuple[
 
     Yahoo answers an unlisted ticker with ``Quote not found for symbol: X`` and
     has also used ``Quote not found for ticker symbol: X``, so the prefix is
-    matched rather than one exact sentence.
+    matched rather than one exact sentence. A payload that does not name a listed
+    security, such as an empty answer or an index under the same ticker, is not
+    found too: it holds no data for the share.
     """
     if isinstance(payload, str) and payload.startswith(NOT_FOUND_PREFIX):
         return "not_found", ""
     if isinstance(payload, dict):
         if "error" in payload:
             return "failure", str(payload["error"])
+        if not is_usable_yahoo_payload(payload):
+            return "not_found", ""
         return "success", ""
     if payload is None:
         if isinstance(data, dict) and "error" in data:
@@ -140,6 +146,8 @@ class YahooDataManager:
                 elif outcome == "not_found":
                     consecutive_failures = 0
                     skipped += 1
+                    # Drop an older answer, so status and --missing-only stop treating it as data.
+                    delete_yahoo_response(con, yahoo_symbol)
                 else:
                     consecutive_failures = 0
                     upsert_yahoo_response(

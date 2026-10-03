@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 import pytest
@@ -36,8 +37,11 @@ def _seed_yahoo(db_path, yahoo_symbols: list[tuple[str, str, str]]) -> None:
 def test_import_yahoo_json_cache_to_sqlite(tmp_path) -> None:
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
-    (cache_dir / "RELIANCE.NS.json").write_text('{"RELIANCE.NS": {"price": 1}}', encoding="utf-8")
-    (cache_dir / "INFY.BO.json").write_text('{"INFY.BO": {"price": 2}}', encoding="utf-8")
+    reliance = {"RELIANCE.NS": {"quoteType": {"quoteType": "EQUITY", "longName": "Reliance Industries Limited"}}}
+    (cache_dir / "RELIANCE.NS.json").write_text(json.dumps(reliance), encoding="utf-8")
+    (cache_dir / "INFY.BO.json").write_text(
+        json.dumps({"INFY.BO": {"quoteType": {"quoteType": "EQUITY", "shortName": "INFOSYS"}}}), encoding="utf-8"
+    )
     db_path = tmp_path / "stocky.db"
 
     result = import_yahoo_json_cache(cache_dir, db_path)
@@ -50,7 +54,7 @@ def test_import_yahoo_json_cache_to_sqlite(tmp_path) -> None:
         stored_payload = con.execute(
             "SELECT response_json FROM yahoo_responses WHERE yahoo_symbol = 'RELIANCE.NS'"
         ).fetchone()[0]
-    assert decode_response_json(stored_payload) == {"RELIANCE.NS": {"price": 1}}
+    assert decode_response_json(stored_payload) == reliance
 
 
 def test_read_available_yahoo_symbols_does_not_create_missing_table(tmp_path, seed_consolidated) -> None:
@@ -67,13 +71,25 @@ def test_read_available_yahoo_symbols_does_not_create_missing_table(tmp_path, se
 def test_import_yahoo_json_cache_skips_bad_file(tmp_path) -> None:
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
-    (cache_dir / "GOOD.NS.json").write_text('{"price": 1}', encoding="utf-8")
+    (cache_dir / "GOOD.NS.json").write_text(
+        '{"GOOD.NS": {"quoteType": {"quoteType": "EQUITY", "longName": "Good Ltd"}}}', encoding="utf-8"
+    )
     (cache_dir / "BAD.NS.json").write_text("not json", encoding="utf-8")
+    (cache_dir / "VOLTAS.NS.json").write_text(
+        '{"VOLTAS.NS": "For input string: \\"42525.0000000001\\""}', encoding="utf-8"
+    )
+    (cache_dir / "PAVNAIND.NS.json").write_text(
+        '{"PAVNAIND.NS": {"quoteType": {"quoteType": "NONE"}}}', encoding="utf-8"
+    )
+    (cache_dir / "ENERGY.BO.json").write_text(
+        '{"ENERGY.BO": {"quoteType": {"quoteType": "INDEX", "longName": "S&P BSE ENERGY"}}}', encoding="utf-8"
+    )
 
     result = import_yahoo_json_cache(cache_dir, tmp_path / "stocky.db")
 
     assert result.imported == 1
-    assert result.skipped == 1
+    assert result.skipped == 4
+    assert read_available_yahoo_symbols(tmp_path / "stocky.db") == {"GOOD.NS"}
 
 
 def test_consolidated_table_name_is_the_db_contract(tmp_path, seed_consolidated) -> None:

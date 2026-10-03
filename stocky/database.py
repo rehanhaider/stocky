@@ -15,6 +15,10 @@ from stocky.config import DEFAULT_BACKUP_DIR, DEFAULT_DB_PATH
 CONSOLIDATED_TABLE = "consolidated"
 YAHOO_RESPONSES_TABLE = "yahoo_responses"
 
+# Yahoo quote types that describe a listed security. Yahoo labels some thinly traded Indian
+# shares MUTUALFUND and liquid ETFs BOND; an INDEX answer carries index levels, not the share's.
+LISTED_QUOTE_TYPES = frozenset({"EQUITY", "ETF", "MUTUALFUND", "BOND"})
+
 # Every symbol column belongs to one exchange and stays empty when that exchange does not list the ISIN.
 SYMBOL_COLUMNS = ("nse_symbol", "bse_symbol", "bse_sc_code", "zd_ns", "zd_bo", "yq_ns", "yq_bo")
 CONSOLIDATED_COLUMNS = (
@@ -346,6 +350,23 @@ def search_instruments(
     return SearchResult(matches=matches, total=total, fuzzy=fuzzy_matches)
 
 
+def is_usable_yahoo_payload(payload: object) -> bool:
+    """Whether one ticker's Yahoo payload names a listed security, as opposed to an error, an empty
+    answer, or an index that Yahoo files under the same ticker."""
+    if not isinstance(payload, dict):
+        return False
+    quote_type = payload.get("quoteType")
+    if not isinstance(quote_type, dict):
+        return False
+    return quote_type.get("quoteType") in LISTED_QUOTE_TYPES and bool(
+        quote_type.get("longName") or quote_type.get("shortName")
+    )
+
+
+def delete_yahoo_response(con: sqlite3.Connection, yahoo_symbol: str) -> None:
+    con.execute(f"DELETE FROM {YAHOO_RESPONSES_TABLE} WHERE yahoo_symbol = ?", (yahoo_symbol,))
+
+
 def upsert_yahoo_response(
     con: sqlite3.Connection,
     *,
@@ -409,6 +430,11 @@ def import_yahoo_json_cache(
             try:
                 response = json.loads(file_path.read_text(encoding="utf-8-sig"))
             except (OSError, json.JSONDecodeError):
+                skipped += 1
+                continue
+
+            payload = response.get(yahoo_symbol) if isinstance(response, dict) else None
+            if not is_usable_yahoo_payload(payload):
                 skipped += 1
                 continue
 

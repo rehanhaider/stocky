@@ -125,7 +125,10 @@ uv run stocky yahoo import-cache
 ```
 
 Update Yahoo responses in SQLite. `--exchange NSE` fetches the `yq_ns` tickers and `--exchange BSE` fetches the `yq_bo`
-tickers, so a run only asks Yahoo for tickers that exchange lists:
+tickers, so a run only asks Yahoo for tickers that exchange lists. Only answers that name a listed security are saved.
+An error, an empty answer, or an index that Yahoo files under the same ticker (such as `ENERGY.BO`, the S&P BSE Energy
+index) is skipped, and any older saved answer for that ticker is removed. `stocky yahoo import-cache` applies the same
+rule. A run without `--missing-only` refreshes every saved answer:
 
 ```bash
 uv run stocky yahoo update --exchange BSE

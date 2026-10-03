@@ -6,6 +6,7 @@ import pytest
 import stocky.yahoo as yahoo
 from stocky.database import (
     connect,
+    decode_response_json,
     encode_response_json,
     initialize_database,
     read_available_yahoo_symbols,
@@ -42,7 +43,12 @@ class _FakeTicker:
     def all_modules(self):
         if "BAD" in self.symbol:
             return {self.symbol: f"Quote not found for symbol: {self.symbol}"}
-        return {self.symbol: {"price": 100}}
+        return {
+            self.symbol: {
+                "quoteType": {"quoteType": "EQUITY", "longName": self.symbol},
+                "price": {"regularMarketPrice": 100},
+            }
+        }
 
 
 def test_dry_run_missing_only_excludes_cached_symbols(tmp_path, seed_consolidated) -> None:
@@ -128,6 +134,44 @@ def test_update_fetches_only_the_exchange_column_tickers(tmp_path, monkeypatch, 
         ("RELIANCE.BO", "RELIANCE", "BSE"),
         ("RELIANCE.NS", "RELIANCE", "NSE"),
     ]
+
+
+def test_update_drops_a_saved_answer_when_yahoo_now_has_no_usable_data(
+    tmp_path, monkeypatch, seed_consolidated
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(
+        db_path,
+        [
+            ("INF769K01PR2", "equity", None, "ENERGY", "1", "M", None, "ENERGY", None, "ENERGY.BO"),
+            ("INE106T01025", "equity", None, "HITECH", "2", "H", None, "HITECH", None, "HITECH.BO"),
+        ],
+    )
+    # Earlier saved answers: an index under the ETF's ticker, and an out-of-date company name.
+    _seed_cached_response(db_path, "ENERGY.BO")
+    _seed_cached_response(db_path, "HITECH.BO")
+
+    class CurrentYahoo:
+        def __init__(self, symbol: str) -> None:
+            self.symbol = symbol
+
+        @property
+        def all_modules(self):
+            if self.symbol == "ENERGY.BO":
+                return {self.symbol: {"quoteType": {"quoteType": "INDEX", "longName": "S&P BSE ENERGY"}}}
+            return {self.symbol: {"quoteType": {"quoteType": "EQUITY", "longName": "Hi-Tech Pipes Limited"}}}
+
+    fake_module = types.ModuleType("yahooquery")
+    fake_module.Ticker = CurrentYahoo
+    monkeypatch.setitem(sys.modules, "yahooquery", fake_module)
+
+    result = YahooDataManager(db_path).update_data(exchange="BSE")
+
+    assert (result.written, result.skipped) == (1, 1)
+    assert read_available_yahoo_symbols(db_path) == {"HITECH.BO"}
+    with connect(db_path) as con:
+        (blob,) = con.execute("SELECT response_json FROM yahoo_responses WHERE yahoo_symbol = 'HITECH.BO'").fetchone()
+    assert decode_response_json(blob)["HITECH.BO"]["quoteType"]["longName"] == "Hi-Tech Pipes Limited"
 
 
 def test_update_skips_fetch_exceptions(tmp_path, monkeypatch, seed_consolidated) -> None:
@@ -264,7 +308,12 @@ def test_update_persists_rows_written_before_aborting(tmp_path, monkeypatch, see
         def all_modules(self):
             if "BROKEN" in self.symbol:
                 raise RuntimeError("offline failure")
-            return {self.symbol: {"price": 100}}
+            return {
+                self.symbol: {
+                    "quoteType": {"quoteType": "EQUITY", "longName": self.symbol},
+                    "price": {"regularMarketPrice": 100},
+                }
+            }
 
     fake_module = types.ModuleType("yahooquery")
     fake_module.Ticker = PartlyRaisingTicker
@@ -295,7 +344,12 @@ def test_update_resets_failure_counter_after_a_success(tmp_path, monkeypatch, se
         def all_modules(self):
             if not self.succeeds:
                 raise RuntimeError("temporary failure")
-            return {self.symbol: {"price": 100}}
+            return {
+                self.symbol: {
+                    "quoteType": {"quoteType": "EQUITY", "longName": self.symbol},
+                    "price": {"regularMarketPrice": 100},
+                }
+            }
 
     fake_module = types.ModuleType("yahooquery")
     fake_module.Ticker = FlakyTicker
@@ -414,7 +468,14 @@ def test_update_treats_unexpected_payload_text_as_failure(tmp_path, monkeypatch,
 
 
 def test_classify_payload_maps_yahooquery_outcomes() -> None:
-    assert yahoo.classify_payload("RELIANCE.BO", {}, {"price": 1})[0] == "success"
+    listed = {"quoteType": {"quoteType": "EQUITY", "longName": "Reliance Industries Limited"}}
+    assert yahoo.classify_payload("RELIANCE.BO", {}, listed)[0] == "success"
+    # Yahoo answers with no named, listed security hold no data for the share.
+    assert yahoo.classify_payload("PAVNAIND.NS", {}, {"quoteType": {"quoteType": "NONE"}}) == ("not_found", "")
+    assert yahoo.classify_payload(
+        "ENERGY.BO", {}, {"quoteType": {"quoteType": "INDEX", "longName": "S&P BSE ENERGY"}}
+    ) == ("not_found", "")
+    assert yahoo.classify_payload("BHAGERIA.BO", {}, {"quoteType": {"quoteType": "MUTUALFUND"}}) == ("not_found", "")
     assert yahoo.classify_payload("RELIANCE.BO", {}, "Quote not found for symbol: RELIANCE.BO") == ("not_found", "")
     # Yahoo has also used this older wording, so both must classify the same way.
     assert yahoo.classify_payload("RELIANCE.BO", {}, "Quote not found for ticker symbol: RELIANCE.BO") == (
