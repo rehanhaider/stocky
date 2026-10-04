@@ -95,6 +95,68 @@ def test_rebuild_json_prints_result(tmp_path, market_csv_builder, runner) -> Non
     assert payload["dry_run"] is True
 
 
+def test_rebuild_dry_run_shows_row_changes_and_samples_against_the_current_database(
+    tmp_path, market_csv_builder, seed_consolidated, runner
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = runner.invoke(app, ["rebuild", *_rebuild_path_args(paths, db_path), "--dry-run"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0
+    assert "Row changes" in result.stdout
+    assert "The current database records no source provenance." in result.stdout
+    assert "Sample differences" in result.stdout
+    assert "BSE symbol: RELIANCE -> -" in result.stdout
+    assert "Rebuilt from" in result.stdout
+    assert "2021-05-03" in result.stdout
+
+
+def test_rebuild_json_carries_sources_and_a_sample_limited_diff(
+    tmp_path, market_csv_builder, seed_consolidated, runner
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = runner.invoke(
+        app, ["rebuild", *_rebuild_path_args(paths, db_path), "--dry-run", "--json", "--sample", "1"]
+    )
+
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 0
+    assert payload["diff"]["removed"] == 3
+    assert len(payload["diff"]["sample_removed"]) == 1
+    assert payload["diff"]["sample_changed"][0]["changes"]["yq_bo"] == ["RELIANCE.BO", None]
+    assert [source["role"] for source in payload["sources"]] == ["bse_bhavcopy", "nse_bhavcopy", "zerodha_instruments"]
+    assert payload["build_id"] is None
+
+
+def test_status_shows_the_sources_of_the_latest_rebuild(tmp_path, market_csv_builder, runner) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    runner.invoke(app, ["rebuild", *_rebuild_path_args(paths, db_path), "--no-backup"])
+
+    result = runner.invoke(app, ["status", "--db-path", str(db_path)], env={"COLUMNS": "200"})
+    payload = json.loads(runner.invoke(app, ["status", "--db-path", str(db_path), "--json"]).stdout)
+
+    assert result.exit_code == 0
+    assert "by Stocky" in result.stdout
+    assert "NSE-cm03MAY2021bhav.csv" in result.stdout
+    assert payload["provenance"]["consolidated_rows"] == 1
+    assert {source["trade_date"] for source in payload["provenance"]["sources"]} == {"2021-05-03", None}
+
+
+def test_status_says_when_no_provenance_is_recorded(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = runner.invoke(app, ["status", "--db-path", str(db_path)])
+
+    assert "No source provenance recorded" in result.stdout
+
+
 def test_rebuild_with_explicit_paths_writes_database_without_backup(
     tmp_path, market_csv_builder, seed_consolidated, runner
 ) -> None:

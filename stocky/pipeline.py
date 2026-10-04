@@ -1,20 +1,29 @@
 from __future__ import annotations
 
+import hashlib
+import sqlite3
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pandas as pd
 
+from stocky import __version__
 from stocky.config import DEFAULT_BACKUP_DIR, DEFAULT_DB_PATH
 from stocky.database import (
     CONSOLIDATED_COLUMNS,
     CONSOLIDATED_TABLE,
+    BuildProvenance,
+    SourceRecord,
     backup_database,
     connect,
     initialize_database,
+    read_latest_provenance,
+    record_build_provenance,
+    table_exists,
 )
-from stocky.sources import BhavcopyPaths, require_existing_files
+from stocky.sources import BhavcopyPaths, parse_bse_bhavcopy_date, parse_nse_bhavcopy_date, require_existing_files
 
 NSE_LEGACY_COLUMNS = {"SERIES", "ISIN", "SYMBOL"}
 NSE_UDIFF_COLUMNS = {"SctySrs", "ISIN", "TckrSymb", "FinInstrmId"}
@@ -41,6 +50,34 @@ class SourcePreview:
     zerodha_rows: int
 
 
+DEFAULT_DIFF_SAMPLE_SIZE = 5
+
+
+@dataclass(frozen=True)
+class RowChange:
+    isin: str
+    # Column name to its (current, rebuilt) values.
+    changes: dict[str, tuple[str | None, str | None]]
+
+
+@dataclass(frozen=True)
+class RebuildDiff:
+    """How a rebuilt consolidated table differs from the one in the database, keyed by ISIN."""
+
+    current_rows: int
+    rebuilt_rows: int
+    added: int
+    removed: int
+    changed: int
+    unchanged: int
+    compared_columns: list[str]
+    column_changes: dict[str, int]
+    sample_added: list[dict[str, str | None]]
+    sample_removed: list[dict[str, str | None]]
+    sample_changed: list[RowChange]
+    current_provenance: BuildProvenance | None
+
+
 @dataclass(frozen=True)
 class RebuildResult:
     rows: int
@@ -50,6 +87,10 @@ class RebuildResult:
     bse_bhavcopy: Path
     nse_bhavcopy: Path
     zerodha_instruments: Path
+    built_at: str = ""
+    build_id: int | None = None
+    sources: list[SourceRecord] = field(default_factory=list)
+    diff: RebuildDiff | None = None
 
 
 def _strip_dataframe_strings(dataframe: pd.DataFrame) -> pd.DataFrame:
@@ -190,6 +231,110 @@ def build_consolidated_dataframe(
     return equities[[column for column in CONSOLIDATED_COLUMNS if column != "isin"]]
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def describe_source(path: Path, *, role: str, rows: int, trade_date: date | None = None) -> SourceRecord:
+    """Identify one input file by name, trade date, and content hash.
+
+    Only the file name is kept, not the local directory, because the database is committed and the
+    path would only describe one machine. The hash and modification time identify the Zerodha
+    instruments file, which carries no date of its own.
+    """
+    stat = path.stat()
+    return SourceRecord(
+        role=role,
+        file_name=path.name,
+        trade_date=trade_date.isoformat() if trade_date is not None else None,
+        sha256=_file_sha256(path),
+        size_bytes=stat.st_size,
+        modified_at=datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
+        rows=rows,
+    )
+
+
+def _normalize(value: object) -> str | None:
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return None
+    text = str(value)
+    return text if text else None
+
+
+def _records_by_isin(dataframe: pd.DataFrame, columns: list[str]) -> dict[str, dict[str, str | None]]:
+    return {
+        str(isin): {column: _normalize(value) for column, value in zip(columns, values, strict=True)}
+        for isin, *values in dataframe[["isin", *columns]].itertuples(index=False, name=None)
+    }
+
+
+def diff_consolidated(
+    db_path: Path,
+    rebuilt: pd.DataFrame,
+    *,
+    sample_size: int = DEFAULT_DIFF_SAMPLE_SIZE,
+) -> RebuildDiff:
+    """Compare a rebuilt consolidated table, indexed by ISIN, with the table currently in the database.
+
+    Empty strings and NULLs count as the same empty value. A table with an older layout is compared on
+    the columns both tables have, and ``compared_columns`` names them.
+    """
+    if sample_size < 0:
+        raise ValueError("Sample size must not be negative.")
+
+    current = pd.DataFrame(columns=list(CONSOLIDATED_COLUMNS))
+    current_provenance = None
+    # Check first: connect() would create an empty database file during a dry run.
+    if db_path.exists():
+        with connect(db_path) as con:
+            current_provenance = read_latest_provenance(con)
+            if table_exists(con, CONSOLIDATED_TABLE):
+                current = pd.read_sql(f"SELECT * FROM {CONSOLIDATED_TABLE}", con, dtype=object)
+
+    rebuilt_frame = rebuilt.reset_index()
+    compared = [column for column in CONSOLIDATED_COLUMNS if column != "isin" and column in current.columns]
+    before = _records_by_isin(current, compared)
+    after = _records_by_isin(rebuilt_frame, compared)
+
+    added = [isin for isin in after if isin not in before]
+    removed = [isin for isin in before if isin not in after]
+    changed: list[RowChange] = []
+    column_changes = dict.fromkeys(compared, 0)
+    for isin in after:
+        if isin not in before:
+            continue
+        changes = {
+            column: (before[isin][column], after[isin][column])
+            for column in compared
+            if before[isin][column] != after[isin][column]
+        }
+        if changes:
+            changed.append(RowChange(isin=isin, changes=changes))
+            for column in changes:
+                column_changes[column] += 1
+
+    rebuilt_rows = _records_by_isin(rebuilt_frame, [column for column in CONSOLIDATED_COLUMNS if column != "isin"])
+    current_rows = _records_by_isin(current, [column for column in current.columns if column != "isin"])
+    return RebuildDiff(
+        current_rows=len(current),
+        rebuilt_rows=len(rebuilt_frame),
+        added=len(added),
+        removed=len(removed),
+        changed=len(changed),
+        unchanged=len(after) - len(added) - len(changed),
+        compared_columns=compared,
+        column_changes={column: count for column, count in column_changes.items() if count},
+        sample_added=[{"isin": isin, **rebuilt_rows[isin]} for isin in sorted(added)[:sample_size]],
+        sample_removed=[{"isin": isin, **current_rows[isin]} for isin in sorted(removed)[:sample_size]],
+        sample_changed=sorted(changed, key=lambda change: change.isin)[:sample_size],
+        current_provenance=current_provenance,
+    )
+
+
 def preview_sources(paths: BhavcopyPaths) -> SourcePreview:
     """Load the three source files and report how many usable rows each holds."""
     require_existing_files(paths)
@@ -204,6 +349,27 @@ def preview_sources(paths: BhavcopyPaths) -> SourcePreview:
     )
 
 
+def write_consolidated_table(con: sqlite3.Connection, consolidated: pd.DataFrame) -> None:
+    """Replace the consolidated table inside the caller's transaction: TEXT columns and an ISIN index."""
+    frame = consolidated.reset_index()
+    columns = list(frame.columns)
+    column_definitions = ", ".join(f'"{column}" TEXT' for column in columns)
+    placeholders = ", ".join("?" for _ in columns)
+    con.execute(f'DROP TABLE IF EXISTS "{CONSOLIDATED_TABLE}"')
+    con.execute(f'CREATE TABLE "{CONSOLIDATED_TABLE}" ({column_definitions})')
+    con.execute(f'CREATE INDEX "ix_{CONSOLIDATED_TABLE}_isin" ON "{CONSOLIDATED_TABLE}" ("isin")')
+    con.executemany(
+        f'INSERT INTO "{CONSOLIDATED_TABLE}" VALUES ({placeholders})',
+        (
+            tuple(
+                None if value is None or (not isinstance(value, str) and pd.isna(value)) else str(value)
+                for value in row
+            )
+            for row in frame.itertuples(index=False, name=None)
+        ),
+    )
+
+
 def rebuild_database(
     paths: BhavcopyPaths,
     *,
@@ -211,6 +377,7 @@ def rebuild_database(
     backup_dir: Path = DEFAULT_BACKUP_DIR,
     backup: bool = True,
     dry_run: bool = False,
+    sample_size: int = DEFAULT_DIFF_SAMPLE_SIZE,
     progress: Callable[[str], None] | None = None,
 ) -> RebuildResult:
     def report(stage: str) -> None:
@@ -233,8 +400,22 @@ def rebuild_database(
         zerodha_instruments=zerodha_instruments,
     )
 
-    backup_path = None
-    if dry_run:
+    report("Recording source files")
+    built_at = datetime.now(UTC).isoformat()
+    sources = [
+        describe_source(
+            paths.bse, role="bse_bhavcopy", rows=len(bse_equities), trade_date=parse_bse_bhavcopy_date(paths.bse)
+        ),
+        describe_source(
+            paths.nse, role="nse_bhavcopy", rows=len(nse_equities), trade_date=parse_nse_bhavcopy_date(paths.nse)
+        ),
+        describe_source(paths.zerodha, role="zerodha_instruments", rows=len(zerodha_instruments)),
+    ]
+
+    report("Comparing with the current database")
+    diff = diff_consolidated(db_path, stocky, sample_size=sample_size)
+
+    def result(*, backup_path: Path | None = None, build_id: int | None = None) -> RebuildResult:
         return RebuildResult(
             rows=len(stocky),
             db_path=db_path,
@@ -243,24 +424,34 @@ def rebuild_database(
             bse_bhavcopy=paths.bse,
             nse_bhavcopy=paths.nse,
             zerodha_instruments=paths.zerodha,
+            built_at=built_at,
+            build_id=build_id,
+            sources=sources,
+            diff=diff,
         )
 
+    if dry_run:
+        return result()
+
     initialize_database(db_path)
+    backup_path = None
     if backup:
         report("Backing up database")
         backup_path = backup_database(db_path, backup_dir=backup_dir)
 
     report("Writing consolidated table")
     initialize_database(db_path)
+    # One transaction, so the table and the record of what built it are written together or not at all.
+    # pandas' to_sql commits on its own, so the table is written here with the same layout it produced.
     with connect(db_path) as con:
-        stocky.to_sql(CONSOLIDATED_TABLE, con, if_exists="replace", index=True, index_label="isin")
+        con.execute("BEGIN")
+        write_consolidated_table(con, stocky)
+        build_id = record_build_provenance(
+            con,
+            built_at=built_at,
+            stocky_version=__version__,
+            consolidated_rows=len(stocky),
+            sources=sources,
+        )
 
-    return RebuildResult(
-        rows=len(stocky),
-        db_path=db_path,
-        backup_path=backup_path,
-        dry_run=dry_run,
-        bse_bhavcopy=paths.bse,
-        nse_bhavcopy=paths.nse,
-        zerodha_instruments=paths.zerodha,
-    )
+    return result(backup_path=backup_path, build_id=build_id)

@@ -346,6 +346,12 @@ class StockyApp(App[None]):
         backup = f"; backup {result.backup_path}" if result.backup_path else ""
         verb = "Validated" if result.dry_run else "Wrote"
         self.log_line(f"{verb} {result.rows} rows to {result.db_path}{backup}.", "bold green")
+        if result.diff is not None:
+            diff = result.diff
+            self.log_line(
+                f"Against the previous table: {diff.added} added, {diff.removed} removed, "
+                f"{diff.changed} changed, {diff.unchanged} unchanged."
+            )
         self.finish_job()
 
     # Yahoo update
