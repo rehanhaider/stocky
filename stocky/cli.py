@@ -39,6 +39,7 @@ from stocky.export import SNAPSHOT_FORMATS, create_snapshot, export_consolidated
 from stocky.mutual_funds import MutualFundSearchResult, import_mutual_funds, search_mutual_funds
 from stocky.pipeline import DEFAULT_DIFF_SAMPLE_SIZE, RebuildDiff, RebuildResult, SourcePreview, rebuild_database
 from stocky.sources import BhavcopyPaths, list_bhavcopy_pairs, resolve_bhavcopy_paths
+from stocky.summary import DEFAULT_MISSING_SAMPLE_SIZE, build_refresh_summary, render_markdown
 from stocky.yahoo import ProgressCallback, YahooDataManager, ticker_column
 
 console = Console()
@@ -728,6 +729,44 @@ def status(
         _emit_json(result)
     else:
         _print_status(result)
+
+
+@app.command()
+def summary(
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Markdown file to write. Omit to print it on stdout."),
+    ] = None,
+    sample: Annotated[
+        int,
+        typer.Option("--sample", min=0, help="Number of tickers without a Yahoo response to list per exchange."),
+    ] = DEFAULT_MISSING_SAMPLE_SIZE,
+    db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the summary as JSON on stdout.")] = False,
+) -> None:
+    """Validate the database and write the refresh summary: sources, row counts, and Yahoo gaps.
+
+    Exits with status 1 when a validation check fails, after writing the summary.
+    """
+    try:
+        result = build_refresh_summary(db_path, sample_size=sample)
+    except Exception as exc:
+        error_console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    if json_output:
+        _emit_json(result)
+    elif output is None:
+        sys.stdout.write(render_markdown(result))
+    else:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(render_markdown(result), encoding="utf-8")
+        error_console.print(f"Wrote the refresh summary to {escape(str(output))}.")
+
+    if not result.passed:
+        failed = ", ".join(check.name for check in result.checks if not check.passed)
+        error_console.print(f"[red]Validation failed: {escape(failed)}.[/red]")
+        raise typer.Exit(1)
 
 
 @app.command()
