@@ -233,7 +233,7 @@ uv run stocky explore
 uv run stocky status --json
 ```
 
-The `status`, `summary`, `query`, `lookup`, `explore`, `rebuild`, `yahoo update`, `yahoo import-cache`, `mf import`, and `mf query` commands accept `--json` and print JSON on stdout. With `--json`, `yahoo update` also writes its progress and error events to stderr as JSON lines, one per line.
+The `status`, `summary`, `query`, `lookup`, `explore`, `rebuild`, `screen`, `yahoo update`, `yahoo import-cache`, `yahoo fields`, `mf import`, and `mf query` commands accept `--json` and print JSON on stdout. With `--json`, `yahoo update` also writes its progress and error events to stderr as JSON lines, one per line.
 
 ### Exporting the consolidated table
 
@@ -274,6 +274,53 @@ Yahoo tickers for NSE-listed instruments, ready for `yfinance` or vectorbt's `YF
 ```bash
 uv run stocky export --tickers yq_ns -o data/output/yahoo_nse.txt
 ```
+
+### Yahoo fields and screening
+
+These commands read the Yahoo responses already cached in `stocky.db`. They never call Yahoo Finance and never write to the database.
+
+Each exchange's data comes only from the response cached under that exchange's ticker column: `yq_ns` for NSE and `yq_bo` for BSE. A bare symbol is never used to match, because the same symbol can name different companies on NSE and BSE.
+
+`yahoo fields` shows one instrument's fields, with one table per exchange that lists it. It takes the same exact identifiers as `lookup`:
+
+```bash
+uv run stocky yahoo fields RELIANCE
+uv run stocky yahoo fields INE002A01018 --json
+```
+
+The fields are:
+
+- name and quote type;
+- currency, market cap, and sector and industry;
+- price, previous close, volume, quote time, and 52-week high and low;
+- trailing P/E, trailing EPS, book value, price to book, dividend yield, beta, shares outstanding, and enterprise value;
+- the first and last expected earnings date.
+
+Some responses do not have every module, so a field can be empty. More than 40% of the cached responses have no sector, industry, or key statistics.
+
+`yahoo enriched` writes the enriched consolidated view as CSV, JSON, or Parquet. The view has one row for each instrument on each exchange where it has a Yahoo ticker. It shows the ticker and its identifiers, then `yahoo_status`, `fetched_at`, and the fields above. `yahoo_status` is one of three values:
+
+- `ok`: the response names a listed security;
+- `unusable`: the response is an error or names something else, such as an index;
+- `missing`: no response is cached.
+
+```bash
+uv run stocky yahoo enriched -o data/output/enriched.parquet
+uv run stocky yahoo enriched --exchange NSE --format csv
+```
+
+`screen` filters the listings that have usable data. It shows the largest market cap first.
+
+- `--market-cap-gt` and `--market-cap-lt` are in crore. Both bounds are exclusive.
+- `--sector` and `--industry` match any part of the value, in any case.
+- `--exchange` limits the result to NSE or BSE.
+
+```bash
+uv run stocky screen --market-cap-gt 10000 --exchange NSE
+uv run stocky screen --sector technology --market-cap-lt 500 --limit 50 --json
+```
+
+The values are what Yahoo returned when the response was fetched. Check the quote date: many responses hold quotes from years before `fetched_at`. A few hold impossible placeholder values that sort to the top of a market cap screen. The cached modules have no price history, so Stocky has no OHLCV export.
 
 ### Pinnable snapshots
 
