@@ -1021,6 +1021,22 @@ def yahoo_update(
         bool,
         typer.Option("--missing-only", help="Only fetch tickers that have no cached response yet."),
     ] = False,
+    symbols: Annotated[
+        str | None,
+        typer.Option(
+            "--symbols",
+            help="Comma-separated tickers or exchange symbols to fetch, such as RELIANCE.NS,INFY. "
+            "Each must be listed for --exchange.",
+        ),
+    ] = None,
+    stale_days: Annotated[
+        float | None,
+        typer.Option(
+            "--stale-days",
+            min=0,
+            help="Only fetch tickers with no cached response or one fetched more than this many days ago.",
+        ),
+    ] = None,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Print the result as JSON on stdout and progress events as JSON lines on stderr."),
@@ -1034,6 +1050,8 @@ def yahoo_update(
                 dry_run=dry_run,
                 limit=limit,
                 missing_only=missing_only,
+                symbols=_split_columns(symbols),
+                stale_days=stale_days,
                 progress=print_progress,
             )
     except Exception as exc:

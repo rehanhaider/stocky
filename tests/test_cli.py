@@ -581,6 +581,10 @@ def test_yahoo_update_passes_options_and_prints_progress(tmp_path, monkeypatch, 
             "--limit",
             "60",
             "--missing-only",
+            "--symbols",
+            "RELIANCE.NS, INFY",
+            "--stale-days",
+            "90",
         ],
     )
 
@@ -591,6 +595,8 @@ def test_yahoo_update_passes_options_and_prints_progress(tmp_path, monkeypatch, 
         "dry_run": False,
         "limit": 60,
         "missing_only": True,
+        "symbols": ["RELIANCE.NS", "INFY"],
+        "stale_days": 90.0,
         "progress": None,
     }
     assert callable(calls[1][1]["progress"])

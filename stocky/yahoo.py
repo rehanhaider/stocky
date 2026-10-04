@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -14,6 +15,7 @@ from stocky.database import (
     initialize_database,
     is_usable_yahoo_payload,
     read_available_yahoo_symbols,
+    read_yahoo_fetch_times,
     split_yahoo_symbol,
     upsert_yahoo_response,
 )
@@ -72,6 +74,7 @@ class YahooUpdateResult:
 
 # Each exchange reads the consolidated column that holds its full Yahoo tickers.
 TICKER_COLUMNS = {"NSE": "yq_ns", "BSE": "yq_bo"}
+TICKER_SUFFIXES = {"NSE": ".NS", "BSE": ".BO"}
 
 
 def ticker_column(exchange: str) -> str:
@@ -79,6 +82,30 @@ def ticker_column(exchange: str) -> str:
     if column is None:
         raise ValueError(f"Unsupported exchange: {exchange}. Expected NSE or BSE.")
     return column
+
+
+def normalize_tickers(symbols: Sequence[str], exchange: str) -> list[str]:
+    """Turn exchange symbols or full tickers into the exchange's Yahoo tickers, keeping the first of any repeats."""
+    suffix = TICKER_SUFFIXES[exchange.upper()]
+    tickers: list[str] = []
+    for symbol in symbols:
+        cleaned = symbol.strip().upper()
+        if not cleaned:
+            continue
+        # A ticker that already names an exchange is kept, so one from the other exchange is reported as given.
+        ticker = cleaned if cleaned.endswith(tuple(TICKER_SUFFIXES.values())) else f"{cleaned}{suffix}"
+        if ticker not in tickers:
+            tickers.append(ticker)
+    return tickers
+
+
+def _is_stale(fetched_at: str | None, cutoff: datetime) -> bool:
+    if fetched_at is None:
+        return True
+    fetched = datetime.fromisoformat(fetched_at)
+    if fetched.tzinfo is None:
+        fetched = fetched.replace(tzinfo=UTC)
+    return fetched < cutoff
 
 
 class YahooDataManager:
@@ -92,22 +119,53 @@ class YahooDataManager:
         dry_run: bool = False,
         limit: int | None = None,
         missing_only: bool = False,
+        symbols: Sequence[str] | None = None,
+        stale_days: float | None = None,
         progress: ProgressCallback | None = None,
     ) -> YahooUpdateResult:
-        column = ticker_column(exchange)
-        symbols = fetch_consolidated_symbols(self.db_path, key=column, limit=limit)
+        """Fetch the exchange's tickers, narrowed by every selection given.
 
-        if not symbols and (limit is None or limit > 0):
+        ``symbols`` keeps only the named tickers and rejects any that the exchange's column does not
+        hold. ``missing_only`` keeps tickers with no cached response; ``stale_days`` keeps those with no
+        response or one fetched more than that many days ago. ``limit`` caps the selection last, so a
+        limited run of missing or stale tickers fetches up to ``limit`` of them.
+        """
+        column = ticker_column(exchange)
+        if limit is not None and limit < 0:
+            raise ValueError("Limit must not be negative.")
+        if stale_days is not None and stale_days < 0:
+            raise ValueError("Stale days must not be negative.")
+
+        listed = fetch_consolidated_symbols(self.db_path, key=column)
+        if not listed and limit != 0:
             raise ValueError(
                 f"No {exchange.upper()} tickers found in {column} in {self.db_path}. Run 'stocky rebuild' first."
             )
 
+        selected = listed
+        if symbols is not None:
+            wanted = normalize_tickers(symbols, exchange)
+            if not wanted:
+                raise ValueError("No symbols given.")
+            unknown = sorted(set(wanted).difference(listed))
+            if unknown:
+                raise ValueError(f"Not {exchange.upper()} tickers in {column}: {', '.join(unknown)}")
+            wanted_set = set(wanted)
+            selected = [ticker for ticker in listed if ticker in wanted_set]
+
         if missing_only:
             available = read_available_yahoo_symbols(self.db_path)
-            symbols = [symbol for symbol in symbols if symbol not in available]
+            selected = [ticker for ticker in selected if ticker not in available]
+
+        if stale_days is not None:
+            cutoff = datetime.now(UTC) - timedelta(days=stale_days)
+            fetched = read_yahoo_fetch_times(self.db_path)
+            selected = [ticker for ticker in selected if _is_stale(fetched.get(ticker), cutoff)]
+
+        tickers = selected if limit is None else selected[:limit]
 
         if dry_run:
-            return YahooUpdateResult(processed=len(symbols), written=0, skipped=0, dry_run=True)
+            return YahooUpdateResult(processed=len(tickers), written=0, skipped=0, dry_run=True)
 
         import yahooquery as yq
 
@@ -120,7 +178,7 @@ class YahooDataManager:
         # writes after the last COMMIT_EVERY boundary are persisted there. The
         # abort path commits explicitly because that exit rolls back instead.
         with connect(self.db_path) as con:
-            for index, yahoo_symbol in enumerate(symbols, start=1):
+            for index, yahoo_symbol in enumerate(tickers, start=1):
                 cause: Exception | None = None
                 try:
                     data = yq.Ticker(yahoo_symbol).all_modules
@@ -163,6 +221,6 @@ class YahooDataManager:
                         con.commit()
 
                 if progress is not None:
-                    progress(index, len(symbols), written, skipped)
+                    progress(index, len(tickers), written, skipped)
 
-        return YahooUpdateResult(processed=len(symbols), written=written, skipped=skipped, dry_run=False)
+        return YahooUpdateResult(processed=len(tickers), written=written, skipped=skipped, dry_run=False)

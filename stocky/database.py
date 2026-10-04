@@ -283,6 +283,17 @@ def read_available_yahoo_symbols(db_path: Path = DEFAULT_DB_PATH) -> set[str]:
     return {row[0] for row in rows}
 
 
+def read_yahoo_fetch_times(db_path: Path = DEFAULT_DB_PATH) -> dict[str, str]:
+    """Map each cached Yahoo ticker to the time its response was fetched."""
+    if not db_path.exists():
+        return {}
+
+    with connect(db_path) as con:
+        if not table_exists(con, YAHOO_RESPONSES_TABLE):
+            return {}
+        return dict(con.execute(f"SELECT yahoo_symbol, fetched_at FROM {YAHOO_RESPONSES_TABLE}").fetchall())
+
+
 def fetch_consolidated_symbols(
     db_path: Path = DEFAULT_DB_PATH,
     *,
