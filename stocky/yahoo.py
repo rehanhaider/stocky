@@ -108,22 +108,31 @@ def _is_stale(fetched_at: str | None, cutoff: datetime) -> bool:
     return fetched < cutoff
 
 
+def _named_tickers(listed: list[str], symbols: Sequence[str], exchange: str, column: str) -> list[str]:
+    """Keep the listed tickers that ``symbols`` names, rejecting any name the column does not hold."""
+    wanted = set(normalize_tickers(symbols, exchange))
+    if not wanted:
+        raise ValueError("No symbols given.")
+    unknown = sorted(wanted.difference(listed))
+    if unknown:
+        raise ValueError(f"Not {exchange.upper()} tickers in {column}: {', '.join(unknown)}")
+    return [ticker for ticker in listed if ticker in wanted]
+
+
 class YahooDataManager:
     def __init__(self, db_path: Path = DEFAULT_DB_PATH) -> None:
         self.db_path = db_path
 
-    def update_data(
+    def select_tickers(
         self,
         *,
-        exchange: str = "BSE",
-        dry_run: bool = False,
+        exchange: str,
         limit: int | None = None,
         missing_only: bool = False,
         symbols: Sequence[str] | None = None,
         stale_days: float | None = None,
-        progress: ProgressCallback | None = None,
-    ) -> YahooUpdateResult:
-        """Fetch the exchange's tickers, narrowed by every selection given.
+    ) -> list[str]:
+        """Return the exchange's tickers to fetch, narrowed by every selection given.
 
         ``symbols`` keeps only the named tickers and rejects any that the exchange's column does not
         hold. ``missing_only`` keeps tickers with no cached response; ``stale_days`` keeps those with no
@@ -142,16 +151,7 @@ class YahooDataManager:
                 f"No {exchange.upper()} tickers found in {column} in {self.db_path}. Run 'stocky rebuild' first."
             )
 
-        selected = listed
-        if symbols is not None:
-            wanted = normalize_tickers(symbols, exchange)
-            if not wanted:
-                raise ValueError("No symbols given.")
-            unknown = sorted(set(wanted).difference(listed))
-            if unknown:
-                raise ValueError(f"Not {exchange.upper()} tickers in {column}: {', '.join(unknown)}")
-            wanted_set = set(wanted)
-            selected = [ticker for ticker in listed if ticker in wanted_set]
+        selected = listed if symbols is None else _named_tickers(listed, symbols, exchange, column)
 
         if missing_only:
             available = read_available_yahoo_symbols(self.db_path)
@@ -162,7 +162,22 @@ class YahooDataManager:
             fetched = read_yahoo_fetch_times(self.db_path)
             selected = [ticker for ticker in selected if _is_stale(fetched.get(ticker), cutoff)]
 
-        tickers = selected if limit is None else selected[:limit]
+        return selected if limit is None else selected[:limit]
+
+    def update_data(
+        self,
+        *,
+        exchange: str = "BSE",
+        dry_run: bool = False,
+        limit: int | None = None,
+        missing_only: bool = False,
+        symbols: Sequence[str] | None = None,
+        stale_days: float | None = None,
+        progress: ProgressCallback | None = None,
+    ) -> YahooUpdateResult:
+        tickers = self.select_tickers(
+            exchange=exchange, limit=limit, missing_only=missing_only, symbols=symbols, stale_days=stale_days
+        )
 
         if dry_run:
             return YahooUpdateResult(processed=len(tickers), written=0, skipped=0, dry_run=True)
