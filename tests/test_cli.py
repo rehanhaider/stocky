@@ -1091,3 +1091,139 @@ def test_format_percent(part, whole, expected) -> None:
 )
 def test_format_timestamp(value, expected) -> None:
     assert cli._format_timestamp(value) == expected
+
+
+def _seed_yahoo_payloads(db_path, payloads) -> None:
+    initialize_database(db_path)
+    with connect(db_path) as con:
+        for ticker, (name, market_cap, sector) in payloads.items():
+            payload = {
+                "quoteType": {"quoteType": "EQUITY", "longName": name},
+                "price": {"currency": "INR", "marketCap": market_cap, "regularMarketPrice": 100.0},
+                "assetProfile": {"sector": sector, "industry": "Testing"},
+            }
+            upsert_yahoo_response(
+                con,
+                yahoo_symbol=ticker,
+                symbol=ticker.rsplit(".", 1)[0],
+                exchange="NSE" if ticker.endswith(".NS") else "BSE",
+                response_json=encode_response_json({ticker: payload}),
+                source="test",
+            )
+
+
+def _seed_enrichable_db(tmp_path, seed_consolidated):
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    _seed_yahoo_payloads(
+        db_path,
+        {
+            "RELIANCE.NS": ("Reliance Industries Limited", 1_348_695 * 10_000_000, "Energy"),
+            "RELIANCE.BO": ("Reliance Industries Limited", 1_182_543 * 10_000_000, "Energy"),
+            "INFY.NS": ("Infosys Limited", 574_958 * 10_000_000, "Technology"),
+        },
+    )
+    return db_path
+
+
+def test_screen_prints_listings_largest_market_cap_first(tmp_path, seed_consolidated, runner, monkeypatch) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    db_path = _seed_enrichable_db(tmp_path, seed_consolidated)
+
+    result = runner.invoke(
+        app, ["screen", "--market-cap-gt", "500000", "--exchange", "NSE", "--limit", "1", "--db-path", str(db_path)]
+    )
+
+    assert result.exit_code == 0
+    assert "Screen results" in result.stdout
+    assert "RELIANCE.NS" in result.stdout
+    assert "1,348,695" in result.stdout
+    assert "RELIANCE.BO" not in result.stdout
+    assert "Showing 1 of 2 matches" in result.stdout
+
+
+def test_screen_json_prints_total_and_records(tmp_path, seed_consolidated, runner) -> None:
+    db_path = _seed_enrichable_db(tmp_path, seed_consolidated)
+
+    result = runner.invoke(app, ["screen", "--sector", "tech", "--db-path", str(db_path), "--json"])
+
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 0
+    assert payload["total"] == 1
+    assert payload["rows"][0]["yahoo_ticker"] == "INFY.NS"
+    assert payload["rows"][0]["exchange"] == "NSE"
+    assert payload["rows"][0]["sector"] == "Technology"
+
+
+def test_screen_reports_no_match_and_rejects_an_unknown_exchange(tmp_path, seed_consolidated, runner) -> None:
+    db_path = _seed_enrichable_db(tmp_path, seed_consolidated)
+
+    result = runner.invoke(app, ["screen", "--market-cap-lt", "1", "--db-path", str(db_path)])
+    assert result.exit_code == 0
+    assert "No listings match the screen." in result.stdout
+
+    result = runner.invoke(app, ["screen", "--exchange", "MCX", "--db-path", str(db_path)])
+    assert result.exit_code == 1
+    assert "Unsupported exchange: MCX" in result.stdout
+
+
+def test_yahoo_fields_prints_one_table_per_exchange(tmp_path, seed_consolidated, runner, monkeypatch) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    db_path = _seed_enrichable_db(tmp_path, seed_consolidated)
+
+    result = runner.invoke(app, ["yahoo", "fields", "INFY", "--db-path", str(db_path)])
+
+    assert result.exit_code == 0
+    assert "INFY.NS (NSE, INE009A01021)" in result.stdout
+    assert "574,958 Cr" in result.stdout
+    assert "INFY.BO (BSE, INE009A01021)" in result.stdout
+    assert "No cached Yahoo response for this ticker." in result.stdout
+
+
+def test_yahoo_fields_json_prints_records(tmp_path, seed_consolidated, runner) -> None:
+    db_path = _seed_enrichable_db(tmp_path, seed_consolidated)
+
+    result = runner.invoke(app, ["yahoo", "fields", "RELIANCE.BO", "--db-path", str(db_path), "--json"])
+
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 0
+    assert [(record["yahoo_ticker"], record["market_cap"]) for record in payload] == [
+        ("RELIANCE.BO", 1_182_543 * 10_000_000),
+        ("RELIANCE.NS", 1_348_695 * 10_000_000),
+    ]
+
+
+def test_yahoo_fields_reports_no_exact_match(tmp_path, seed_consolidated, runner) -> None:
+    db_path = _seed_enrichable_db(tmp_path, seed_consolidated)
+
+    result = runner.invoke(app, ["yahoo", "fields", "RELIANC", "--db-path", str(db_path)])
+
+    assert result.exit_code == 1
+    assert "No instrument with a Yahoo ticker matches 'RELIANC' exactly." in result.stdout
+
+
+def test_yahoo_enriched_writes_the_view_to_a_file(tmp_path, seed_consolidated, runner) -> None:
+    db_path = _seed_enrichable_db(tmp_path, seed_consolidated)
+    output = tmp_path / "out" / "enriched.json"
+
+    result = runner.invoke(
+        app, ["yahoo", "enriched", "--output", str(output), "--exchange", "BSE", "--db-path", str(db_path)]
+    )
+
+    assert result.exit_code == 0
+    assert "Wrote 2 enriched rows" in result.stdout
+    records = json.loads(output.read_text(encoding="utf-8"))
+    assert [(record["yahoo_ticker"], record["yahoo_status"]) for record in records] == [
+        ("RELIANCE.BO", "ok"),
+        ("INFY.BO", "missing"),
+    ]
+
+
+def test_yahoo_enriched_writes_csv_to_stdout(tmp_path, seed_consolidated, runner) -> None:
+    db_path = _seed_enrichable_db(tmp_path, seed_consolidated)
+
+    result = runner.invoke(app, ["yahoo", "enriched", "--format", "csv", "--db-path", str(db_path)])
+
+    assert result.exit_code == 0
+    assert result.stdout.splitlines()[0].startswith("isin,exchange,yahoo_ticker,")
+    assert len(result.stdout.splitlines()) == 5

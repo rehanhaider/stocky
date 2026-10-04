@@ -35,6 +35,15 @@ from stocky.database import (
     read_status,
     search_instruments,
 )
+from stocky.enrich import (
+    CRORE,
+    YAHOO_FIELD_NAMES,
+    EnrichedRow,
+    ScreenResult,
+    export_enriched,
+    lookup_fields,
+    screen_instruments,
+)
 from stocky.export import SNAPSHOT_FORMATS, create_snapshot, export_consolidated, export_tickers
 from stocky.mutual_funds import MutualFundSearchResult, import_mutual_funds, search_mutual_funds
 from stocky.pipeline import DEFAULT_DIFF_SAMPLE_SIZE, RebuildDiff, RebuildResult, SourcePreview, rebuild_database
@@ -280,6 +289,77 @@ def _print_equivalents(match: InstrumentMatch, term: str | None = None) -> None:
     for label, field in _MATCH_FIELDS:
         table.add_row(label, getattr(match, field) or "-")
     console.print(table)
+
+
+_YAHOO_STATUS_NOTES = {
+    "missing": "No cached Yahoo response for this ticker. Run 'stocky yahoo update' to fetch it.",
+    "unusable": "The cached Yahoo response is an error or names no listed security.",
+}
+
+
+def _format_crore(value: float | None) -> str:
+    return "-" if value is None else f"{value / CRORE:,.0f}"
+
+
+def _format_value(value: object) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, float) and not value.is_integer():
+        return f"{value:,.4g}" if abs(value) < 1 else f"{value:,.2f}"
+    if isinstance(value, (int, float)):
+        return f"{int(value):,}"
+    return escape(str(value))
+
+
+def _print_yahoo_fields(row: EnrichedRow) -> None:
+    table = Table(title=f"{escape(row.yahoo_ticker)} ({row.exchange}, {row.isin})")
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("yahoo_status", row.yahoo_status)
+    table.add_row("fetched_at", _format_timestamp(row.fetched_at) if row.fetched_at else "-")
+    for name in YAHOO_FIELD_NAMES:
+        value = getattr(row.fields, name)
+        table.add_row(
+            name, f"{_format_crore(value)} Cr" if name == "market_cap" and value is not None else _format_value(value)
+        )
+    console.print(table)
+    if row.yahoo_status in _YAHOO_STATUS_NOTES:
+        console.print(f"[yellow]{_YAHOO_STATUS_NOTES[row.yahoo_status]}[/yellow]")
+
+
+def _print_screen_result(result: ScreenResult) -> None:
+    if result.total == 0:
+        console.print("[yellow]No listings match the screen.[/yellow]")
+        return
+
+    table = Table(title="Screen results")
+    # Identifiers and numbers stay whole so they can be copied and compared; names and sectors wrap instead.
+    for header, justify, no_wrap in (
+        ("Ticker", "left", True),
+        ("ISIN", "left", True),
+        ("Name", "left", False),
+        ("Market cap (Cr)", "right", True),
+        ("Price", "right", True),
+        ("P/E", "right", True),
+        ("Sector", "left", False),
+        ("Quote date", "left", True),
+    ):
+        table.add_column(header, justify=justify, no_wrap=no_wrap)
+    for row in result.rows:
+        table.add_row(
+            escape(row.yahoo_ticker),
+            row.isin,
+            escape(row.fields.name or row.bse_sc_name or "-"),
+            _format_crore(row.fields.market_cap),
+            _format_value(row.fields.price),
+            _format_value(row.fields.trailing_pe),
+            escape(row.fields.sector or "-"),
+            (row.fields.market_time or "-")[:10],
+        )
+    console.print(table)
+
+    if result.total > len(result.rows):
+        console.print(f"[dim]Showing {len(result.rows)} of {result.total} matches. Raise --limit to see more.[/dim]")
 
 
 def _sample_label(row: dict[str, str | None]) -> str:
@@ -1006,6 +1086,47 @@ def snapshot(
         console.print(f"  {escape(file.name)}  sha256 {file.sha256}")
 
 
+@app.command()
+def screen(
+    exchange: Annotated[
+        str | None, typer.Option("--exchange", help="Only NSE (yq_ns tickers) or BSE (yq_bo tickers) listings.")
+    ] = None,
+    market_cap_gt: Annotated[
+        float | None, typer.Option("--market-cap-gt", min=0, help="Market cap above this many crore.")
+    ] = None,
+    market_cap_lt: Annotated[
+        float | None, typer.Option("--market-cap-lt", min=0, help="Market cap below this many crore.")
+    ] = None,
+    sector: Annotated[str | None, typer.Option("--sector", help="Sector containing this text, any case.")] = None,
+    industry: Annotated[str | None, typer.Option("--industry", help="Industry containing this text, any case.")] = None,
+    limit: Annotated[int, typer.Option("--limit", min=1, help="Maximum number of listings to display.")] = 20,
+    db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
+) -> None:
+    """Screen listings by cached Yahoo market cap, sector, and industry, largest market cap first.
+
+    Reads only the cached Yahoo responses; it never calls Yahoo Finance.
+    """
+    try:
+        result = screen_instruments(
+            db_path,
+            exchange=exchange,
+            market_cap_gt=market_cap_gt,
+            market_cap_lt=market_cap_lt,
+            sector=sector,
+            industry=industry,
+            limit=limit,
+        )
+    except Exception as exc:
+        (error_console if json_output else console).print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    if json_output:
+        _emit_json({"total": result.total, "rows": [row.as_record() for row in result.rows]})
+    else:
+        _print_screen_result(result)
+
+
 @contextlib.contextmanager
 def _yahoo_progress(exchange: str, json_output: bool) -> Iterator[ProgressCallback]:
     """Yield the progress callback that suits the output mode: JSON lines, a bar, or plain lines."""
@@ -1130,6 +1251,61 @@ def yahoo_import_cache(
         _emit_json(result)
     else:
         console.print(f"[green]Imported {result.imported}; skipped {result.skipped}.[/green]")
+
+
+@yahoo_app.command("fields")
+def yahoo_fields(
+    identifier: Annotated[str, typer.Argument(help="Exact symbol, Yahoo ticker, ISIN, BSE scrip code, or name.")],
+    db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
+) -> None:
+    """Show the cached Yahoo fields of an instrument, one table per exchange that lists it."""
+    try:
+        rows = lookup_fields(identifier, db_path)
+    except Exception as exc:
+        (error_console if json_output else console).print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    if not rows:
+        (error_console if json_output else console).print(
+            f"[red]No instrument with a Yahoo ticker matches '{escape(identifier)}' exactly.\n"
+            f"Try 'stocky query {escape(shlex.quote(identifier))}' for a fuzzy search.[/red]"
+        )
+        raise typer.Exit(1)
+
+    if json_output:
+        _emit_json([row.as_record() for row in rows])
+        return
+    for row in rows:
+        _print_yahoo_fields(row)
+
+
+@yahoo_app.command("enriched")
+def yahoo_enriched(
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="File to write. Omit to write to stdout."),
+    ] = None,
+    format: Annotated[
+        str | None,
+        typer.Option("--format", help="Output format: csv, json, or parquet. Inferred from --output when omitted."),
+    ] = None,
+    exchange: Annotated[
+        str | None, typer.Option("--exchange", help="Only NSE (yq_ns tickers) or BSE (yq_bo tickers) listings.")
+    ] = None,
+    db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Export the consolidated table enriched with cached Yahoo fields, one row per instrument per exchange."""
+    try:
+        result = export_enriched(db_path, output=output, format=format, exchange=exchange)
+    except Exception as exc:
+        error_console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    if result.output is not None:
+        console.print(
+            f"[green]Wrote {result.rows} enriched rows to {escape(str(result.output))} as {result.format}.[/green]"
+        )
 
 
 @mf_app.command("import")
