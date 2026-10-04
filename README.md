@@ -32,6 +32,20 @@ Release `v2.0.0` replaces the shared Zerodha and Yahoo symbol columns with excha
 [release notes](docs/releases/v2.0.0.md) for the column changes, source trade date, and database row counts.
 `data/output/stocky.db` is versioned with the repository; pin the release tag to use that database version.
 
+## The mutual_funds table
+
+`mutual_funds` holds one row per mutual fund scheme option from Zerodha's mutual fund instruments file. It is separate
+from `consolidated`, and `stocky rebuild` does not change it.
+
+| Column | Source |
+| --- | --- |
+| `isin` | The scheme option's ISIN, such as `INF179K01KG8`. Each plan (regular or direct) and option (growth, payout, reinvest) has its own ISIN |
+| `zd_mf` | Zerodha's `tradingsymbol`, the identifier Kite's mutual fund orders take. Zerodha uses the ISIN here |
+| `name`, `amc` | Scheme name and Zerodha's AMC label, such as `HDFCMutualFund_MF` |
+| `scheme_type`, `plan`, `dividend_type` | Category (`Debt`, `Equity`, ...), `regular` or `direct`, and `growth`, `payout`, or `reinvest` |
+
+Zerodha's file has no AMFI scheme code, so the table does not carry one.
+
 # Installation
 Clone the repository.
 
@@ -59,11 +73,13 @@ uv sync
     - Legacy files before 2024-07-08 use the older `NSE-cmDDMONYYYYbhav.csv` filename convention.
     - This project treats exchange bhavcopies as manually downloaded local inputs; do not add automated NSE downloads here.
 3. Zerodha Instruments: Download from `https://api.kite.trade/instruments`
+4. Optional, for mutual funds: Zerodha mutual fund instruments from `https://api.kite.trade/mf/instruments`
 
 ### Then place these files in the following locations
 1. BSE Bhavcopy: `data/marketData/bhavCopies`
 2. NSE Bhavcopy: `data/marketData/bhavCopies`. Current NSE UDiFF `.csv.zip` files can be used directly.
 3. Zerodha Instruments: `data/marketData/zerodha`. The filename should be `instruments.csv`
+4. Zerodha mutual fund instruments: `data/marketData/zerodha`. The filename should be `mf_instruments.csv`
 
 Raw market data files are local inputs and are ignored by Git. The durable output is `data/output/stocky.db`.
 
@@ -159,6 +175,21 @@ Show every known identifier for one exact match:
 uv run stocky lookup 500325
 ```
 
+Load the Zerodha mutual fund file into the `mutual_funds` table. Each run replaces that table and leaves the others as
+they are; `--mf-instruments` reads a different file:
+
+```bash
+uv run stocky mf import
+```
+
+Look up a mutual fund by ISIN, Zerodha identifier, scheme name, or AMC fragment. `--exact` matches the ISIN, Zerodha
+identifier, or full scheme name only:
+
+```bash
+uv run stocky mf query "parag parikh"
+uv run stocky mf query INF179K01KG8 --exact
+```
+
 Search and inspect equivalent identifiers in a standalone explorer:
 
 ```bash
@@ -171,7 +202,7 @@ uv run stocky explore
 uv run stocky status --json
 ```
 
-The `status`, `query`, `lookup`, `explore`, `rebuild`, `yahoo update`, and `yahoo import-cache` commands accept `--json` and print JSON on stdout. With `--json`, `yahoo update` also writes its progress and error events to stderr as JSON lines, one per line.
+The `status`, `query`, `lookup`, `explore`, `rebuild`, `yahoo update`, `yahoo import-cache`, `mf import`, and `mf query` commands accept `--json` and print JSON on stdout. With `--json`, `yahoo update` also writes its progress and error events to stderr as JSON lines, one per line.
 
 ### Exporting the consolidated table
 
