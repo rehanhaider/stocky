@@ -70,11 +70,15 @@ class RebuildDiff:
     removed: int
     changed: int
     unchanged: int
+    # Rows beyond the first for an ISIN that appears more than once; the comparison uses the first row.
+    duplicate_current: int
+    duplicate_rebuilt: int
     compared_columns: list[str]
     column_changes: dict[str, int]
     sample_added: list[dict[str, str | None]]
     sample_removed: list[dict[str, str | None]]
     sample_changed: list[RowChange]
+    sample_duplicates: list[str]
     current_provenance: BuildProvenance | None
 
 
@@ -266,10 +270,18 @@ def _normalize(value: object) -> str | None:
 
 
 def _records_by_isin(dataframe: pd.DataFrame, columns: list[str]) -> dict[str, dict[str, str | None]]:
-    return {
-        str(isin): {column: _normalize(value) for column, value in zip(columns, values, strict=True)}
-        for isin, *values in dataframe[["isin", *columns]].itertuples(index=False, name=None)
-    }
+    """Map each ISIN to its first row; a later row with the same ISIN is counted by ``_duplicate_isins``."""
+    records: dict[str, dict[str, str | None]] = {}
+    for isin, *values in dataframe[["isin", *columns]].itertuples(index=False, name=None):
+        records.setdefault(
+            str(isin), {column: _normalize(value) for column, value in zip(columns, values, strict=True)}
+        )
+    return records
+
+
+def _duplicate_isins(dataframe: pd.DataFrame) -> set[str]:
+    isins = dataframe["isin"].astype(str)
+    return set(isins[isins.duplicated()])
 
 
 def diff_consolidated(
@@ -281,7 +293,10 @@ def diff_consolidated(
     """Compare a rebuilt consolidated table, indexed by ISIN, with the table currently in the database.
 
     Empty strings and NULLs count as the same empty value. A table with an older layout is compared on
-    the columns both tables have, and ``compared_columns`` names them.
+    the columns both tables have, and ``compared_columns`` names them. When an ISIN appears more than
+    once, its first row is compared and the others are counted as duplicates, so added, changed,
+    unchanged, and duplicate rows add up to ``rebuilt_rows``, and kept, removed, and duplicate rows
+    add up to ``current_rows``.
     """
     if sample_size < 0:
         raise ValueError("Sample size must not be negative.")
@@ -326,11 +341,14 @@ def diff_consolidated(
         removed=len(removed),
         changed=len(changed),
         unchanged=len(after) - len(added) - len(changed),
+        duplicate_current=len(current) - len(before),
+        duplicate_rebuilt=len(rebuilt_frame) - len(after),
         compared_columns=compared,
         column_changes={column: count for column, count in column_changes.items() if count},
         sample_added=[{"isin": isin, **rebuilt_rows[isin]} for isin in sorted(added)[:sample_size]],
         sample_removed=[{"isin": isin, **current_rows[isin]} for isin in sorted(removed)[:sample_size]],
         sample_changed=sorted(changed, key=lambda change: change.isin)[:sample_size],
+        sample_duplicates=sorted(_duplicate_isins(current) | _duplicate_isins(rebuilt_frame))[:sample_size],
         current_provenance=current_provenance,
     )
 

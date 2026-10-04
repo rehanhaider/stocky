@@ -564,3 +564,23 @@ def test_diff_consolidated_compares_shared_columns_of_an_older_layout(tmp_path) 
 
     assert diff.compared_columns == ["nse_symbol"]
     assert (diff.changed, diff.unchanged) == (0, 1)
+
+
+def test_diff_consolidated_counts_duplicate_isins_so_every_row_is_accounted_for(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    reliance = ("INE002A01018", "equity", "RELIANCE", None, None, None, None, None, "RELIANCE.NS", None)
+    infy = ("INE009A01021", "equity", "INFY", None, None, None, None, None, "INFY.NS", None)
+    seed_consolidated(db_path, [reliance, reliance, infy])
+    rebuilt = pd.DataFrame(
+        [dict(zip(CONSOLIDATED_COLUMNS, row, strict=True)) for row in (reliance, infy, infy, infy)]
+    ).set_index("isin")
+    rebuilt.iloc[1, rebuilt.columns.get_loc("nse_symbol")] = "INFYNEW"
+
+    diff = diff_consolidated(db_path, rebuilt)
+
+    assert (diff.current_rows, diff.rebuilt_rows) == (3, 4)
+    assert (diff.duplicate_current, diff.duplicate_rebuilt) == (1, 2)
+    assert diff.added + diff.changed + diff.unchanged + diff.duplicate_rebuilt == diff.rebuilt_rows
+    assert diff.current_rows - diff.removed - diff.duplicate_current == diff.changed + diff.unchanged
+    assert (diff.changed, diff.unchanged) == (1, 1)
+    assert diff.sample_duplicates == ["INE002A01018", "INE009A01021"]

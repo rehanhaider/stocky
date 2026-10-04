@@ -301,11 +301,14 @@ def _print_rebuild_diff(diff: RebuildDiff) -> None:
     counts.add_row("Removed", str(diff.removed))
     counts.add_row("Changed", str(diff.changed))
     counts.add_row("Unchanged", str(diff.unchanged))
+    if diff.duplicate_current or diff.duplicate_rebuilt:
+        counts.add_row("Duplicate ISIN rows (current)", str(diff.duplicate_current))
+        counts.add_row("Duplicate ISIN rows (rebuilt)", str(diff.duplicate_rebuilt))
     for column, count in diff.column_changes.items():
         counts.add_row(f"  {_COLUMN_LABELS.get(column, column)} changed", str(count))
     console.print(counts)
 
-    if diff.sample_added or diff.sample_removed or diff.sample_changed:
+    if diff.sample_added or diff.sample_removed or diff.sample_changed or diff.sample_duplicates:
         samples = Table(title="Sample differences")
         samples.add_column("Change")
         samples.add_column("ISIN")
@@ -320,6 +323,8 @@ def _print_rebuild_diff(diff: RebuildDiff) -> None:
                 for column, (before, after) in change.changes.items()
             )
             samples.add_row("changed", change.isin, escape(detail))
+        for isin in diff.sample_duplicates:
+            samples.add_row("duplicate", isin, "ISIN appears more than once; the first row is compared")
         console.print(samples)
 
 
