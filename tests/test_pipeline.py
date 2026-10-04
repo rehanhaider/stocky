@@ -263,17 +263,39 @@ def test_rebuild_database_replaces_consolidated_table_without_backup(
     assert not backup_dir.exists()
 
 
+@pytest.mark.parametrize("backup_dir_blocked", [False, True])
+def test_rebuild_database_first_rebuild_skips_backup(tmp_path, market_csv_builder, backup_dir_blocked) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "output" / "stocky.db"
+    backup_dir = tmp_path / "backups"
+    if backup_dir_blocked:
+        blocked = tmp_path / "blocked"
+        blocked.write_text("Not a directory", encoding="utf-8")
+        backup_dir = blocked / "backups"
+
+    result = rebuild_database(paths, db_path=db_path, backup_dir=backup_dir, backup=True)
+
+    assert result.backup_path is None
+    assert not backup_dir.exists()
+    assert result.rows == 1
+    assert result.dry_run is False
+    with sqlite3.connect(db_path) as con:
+        assert con.execute(f"SELECT isin FROM {CONSOLIDATED_TABLE}").fetchall() == [("INE002A01018",)]
+
+
 def test_rebuild_database_backs_up_existing_table_before_overwrite(
     tmp_path, market_csv_builder, seed_consolidated
 ) -> None:
     paths = market_csv_builder(tmp_path / "inputs")
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path)
+    before = db_path.read_bytes()
 
     result = rebuild_database(paths, db_path=db_path, backup_dir=tmp_path / "backups", backup=True)
 
     assert result.backup_path is not None
     assert result.backup_path.exists()
+    assert result.backup_path.read_bytes() == before
     with sqlite3.connect(result.backup_path) as backup_con:
         backup_rows = backup_con.execute(f"SELECT COUNT(*) FROM {CONSOLIDATED_TABLE}").fetchone()[0]
     with sqlite3.connect(db_path) as live_con:

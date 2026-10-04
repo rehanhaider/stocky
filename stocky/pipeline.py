@@ -451,7 +451,6 @@ def rebuild_database(
     if dry_run:
         return result()
 
-    initialize_database(db_path)
     backup_path = None
     if backup:
         report("Backing up database")
