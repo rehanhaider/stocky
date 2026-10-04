@@ -298,7 +298,15 @@ _YAHOO_STATUS_NOTES = {
 
 
 def _format_crore(value: float | None) -> str:
-    return "-" if value is None else f"{value / CRORE:,.0f}"
+    if value is None:
+        return "-"
+    crore = value / CRORE
+    # Small caps keep their fraction, so a positive cap never reads as 0 and a fractional bound stays checkable.
+    if abs(crore) < 1:
+        return f"{crore:.2g}"
+    if abs(crore) < 100:
+        return f"{crore:.2f}"
+    return f"{crore:,.0f}"
 
 
 def _format_value(value: object) -> str:

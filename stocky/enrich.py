@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import re
 import sys
+import zlib
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, fields
 from io import BytesIO
@@ -194,8 +195,8 @@ def _ticker_payload(yahoo_ticker: str, response_json: bytes | None) -> tuple[str
         return YAHOO_MISSING, None
     try:
         response = decode_response_json(response_json)
-    except (OSError, ValueError):
-        # A blob that is not gzipped JSON holds nothing to read, like an error answer.
+    except (OSError, EOFError, ValueError, zlib.error):
+        # A blob that is not gzipped JSON, or is cut short, holds nothing to read, like an error answer.
         return YAHOO_UNUSABLE, None
     payload = response.get(yahoo_ticker) if isinstance(response, dict) else None
     if not is_usable_yahoo_payload(payload):
@@ -276,9 +277,12 @@ def read_enriched(
     return rows
 
 
-def lookup_fields(identifier: str, db_path: Path = DEFAULT_DB_PATH, *, limit: int = 20) -> list[EnrichedRow]:
+def lookup_fields(identifier: str, db_path: Path = DEFAULT_DB_PATH) -> list[EnrichedRow]:
     """Return the Yahoo fields of every instrument that exactly matches a symbol, ticker, ISIN, code, or name."""
-    result = search_instruments(identifier, db_path, exact=True, limit=limit)
+    result = search_instruments(identifier, db_path, exact=True)
+    if result.total > len(result.matches):
+        # One name can belong to many instruments, such as a fund house's schemes; show every one.
+        result = search_instruments(identifier, db_path, exact=True, limit=result.total)
     isins = [match.isin for match in result.matches if match.isin]
     if not isins:
         return []

@@ -1227,3 +1227,11 @@ def test_yahoo_enriched_writes_csv_to_stdout(tmp_path, seed_consolidated, runner
     assert result.exit_code == 0
     assert result.stdout.splitlines()[0].startswith("isin,exchange,yahoo_ticker,")
     assert len(result.stdout.splitlines()) == 5
+
+
+@pytest.mark.parametrize(
+    ("rupees", "shown"),
+    [(None, "-"), (2_100_635, "0.21"), (25 * 10_000_000 + 5_000_000, "25.50"), (1_348_695 * 10_000_000, "1,348,695")],
+)
+def test_format_crore_keeps_the_fraction_of_small_market_caps(rupees, shown) -> None:
+    assert cli._format_crore(rupees) == shown

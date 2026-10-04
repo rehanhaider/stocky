@@ -250,11 +250,17 @@ def test_read_enriched_marks_missing_and_unusable_responses(tmp_path, seed_conso
     with connect(db_path) as con:
         con.execute("INSERT INTO yahoo_responses VALUES ('BAD.NS', 'BAD', 'NSE', x'00ff', '2026-10-01', 'test')")
         con.execute("INSERT INTO consolidated (isin, ins_type, yq_ns) VALUES ('INE000A00005', 'equity', 'BAD.NS')")
+        truncated = encode_response_json({"CUT.NS": _payload("Cut Limited")})[:-8]
+        con.execute(
+            "INSERT INTO yahoo_responses VALUES ('CUT.NS', 'CUT', 'NSE', ?, '2026-10-01', 'test')", (truncated,)
+        )
+        con.execute("INSERT INTO consolidated (isin, ins_type, yq_ns) VALUES ('INE000A00006', 'equity', 'CUT.NS')")
 
     rows = {row.yahoo_ticker: row for row in read_enriched(db_path)}
 
     assert rows["OK.NS"].yahoo_status == "ok"
     assert rows["BAD.NS"].yahoo_status == "unusable"
+    assert rows["CUT.NS"].yahoo_status == "unusable"
     assert rows["OK.NS"].fetched_at == "2026-10-01T00:00:00+00:00"
     assert rows["GONE.NS"].yahoo_status == "unusable"
     # An index answer carries the index's figures, not the share's, so none of them are attached.
@@ -406,3 +412,28 @@ def test_export_enriched_writes_numeric_parquet_columns(globe_db, tmp_path) -> N
 def test_export_enriched_needs_a_format_for_stdout(globe_db) -> None:
     with pytest.raises(ValueError, match="Pass --format"):
         export_enriched(globe_db, output=None, format=None)
+
+
+def test_lookup_fields_returns_every_exact_match_beyond_the_search_default(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    # 25 schemes share one BSE name, more than a search returns by default.
+    seed_consolidated(
+        db_path,
+        [
+            (
+                f"INF000A{index:05d}",
+                "equity",
+                None,
+                f"FUND{index}",
+                None,
+                "SAME FUND HOUSE",
+                None,
+                None,
+                None,
+                f"FUND{index}.BO",
+            )
+            for index in range(25)
+        ],
+    )
+
+    assert len(lookup_fields("SAME FUND HOUSE", db_path)) == 25
