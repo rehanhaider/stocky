@@ -129,6 +129,7 @@ def test_rebuild_explicit_files_come_from_the_file_picker(tmp_path, market_csv_b
         await _press(stocky_app, pilot, "#rebuild-run")
 
         assert _squash("Validated 1 rows") in _log_text(stocky_app)
+        assert _squash("1 added, 0 removed, 0 changed, 0 unchanged") in _log_text(stocky_app)
         assert _static_text(stocky_app, "#rebuild-stage") == "Dry run complete"
 
     _run(stocky_app, scenario)

@@ -1,5 +1,6 @@
 import sys
 import types
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -49,6 +50,88 @@ class _FakeTicker:
                 "price": {"regularMarketPrice": 100},
             }
         }
+
+
+def _seed_fetched_at(db_path, yahoo_symbol: str, fetched_at: str) -> None:
+    _seed_cached_response(db_path, yahoo_symbol)
+    with connect(db_path) as con:
+        con.execute("UPDATE yahoo_responses SET fetched_at = ? WHERE yahoo_symbol = ?", (fetched_at, yahoo_symbol))
+
+
+def _days_ago(days: float) -> str:
+    return (datetime.now(UTC) - timedelta(days=days)).isoformat()
+
+
+def test_dry_run_symbols_selects_named_tickers_from_symbols_or_full_tickers(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(
+        db_path, [_ticker_row(f"INE{index:03d}", s) for index, s in enumerate(["RELIANCE", "INFY", "TCS"])]
+    )
+
+    manager = YahooDataManager(db_path)
+
+    assert manager.update_data(exchange="NSE", dry_run=True, symbols=["infy", "RELIANCE.NS", "INFY.NS"]).processed == 2
+    assert manager.update_data(exchange="BSE", dry_run=True, symbols=["TCS.BO"], limit=0).processed == 0
+
+
+def test_update_rejects_symbols_the_exchange_does_not_list(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path, [_ticker_row("INE001", "RELIANCE")])
+
+    with pytest.raises(ValueError, match=r"Not NSE tickers in yq_ns: GLOBE\.NS, RELIANCE\.BO$"):
+        YahooDataManager(db_path).update_data(
+            exchange="NSE", dry_run=True, symbols=["RELIANCE", "GLOBE", "RELIANCE.BO"]
+        )
+    with pytest.raises(ValueError, match="No symbols given"):
+        YahooDataManager(db_path).update_data(exchange="NSE", dry_run=True, symbols=[" "])
+
+
+def test_dry_run_stale_days_selects_missing_and_old_responses(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path, [_ticker_row(f"INE{index:03d}", s) for index, s in enumerate(["OLD", "FRESH", "NEW"])])
+    _seed_fetched_at(db_path, "OLD.BO", _days_ago(120))
+    _seed_fetched_at(db_path, "FRESH.BO", _days_ago(5))
+    # A naive timestamp from an older import counts as UTC.
+    _seed_fetched_at(db_path, "OLD.NS", (datetime.now(UTC) - timedelta(days=120)).replace(tzinfo=None).isoformat())
+
+    manager = YahooDataManager(db_path)
+
+    assert manager.update_data(exchange="BSE", dry_run=True, stale_days=90).processed == 2
+    assert manager.update_data(exchange="BSE", dry_run=True, stale_days=1).processed == 3
+    assert manager.update_data(exchange="BSE", dry_run=True, stale_days=90, missing_only=True).processed == 1
+    assert manager.update_data(exchange="NSE", dry_run=True, stale_days=90, symbols=["OLD", "FRESH"]).processed == 2
+
+
+def test_update_stale_days_fetches_only_the_selected_tickers(tmp_path, monkeypatch, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path, [_ticker_row(f"INE{index:03d}", s) for index, s in enumerate(["OLD", "FRESH"])])
+    _seed_fetched_at(db_path, "OLD.BO", _days_ago(120))
+    _seed_fetched_at(db_path, "FRESH.BO", _days_ago(5))
+    fetched: list[str] = []
+
+    class RecordingTicker(_FakeTicker):
+        @property
+        def all_modules(self):
+            fetched.append(self.symbol)
+            return super().all_modules
+
+    monkeypatch.setitem(sys.modules, "yahooquery", types.SimpleNamespace(Ticker=RecordingTicker))
+
+    result = YahooDataManager(db_path).update_data(exchange="BSE", stale_days=90)
+
+    assert fetched == ["OLD.BO"]
+    assert (result.processed, result.written) == (1, 1)
+
+
+def test_limit_applies_after_the_missing_only_selection(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path, [_ticker_row(f"INE{index:03d}", s) for index, s in enumerate(["AAA", "BBB", "CCC"])])
+    _seed_cached_response(db_path, "AAA.BO")
+
+    # The first ticker is cached, so a limit of one still finds a missing ticker to fetch.
+    assert (
+        YahooDataManager(db_path).update_data(exchange="BSE", dry_run=True, missing_only=True, limit=1).processed == 1
+    )
 
 
 def test_dry_run_missing_only_excludes_cached_symbols(tmp_path, seed_consolidated) -> None:

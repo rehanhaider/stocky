@@ -14,6 +14,9 @@ from stocky.config import DEFAULT_BACKUP_DIR, DEFAULT_DB_PATH
 
 CONSOLIDATED_TABLE = "consolidated"
 YAHOO_RESPONSES_TABLE = "yahoo_responses"
+# Every rebuild replaces the whole consolidated table, so one build's sources produced every row in it.
+PROVENANCE_BUILDS_TABLE = "provenance_builds"
+PROVENANCE_SOURCES_TABLE = "provenance_sources"
 
 # Yahoo quote types that describe a listed security. Yahoo labels some thinly traded Indian
 # shares MUTUALFUND and liquid ETFs BOND; an INDEX answer carries index levels, not the share's.
@@ -49,6 +52,28 @@ class ColumnCoverage:
 
 
 @dataclass(frozen=True)
+class SourceRecord:
+    """One input file of a rebuild, identified by content so a renamed or re-downloaded file is detectable."""
+
+    role: str
+    file_name: str
+    trade_date: str | None
+    sha256: str
+    size_bytes: int
+    modified_at: str
+    rows: int
+
+
+@dataclass(frozen=True)
+class BuildProvenance:
+    build_id: int
+    built_at: str
+    stocky_version: str
+    consolidated_rows: int
+    sources: list[SourceRecord]
+
+
+@dataclass(frozen=True)
 class DatabaseStatus:
     db_path: Path
     db_size_bytes: int
@@ -61,6 +86,7 @@ class DatabaseStatus:
     yahoo_newest_fetch: str | None
     yahoo_cached_ns: int
     yahoo_cached_bo: int
+    provenance: BuildProvenance | None = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +135,101 @@ def initialize_database(db_path: Path = DEFAULT_DB_PATH) -> None:
             ON {YAHOO_RESPONSES_TABLE} (exchange)
             """
         )
+
+
+def initialize_provenance(con: sqlite3.Connection) -> None:
+    con.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {PROVENANCE_BUILDS_TABLE} (
+            build_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            built_at TEXT NOT NULL,
+            stocky_version TEXT NOT NULL,
+            consolidated_rows INTEGER NOT NULL
+        )
+        """
+    )
+    con.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {PROVENANCE_SOURCES_TABLE} (
+            build_id INTEGER NOT NULL REFERENCES {PROVENANCE_BUILDS_TABLE} (build_id),
+            role TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            trade_date TEXT,
+            sha256 TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            modified_at TEXT NOT NULL,
+            rows INTEGER NOT NULL,
+            PRIMARY KEY (build_id, role)
+        )
+        """
+    )
+
+
+def record_build_provenance(
+    con: sqlite3.Connection,
+    *,
+    built_at: str,
+    stocky_version: str,
+    consolidated_rows: int,
+    sources: Sequence[SourceRecord],
+) -> int:
+    """Append one build and its source files; earlier builds stay as history."""
+    initialize_provenance(con)
+    cursor = con.execute(
+        f"INSERT INTO {PROVENANCE_BUILDS_TABLE} (built_at, stocky_version, consolidated_rows) VALUES (?, ?, ?)",
+        (built_at, stocky_version, consolidated_rows),
+    )
+    build_id = int(cursor.lastrowid)
+    con.executemany(
+        f"""
+        INSERT INTO {PROVENANCE_SOURCES_TABLE}
+            (build_id, role, file_name, trade_date, sha256, size_bytes, modified_at, rows)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                build_id,
+                source.role,
+                source.file_name,
+                source.trade_date,
+                source.sha256,
+                source.size_bytes,
+                source.modified_at,
+                source.rows,
+            )
+            for source in sources
+        ],
+    )
+    return build_id
+
+
+def read_latest_provenance(con: sqlite3.Connection) -> BuildProvenance | None:
+    """Return the build that wrote the current consolidated table, or None for a database built without provenance."""
+    if not table_exists(con, PROVENANCE_BUILDS_TABLE) or not table_exists(con, PROVENANCE_SOURCES_TABLE):
+        return None
+    build = con.execute(
+        f"""
+        SELECT build_id, built_at, stocky_version, consolidated_rows
+        FROM {PROVENANCE_BUILDS_TABLE}
+        ORDER BY build_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if build is None:
+        return None
+    sources = [
+        SourceRecord(*row)
+        for row in con.execute(
+            f"""
+            SELECT role, file_name, trade_date, sha256, size_bytes, modified_at, rows
+            FROM {PROVENANCE_SOURCES_TABLE}
+            WHERE build_id = ?
+            ORDER BY role
+            """,
+            (build[0],),
+        ).fetchall()
+    ]
+    return BuildProvenance(*build, sources=sources)
 
 
 def table_exists(con: sqlite3.Connection, table_name: str) -> bool:
@@ -160,6 +281,17 @@ def read_available_yahoo_symbols(db_path: Path = DEFAULT_DB_PATH) -> set[str]:
             return set()
         rows = con.execute(f"SELECT yahoo_symbol FROM {YAHOO_RESPONSES_TABLE}").fetchall()
     return {row[0] for row in rows}
+
+
+def read_yahoo_fetch_times(db_path: Path = DEFAULT_DB_PATH) -> dict[str, str]:
+    """Map each cached Yahoo ticker to the time its response was fetched."""
+    if not db_path.exists():
+        return {}
+
+    with connect(db_path) as con:
+        if not table_exists(con, YAHOO_RESPONSES_TABLE):
+            return {}
+        return dict(con.execute(f"SELECT yahoo_symbol, fetched_at FROM {YAHOO_RESPONSES_TABLE}").fetchall())
 
 
 def fetch_consolidated_symbols(
@@ -225,6 +357,7 @@ def read_status(db_path: Path = DEFAULT_DB_PATH) -> DatabaseStatus:
         yahoo_newest_fetch: str | None = None
         yahoo_cached_ns = 0
         yahoo_cached_bo = 0
+        provenance = read_latest_provenance(con)
         if table_exists(con, YAHOO_RESPONSES_TABLE):
             yahoo_rows, yahoo_oldest_fetch, yahoo_newest_fetch = con.execute(
                 f"SELECT COUNT(*), MIN(fetched_at), MAX(fetched_at) FROM {YAHOO_RESPONSES_TABLE}"
@@ -260,6 +393,7 @@ def read_status(db_path: Path = DEFAULT_DB_PATH) -> DatabaseStatus:
         yahoo_newest_fetch=yahoo_newest_fetch,
         yahoo_cached_ns=yahoo_cached_ns,
         yahoo_cached_bo=yahoo_cached_bo,
+        provenance=provenance,
     )
 
 

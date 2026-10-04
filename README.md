@@ -92,7 +92,8 @@ uv run stocky
 ```
 
 The rebuild option lists the BSE/NSE bhavcopy pairs it found in `data/marketData/bhavCopies`, lets you pick one by row
-number or trade date, and previews the resolved files and their row counts before you confirm the rebuild. The Yahoo
+number or trade date, and previews the resolved files, their row counts, and the row changes before you confirm the
+rebuild. The Yahoo
 option asks for the exchange, an optional limit, and whether to fetch only uncached tickers, then shows how many tickers
 it will fetch and a progress bar while it runs. Both options run exactly what `stocky rebuild` and
 `stocky yahoo update` run.
@@ -123,6 +124,19 @@ Rebuild the SQLite database using the latest matching BSE/NSE bhavcopy pair:
 ```bash
 uv run stocky rebuild --latest
 ```
+
+Preview a rebuild without writing anything. The dry run compares the rebuilt table with the current one by ISIN and
+shows the source row counts, the added, removed, changed, and unchanged rows, per-column change counts, and up to
+`--sample` example rows of each kind (default 5):
+
+```bash
+uv run stocky rebuild --latest --dry-run
+```
+
+Every rebuild records its source files in the database: the BSE and NSE bhavcopy names with their trade dates and the
+Zerodha instruments file, each with its SHA-256 hash, size, modification time, and usable row count, plus the build
+time and Stocky version. The `provenance_builds` and `provenance_sources` tables keep every build; `stocky status`
+shows the latest one. Only file names are stored, not local paths.
 
 Rebuild for a specific source date:
 
@@ -155,10 +169,27 @@ rule. A run without `--missing-only` refreshes every saved answer:
 uv run stocky yahoo update --exchange BSE
 ```
 
-Show database statistics, per-column coverage, and Yahoo cache freshness:
+Refresh part of the cache instead of every ticker. `--symbols` takes tickers or exchange symbols listed for the
+exchange, `--stale-days N` keeps tickers with no response or one fetched more than N days ago, and `--missing-only`
+keeps tickers with no response. The options combine, and `--limit` caps the selection after them:
+
+```bash
+uv run stocky yahoo update --exchange NSE --symbols RELIANCE,INFY.NS
+uv run stocky yahoo update --exchange BSE --stale-days 90 --limit 500
+```
+
+Show database statistics, per-column coverage, Yahoo cache freshness, and the source files of the latest rebuild:
 
 ```bash
 uv run stocky status
+```
+
+Validate the database and write the refresh summary. It lists the source files, every table's row count, column
+coverage, Yahoo cache dates, and the tickers without a Yahoo response, and exits with status 1 when a check fails. See
+the [quarterly refresh checklist](docs/refresh-checklist.md) for the full refresh steps:
+
+```bash
+uv run stocky summary --output data/output/refresh-summary.md
 ```
 
 Look up an instrument by symbol, ISIN, BSE scrip code, or name fragment. When nothing matches directly, `query` shows the closest names:
@@ -202,7 +233,7 @@ uv run stocky explore
 uv run stocky status --json
 ```
 
-The `status`, `query`, `lookup`, `explore`, `rebuild`, `yahoo update`, `yahoo import-cache`, `mf import`, and `mf query` commands accept `--json` and print JSON on stdout. With `--json`, `yahoo update` also writes its progress and error events to stderr as JSON lines, one per line.
+The `status`, `summary`, `query`, `lookup`, `explore`, `rebuild`, `yahoo update`, `yahoo import-cache`, `mf import`, and `mf query` commands accept `--json` and print JSON on stdout. With `--json`, `yahoo update` also writes its progress and error events to stderr as JSON lines, one per line.
 
 ### Exporting the consolidated table
 
@@ -260,8 +291,8 @@ There are six options.
 
 **1. Rebuild stocky.db from scratch:**
 Lists the BSE/NSE bhavcopy pairs found in `data/marketData/bhavCopies`, takes a row number or a trade date, previews the
-resolved files with their row counts, and on confirmation backs up the existing database and replaces the `consolidated`
-table. Requires bhavcopies and Zerodha instruments in their respective locations.
+resolved files with their row counts and how the rebuilt table differs from the current one, and on confirmation backs
+up the existing database and replaces the `consolidated` table. Requires bhavcopies and Zerodha instruments in their respective locations.
 
 **2. Update Yahoo data:**
 Asks for the exchange, optional limit, and whether to fetch only uncached tickers, reports how many tickers it will
@@ -271,7 +302,8 @@ fetch, then downloads Yahoo data using yahooquery and stores responses in `data/
 Imports legacy files from `data/marketData/yahoo/apiResponse` into the `yahoo_responses` SQLite table.
 
 **4. Show database status:**
-Prints row counts, per-column coverage, and Yahoo cache freshness for `data/output/stocky.db`.
+Prints row counts, per-column coverage, Yahoo cache freshness, and the source files of the latest rebuild for
+`data/output/stocky.db`.
 
 **5. Look up an instrument:**
 Searches the `consolidated` table across every symbol column (NSE, BSE, Zerodha, Yahoo, ISIN, name).

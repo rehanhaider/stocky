@@ -26,17 +26,20 @@ from stocky.config import (
     DEFAULT_ZERODHA_MF_INSTRUMENTS,
 )
 from stocky.database import (
+    BuildProvenance,
     DatabaseStatus,
     InstrumentMatch,
     SearchResult,
+    SourceRecord,
     import_yahoo_json_cache,
     read_status,
     search_instruments,
 )
 from stocky.export import SNAPSHOT_FORMATS, create_snapshot, export_consolidated, export_tickers
 from stocky.mutual_funds import MutualFundSearchResult, import_mutual_funds, search_mutual_funds
-from stocky.pipeline import RebuildResult, SourcePreview, preview_sources, rebuild_database
+from stocky.pipeline import DEFAULT_DIFF_SAMPLE_SIZE, RebuildDiff, RebuildResult, SourcePreview, rebuild_database
 from stocky.sources import BhavcopyPaths, list_bhavcopy_pairs, resolve_bhavcopy_paths
+from stocky.summary import DEFAULT_MISSING_SAMPLE_SIZE, build_refresh_summary, render_markdown
 from stocky.yahoo import ProgressCallback, YahooDataManager, ticker_column
 
 console = Console()
@@ -177,6 +180,44 @@ def _print_status(status: DatabaseStatus) -> None:
         yahoo.add_row(label, value)
     console.print(yahoo)
 
+    _print_provenance(status.provenance)
+
+
+_SOURCE_LABELS = {
+    "bse_bhavcopy": "BSE bhavcopy",
+    "nse_bhavcopy": "NSE bhavcopy",
+    "zerodha_instruments": "Zerodha instruments",
+}
+
+
+def _print_sources(title: str, sources: list[SourceRecord]) -> None:
+    table = Table(title=title)
+    table.add_column("Source")
+    table.add_column("File")
+    table.add_column("Trade date")
+    table.add_column("Rows", justify="right")
+    table.add_column("SHA-256")
+    for source in sources:
+        table.add_row(
+            _SOURCE_LABELS.get(source.role, source.role),
+            escape(source.file_name),
+            source.trade_date or "-",
+            str(source.rows),
+            source.sha256[:12],
+        )
+    console.print(table)
+
+
+def _print_provenance(provenance: BuildProvenance | None) -> None:
+    if provenance is None:
+        console.print("[yellow]No source provenance recorded. Run 'stocky rebuild' to record it.[/yellow]")
+        return
+    _print_sources(
+        f"Built {_format_timestamp(provenance.built_at)} UTC by Stocky {provenance.stocky_version} "
+        f"({provenance.consolidated_rows} rows)",
+        provenance.sources,
+    )
+
 
 def _print_search_result(term: str, result: SearchResult, *, numbered: bool = False) -> None:
     if result.total == 0:
@@ -241,7 +282,58 @@ def _print_equivalents(match: InstrumentMatch, term: str | None = None) -> None:
     console.print(table)
 
 
+def _sample_label(row: dict[str, str | None]) -> str:
+    return row.get("nse_symbol") or row.get("bse_symbol") or row.get("bse_sc_name") or "-"
+
+
+def _print_rebuild_diff(diff: RebuildDiff) -> None:
+    if diff.current_provenance is not None:
+        _print_sources("Current database was built from", diff.current_provenance.sources)
+    elif diff.current_rows:
+        console.print("[dim]The current database records no source provenance.[/dim]")
+
+    counts = Table(title="Row changes")
+    counts.add_column("Field")
+    counts.add_column("Rows", justify="right")
+    counts.add_row("Current rows", str(diff.current_rows))
+    counts.add_row("Rebuilt rows", str(diff.rebuilt_rows))
+    counts.add_row("Added", str(diff.added))
+    counts.add_row("Removed", str(diff.removed))
+    counts.add_row("Changed", str(diff.changed))
+    counts.add_row("Unchanged", str(diff.unchanged))
+    if diff.duplicate_current or diff.duplicate_rebuilt:
+        counts.add_row("Duplicate ISIN rows (current)", str(diff.duplicate_current))
+        counts.add_row("Duplicate ISIN rows (rebuilt)", str(diff.duplicate_rebuilt))
+    for column, count in diff.column_changes.items():
+        counts.add_row(f"  {_COLUMN_LABELS.get(column, column)} changed", str(count))
+    console.print(counts)
+
+    if diff.sample_added or diff.sample_removed or diff.sample_changed or diff.sample_duplicates:
+        samples = Table(title="Sample differences")
+        samples.add_column("Change")
+        samples.add_column("ISIN")
+        samples.add_column("Detail")
+        for row in diff.sample_added:
+            samples.add_row("added", str(row["isin"]), escape(_sample_label(row)))
+        for row in diff.sample_removed:
+            samples.add_row("removed", str(row["isin"]), escape(_sample_label(row)))
+        for change in diff.sample_changed:
+            detail = "; ".join(
+                f"{_COLUMN_LABELS.get(column, column)}: {before or '-'} -> {after or '-'}"
+                for column, (before, after) in change.changes.items()
+            )
+            samples.add_row("changed", change.isin, escape(detail))
+        for isin in diff.sample_duplicates:
+            samples.add_row("duplicate", isin, "ISIN appears more than once; the first row is compared")
+        console.print(samples)
+
+
 def _print_rebuild_result(result: RebuildResult) -> None:
+    if result.diff is not None:
+        _print_rebuild_diff(result.diff)
+    if result.sources:
+        _print_sources("Rebuilt from", result.sources)
+
     table = Table(title="Rebuild summary")
     table.add_column("Field")
     table.add_column("Value")
@@ -330,12 +422,29 @@ def _interactive_rebuild() -> None:
 
     try:
         with console.status("Reading source files..."):
-            preview = preview_sources(paths)
+            planned = _rebuild_impl(
+                bse_bhavcopy=paths.bse,
+                nse_bhavcopy=paths.nse,
+                zerodha_instruments=paths.zerodha,
+                db_path=DEFAULT_DB_PATH,
+                dry_run=True,
+            )
     except Exception as exc:
         console.print(f"[red]Cannot rebuild: {escape(str(exc))}[/red]")
         return
 
+    rows = {source.role: source.rows for source in planned.sources}
+    preview = SourcePreview(
+        bse_bhavcopy=paths.bse,
+        bse_rows=rows["bse_bhavcopy"],
+        nse_bhavcopy=paths.nse,
+        nse_rows=rows["nse_bhavcopy"],
+        zerodha_instruments=paths.zerodha,
+        zerodha_rows=rows["zerodha_instruments"],
+    )
     _print_source_preview(preview, DEFAULT_DB_PATH)
+    if planned.diff is not None:
+        _print_rebuild_diff(planned.diff)
     if not typer.confirm("Rebuild the consolidated table from these files?"):
         return
 
@@ -530,6 +639,7 @@ def _rebuild_impl(
     db_path: Path = DEFAULT_DB_PATH,
     dry_run: bool = False,
     no_backup: bool = False,
+    sample_size: int = DEFAULT_DIFF_SAMPLE_SIZE,
     progress: Callable[[str], None] | None = None,
 ) -> RebuildResult:
     paths = resolve_bhavcopy_paths(
@@ -540,7 +650,14 @@ def _rebuild_impl(
         zerodha=zerodha_instruments,
         latest=latest,
     )
-    return rebuild_database(paths, db_path=db_path, backup=not no_backup, dry_run=dry_run, progress=progress)
+    return rebuild_database(
+        paths,
+        db_path=db_path,
+        backup=not no_backup,
+        dry_run=dry_run,
+        sample_size=sample_size,
+        progress=progress,
+    )
 
 
 @app.command()
@@ -562,12 +679,19 @@ def rebuild(
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite output DB path.")] = DEFAULT_DB_PATH,
     dry_run: Annotated[
         bool,
-        typer.Option("--dry-run", help="Validate and build data without writing SQLite output."),
+        typer.Option(
+            "--dry-run",
+            help="Build the table and compare it with the current database without writing anything.",
+        ),
     ] = False,
     no_backup: Annotated[
         bool,
         typer.Option("--no-backup", help="Do not back up an existing DB before writing."),
     ] = False,
+    sample: Annotated[
+        int,
+        typer.Option("--sample", min=0, help="Number of added, removed, and changed rows to show from the comparison."),
+    ] = DEFAULT_DIFF_SAMPLE_SIZE,
     json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
 ) -> None:
     """Rebuild the consolidated instruments table."""
@@ -582,6 +706,7 @@ def rebuild(
             db_path=db_path,
             dry_run=dry_run,
             no_backup=no_backup,
+            sample_size=sample,
         )
     except Exception as exc:
         (error_console if json_output else console).print(f"[red]{exc}[/red]")
@@ -609,6 +734,44 @@ def status(
         _emit_json(result)
     else:
         _print_status(result)
+
+
+@app.command()
+def summary(
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Markdown file to write. Omit to print it on stdout."),
+    ] = None,
+    sample: Annotated[
+        int,
+        typer.Option("--sample", min=0, help="Number of tickers without a Yahoo response to list per exchange."),
+    ] = DEFAULT_MISSING_SAMPLE_SIZE,
+    db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the summary as JSON on stdout.")] = False,
+) -> None:
+    """Validate the database and write the refresh summary: sources, row counts, and Yahoo gaps.
+
+    Exits with status 1 when a validation check fails, after writing the summary.
+    """
+    try:
+        result = build_refresh_summary(db_path, sample_size=sample)
+    except Exception as exc:
+        error_console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    if json_output:
+        _emit_json(result)
+    elif output is None:
+        sys.stdout.write(render_markdown(result))
+    else:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(render_markdown(result), encoding="utf-8")
+        error_console.print(f"Wrote the refresh summary to {escape(str(output))}.")
+
+    if not result.passed:
+        failed = ", ".join(check.name for check in result.checks if not check.passed)
+        error_console.print(f"[red]Validation failed: {escape(failed)}.[/red]")
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -902,6 +1065,22 @@ def yahoo_update(
         bool,
         typer.Option("--missing-only", help="Only fetch tickers that have no cached response yet."),
     ] = False,
+    symbols: Annotated[
+        str | None,
+        typer.Option(
+            "--symbols",
+            help="Comma-separated tickers or exchange symbols to fetch, such as RELIANCE.NS,INFY. "
+            "Each must be listed for --exchange.",
+        ),
+    ] = None,
+    stale_days: Annotated[
+        float | None,
+        typer.Option(
+            "--stale-days",
+            min=0,
+            help="Only fetch tickers with no cached response or one fetched more than this many days ago.",
+        ),
+    ] = None,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Print the result as JSON on stdout and progress events as JSON lines on stderr."),
@@ -915,6 +1094,8 @@ def yahoo_update(
                 dry_run=dry_run,
                 limit=limit,
                 missing_only=missing_only,
+                symbols=_split_columns(symbols),
+                stale_days=stale_days,
                 progress=print_progress,
             )
     except Exception as exc:
