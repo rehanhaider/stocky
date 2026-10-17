@@ -17,6 +17,7 @@ from rich.progress import BarColumn, MofNCompleteColumn, Progress, TaskID, TextC
 from rich.table import Table
 
 from stocky import __version__
+from stocky.bse_debt import BseDebtSearchResult, import_bse_debt, newest_bse_debt_archive, search_bse_debt
 from stocky.config import (
     DEFAULT_BHAVCOPY_DIR,
     DEFAULT_DB_PATH,
@@ -55,6 +56,7 @@ console = Console()
 error_console = Console(stderr=True)
 app = typer.Typer(help="Consolidate Indian market instrument symbols.", no_args_is_help=False)
 yahoo_app = typer.Typer(help="Manage Yahoo Finance cache data.")
+debt_app = typer.Typer(help="Map BSE debt identifiers from debt bhavcopies.")
 mf_app = typer.Typer(help="Map mutual fund ISINs to Zerodha scheme identifiers.")
 
 PLAIN_PROGRESS_EVERY = 50
@@ -275,6 +277,37 @@ def _print_mf_search_result(term: str, result: MutualFundSearchResult) -> None:
         table.add_column(header, no_wrap=field in ("isin", "zd_mf"))
     for match in result.matches:
         table.add_row(*(getattr(match, field) or "-" for _, field in _MF_FIELDS))
+    console.print(table)
+
+    if result.total > len(result.matches):
+        console.print(f"[dim]Showing {len(result.matches)} of {result.total} matches. Raise --limit to see more.[/dim]")
+
+
+# Field labels and BseDebtMatch attributes in display order for BSE debt search results.
+_DEBT_FIELDS = (
+    ("Family", "family"),
+    ("Trade date", "trade_date"),
+    ("Scrip code", "scrip_code"),
+    ("Symbol", "symbol"),
+    ("ISIN", "isin"),
+    ("Name", "name"),
+    ("Coupon %", "coupon_pct"),
+    ("Maturity", "maturity_date"),
+    ("Face value", "face_value"),
+)
+
+
+def _print_debt_search_result(term: str, result: BseDebtSearchResult) -> None:
+    if result.total == 0:
+        console.print(f"[yellow]No BSE debt instruments match '{escape(term)}'.[/yellow]")
+        return
+
+    table = Table(title=f"BSE debt matching '{escape(term)}'")
+    for header, field in _DEBT_FIELDS:
+        # Identifiers stay whole so they can be copied; names and labels wrap instead.
+        table.add_column(header, no_wrap=field in ("isin", "scrip_code", "symbol"))
+    for match in result.matches:
+        table.add_row(*(getattr(match, field) or "-" for _, field in _DEBT_FIELDS))
     console.print(table)
 
     if result.total > len(result.matches):
@@ -1364,8 +1397,52 @@ def mf_query(
         _print_mf_search_result(term, result)
 
 
+@debt_app.command("import")
+def debt_import(
+    file: Annotated[Path | None, typer.Option("--file", help="BSE debt bhavcopy zip path.")] = None,
+    db_path: Annotated[Path, typer.Option("--db", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
+) -> None:
+    """Replace the bse_debt table with the instruments in a BSE debt bhavcopy archive."""
+    try:
+        result = import_bse_debt(file if file is not None else newest_bse_debt_archive(), db_path)
+    except Exception as exc:
+        (error_console if json_output else console).print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    if json_output:
+        _emit_json(result)
+    else:
+        console.print(
+            f"[green]Imported {result.rows} BSE debt rows from {escape(str(result.file))} "
+            f"into {escape(str(result.db_path))}.[/green]"
+        )
+
+
+@debt_app.command("query")
+def debt_query(
+    term: Annotated[str, typer.Argument(help="ISIN, scrip code, symbol, or name fragment.")],
+    limit: Annotated[int, typer.Option("--limit", help="Maximum number of matches to display.")] = 20,
+    exact: Annotated[bool, typer.Option("--exact", help="Match the ISIN, scrip code, or symbol exactly.")] = False,
+    db_path: Annotated[Path, typer.Option("--db", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
+) -> None:
+    """Look up BSE debt by ISIN, scrip code, symbol, or name."""
+    try:
+        result = search_bse_debt(term, db_path, limit=limit, exact=exact)
+    except Exception as exc:
+        (error_console if json_output else console).print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    if json_output:
+        _emit_json({"term": term, **dataclasses.asdict(result)})
+    else:
+        _print_debt_search_result(term, result)
+
+
 app.add_typer(yahoo_app, name="yahoo")
 app.add_typer(mf_app, name="mf")
+app.add_typer(debt_app, name="debt")
 
 
 def main() -> None:
