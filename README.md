@@ -46,6 +46,26 @@ from `consolidated`, and `stocky rebuild` does not change it.
 
 Zerodha's file has no AMFI scheme code, so the table does not carry one.
 
+## The bse_debt table
+
+`bse_debt` holds identifier mappings from the three CSV members in a BSE debt bhavcopy archive. It is separate
+from `consolidated`, and `stocky rebuild` does not change it. The same ISIN can appear in more than one family.
+
+| Column | Source |
+| --- | --- |
+| `family` | `fgroup`, `icdm`, or `wdm`, from the member filename |
+| `trade_date` | The date in the member filename, stored as `YYYY-MM-DD` |
+| `scrip_code` | `fgroup` `Security_cd` or `wdm` `Scrip Code`; empty for `icdm` |
+| `symbol` | `fgroup` `sc_name` or `wdm` `Security Code`; empty for `icdm` |
+| `isin` | `fgroup` or `icdm` `ISIN No.`; empty for `wdm` |
+| `name` | `icdm` `Issuer Name` or `wdm` `Security Description`; empty for `fgroup` |
+| `coupon_pct` | `fgroup` `COUP0N (%)`, `icdm` `Coupon (%)`, or `wdm` `Coupon Rate (%)` |
+| `maturity_date` | `Maturity Date` or `wdm` `MaturityDate`, stored as `YYYY-MM-DD` |
+| `face_value` | `fgroup` `FACE VALUE` or `icdm` `Face Value`; empty for `wdm` |
+
+Numbers keep the source's trimmed text, and empty cells are SQL NULL. Each family's identifier must be unique:
+`scrip_code` for `fgroup` and `wdm`, and `isin` for `icdm`. Prices, volumes, and turnover are not stored.
+
 # Installation
 Clone the repository.
 
@@ -74,12 +94,16 @@ uv sync
     - This project treats exchange bhavcopies as manually downloaded local inputs; do not add automated NSE downloads here.
 3. Zerodha Instruments: Download from `https://api.kite.trade/instruments`
 4. Optional, for mutual funds: Zerodha mutual fund instruments from `https://api.kite.trade/mf/instruments`
+5. Optional, for BSE debt: download `https://www.bseindia.com/download/BhavCopy/Debt/DEBTBHAVCOPY<DDMMYYYY>.zip`,
+   replacing `<DDMMYYYY>` with the trade date, such as `16102026`.
 
 ### Then place these files in the following locations
 1. BSE Bhavcopy: `data/marketData/bhavCopies`
 2. NSE Bhavcopy: `data/marketData/bhavCopies`. Current NSE UDiFF `.csv.zip` files can be used directly.
 3. Zerodha Instruments: `data/marketData/zerodha`. The filename should be `instruments.csv`
 4. Zerodha mutual fund instruments: `data/marketData/zerodha`. The filename should be `mf_instruments.csv`
+5. BSE debt bhavcopy archives: `data/marketData/bhavCopies/bseDebt`. Keep the `DEBTBHAVCOPY<DDMMYYYY>.zip` filename;
+   the loader reads `fgroup<DDMMYYYY>.csv`, `icdm<DDMMYYYY>.csv`, and `wdm<DDMMYYYY>.csv` directly from the zip.
 
 Raw market data files are local inputs and are ignored by Git. The durable output is `data/output/stocky.db`.
 
@@ -221,6 +245,23 @@ uv run stocky mf query "parag parikh"
 uv run stocky mf query INF179K01KG8 --exact
 ```
 
+Load the newest BSE debt archive by the date in its filename into the `bse_debt` table. Each run replaces that table
+in one transaction and leaves the others as they are; `--file` reads a different archive and `--db` selects a database.
+The 2021 `BSE-DE-*.csv` files are not used:
+
+```bash
+uv run stocky debt import
+uv run stocky debt import --file data/marketData/bhavCopies/bseDebt/DEBTBHAVCOPY16102026.zip --db data/output/stocky.db
+```
+
+Look up BSE debt by ISIN, scrip code, symbol, or name fragment. `--exact` matches the ISIN, scrip code, or symbol only.
+`--limit` sets the maximum number of results:
+
+```bash
+uv run stocky debt query "GOI" --limit 10
+uv run stocky debt query INE0K0Y08060 --exact
+```
+
 Search and inspect equivalent identifiers in a standalone explorer:
 
 ```bash
@@ -233,7 +274,7 @@ uv run stocky explore
 uv run stocky status --json
 ```
 
-The `status`, `summary`, `query`, `lookup`, `explore`, `rebuild`, `screen`, `yahoo update`, `yahoo import-cache`, `yahoo fields`, `mf import`, and `mf query` commands accept `--json` and print JSON on stdout. With `--json`, `yahoo update` also writes its progress and error events to stderr as JSON lines, one per line.
+The `status`, `summary`, `query`, `lookup`, `explore`, `rebuild`, `screen`, `yahoo update`, `yahoo import-cache`, `yahoo fields`, `mf import`, `mf query`, `debt import`, and `debt query` commands accept `--json` and print JSON on stdout. With `--json`, `yahoo update` also writes its progress and error events to stderr as JSON lines, one per line.
 
 ### Exporting the consolidated table
 
