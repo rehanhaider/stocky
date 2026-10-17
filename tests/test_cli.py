@@ -3,6 +3,7 @@ import sqlite3
 import sys
 import types
 from datetime import date
+from zipfile import ZipFile
 
 import pytest
 import typer
@@ -1235,3 +1236,139 @@ def test_yahoo_enriched_writes_csv_to_stdout(tmp_path, seed_consolidated, runner
 )
 def test_format_crore_keeps_the_fraction_of_small_market_caps(rupees, shown) -> None:
     assert cli._format_crore(rupees) == shown
+
+
+def _write_cli_debt_zip(path):
+    with ZipFile(path, "w") as archive:
+        archive.writestr(
+            "fgroup16102026.csv",
+            "Security_cd,sc_name,ISIN No.,FACE VALUE,COUP0N (%),Maturity Date\n"
+            "978034,0MCIBPL28,INE0K0Y08060,100000.00,,\n",
+        )
+        archive.writestr(
+            "icdm16102026.csv",
+            "Security Code,Issuer Name,Coupon (%),Maturity Date,ISIN No.,Face Value\n"
+            "INE0K0Y08060,Industrial Finance,7.4000,18/06/2031,INE0K0Y08060,100000.00\n",
+        )
+        archive.writestr(
+            "wdm16102026.csv",
+            "Scrip Code,Security Code,Security Description,Coupon Rate (%),MaturityDate\n"
+            "400536,667GOI50,6.67 GOI BOND 2050,6.67,17/12/2050\n",
+        )
+    return path
+
+
+def test_debt_import_and_query_commands(tmp_path, monkeypatch, runner) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    db_path = tmp_path / "stocky.db"
+    debt_path = _write_cli_debt_zip(tmp_path / "debt.zip")
+
+    imported = runner.invoke(app, ["debt", "import", "--file", str(debt_path), "--db", str(db_path)])
+    queried = runner.invoke(app, ["debt", "query", "INE", "--limit", "1", "--db", str(db_path)])
+
+    assert imported.exit_code == 0
+    assert "Imported 3 BSE debt rows" in imported.stdout
+    assert queried.exit_code == 0
+    assert "BSE debt matching 'INE'" in queried.stdout
+    assert "INE0K0Y08060" in queried.stdout
+    assert "Industrial Finance" not in queried.stdout
+    assert "Showing 1 of 2 matches" in queried.stdout
+
+
+@pytest.mark.parametrize("trade_date", ["2026-10-16", "2026-10-15"])
+def test_debt_query_keeps_metadata_readable_at_80_columns(tmp_path, monkeypatch, runner, trade_date) -> None:
+    monkeypatch.setenv("COLUMNS", "80")
+    db_path = tmp_path / "stocky.db"
+    debt_path = _write_cli_debt_zip(tmp_path / "debt.zip")
+    imported = runner.invoke(app, ["debt", "import", "--file", str(debt_path), "--db", str(db_path)])
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "UPDATE bse_debt SET name = 'TAPIR CONSTRUCTIONS LIMITED', trade_date = ? WHERE family = 'icdm'",
+            (trade_date,),
+        )
+        con.execute("UPDATE bse_debt SET symbol = '1250TCL30' WHERE family = 'fgroup'")
+
+    queried = runner.invoke(app, ["debt", "query", "INE0K0Y08060", "--exact", "--db", str(db_path)])
+
+    assert imported.exit_code == 0
+    assert queried.exit_code == 0
+    lines = queried.stdout.splitlines()
+    dates = ", ".join(sorted({"2026-10-16", trade_date}))
+    assert lines[-1] == f"Trade date: {dates}"
+    assert all("Trade date" not in line for line in lines[:-1])
+    assert any(all(value in line for value in ("2031-06-18", "INE0K0Y08060", "100000.00", "7.4000")) for line in lines)
+    assert any(all(value in line for value in ("fgroup", "978034", "1250TCL30")) for line in lines)
+    name_cells = [line.split("│")[4].strip() for line in lines if "│" in line]
+    assert name_cells == ["-", "TAPIR", "CONSTRUCTIONS", "LIMITED"]
+    assert all(len(line) <= 80 for line in lines)
+    assert "…" not in queried.stdout
+
+
+def test_debt_commands_print_json(tmp_path, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    debt_path = _write_cli_debt_zip(tmp_path / "debt.zip")
+
+    imported = runner.invoke(app, ["debt", "import", "--file", str(debt_path), "--db", str(db_path), "--json"])
+    queried = runner.invoke(app, ["debt", "query", "INE0K0Y08060", "--exact", "--db", str(db_path), "--json"])
+
+    assert imported.exit_code == 0
+    assert json.loads(imported.stdout) == {"rows": 3, "db_path": str(db_path), "file": str(debt_path)}
+    assert queried.exit_code == 0
+    payload = json.loads(queried.stdout)
+    assert payload["term"] == "INE0K0Y08060"
+    assert payload["total"] == 2
+    assert payload["matches"][0]["symbol"] == "0MCIBPL28"
+    assert payload["matches"][1]["coupon_pct"] == "7.4000"
+    assert all(match["trade_date"] == "2026-10-16" for match in payload["matches"])
+
+
+def test_debt_import_defaults_to_newest_archive(tmp_path, monkeypatch, runner) -> None:
+    debt_dir = tmp_path / "data/marketData/bhavCopies/bseDebt"
+    debt_dir.mkdir(parents=True)
+    _write_cli_debt_zip(debt_dir / "DEBTBHAVCOPY31122025.zip")
+    newest = _write_cli_debt_zip(debt_dir / "DEBTBHAVCOPY16102026.zip")
+    monkeypatch.chdir(tmp_path)
+
+    imported = runner.invoke(app, ["debt", "import", "--json"])
+
+    assert imported.exit_code == 0
+    payload = json.loads(imported.stdout)
+    assert payload["file"] == str(newest.relative_to(tmp_path))
+    assert payload["db_path"] == "data/output/stocky.db"
+    assert payload["rows"] == 3
+
+
+def test_debt_query_reports_no_match_and_missing_table(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    missing_table = runner.invoke(app, ["debt", "query", "GOI", "--db", str(db_path), "--json"])
+    runner.invoke(
+        app, ["debt", "import", "--file", str(_write_cli_debt_zip(tmp_path / "debt.zip")), "--db", str(db_path)]
+    )
+    no_match = runner.invoke(app, ["debt", "query", "nothing-like-this", "--db", str(db_path)])
+
+    assert missing_table.exit_code == 1
+    assert missing_table.stdout == ""
+    assert "stocky debt import" in missing_table.stderr
+    assert no_match.exit_code == 0
+    assert "No BSE debt instruments match 'nothing-like-this'" in no_match.stdout
+
+
+def test_debt_import_reports_missing_file(tmp_path, runner) -> None:
+    result = runner.invoke(
+        app, ["debt", "import", "--file", str(tmp_path / "absent.zip"), "--db", str(tmp_path / "x.db")]
+    )
+
+    assert result.exit_code == 1
+    assert "BSE debt bhavcopy not found" in result.stdout
+
+
+def test_debt_import_reports_missing_archive_on_stderr_with_json(tmp_path, monkeypatch, runner) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["debt", "import", "--json"])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "BSE debt bhavcopy archives not found" in result.stderr
