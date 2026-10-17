@@ -1275,23 +1275,32 @@ def test_debt_import_and_query_commands(tmp_path, monkeypatch, runner) -> None:
     assert "Showing 1 of 2 matches" in queried.stdout
 
 
-def test_debt_query_keeps_metadata_readable_at_80_columns(tmp_path, monkeypatch, runner) -> None:
+@pytest.mark.parametrize("trade_date", ["2026-10-16", "2026-10-15"])
+def test_debt_query_keeps_metadata_readable_at_80_columns(tmp_path, monkeypatch, runner, trade_date) -> None:
     monkeypatch.setenv("COLUMNS", "80")
     db_path = tmp_path / "stocky.db"
     debt_path = _write_cli_debt_zip(tmp_path / "debt.zip")
     imported = runner.invoke(app, ["debt", "import", "--file", str(debt_path), "--db", str(db_path)])
     with sqlite3.connect(db_path) as con:
-        con.execute("UPDATE bse_debt SET name = 'TAPIR CONSTRUCTIONS LIMITED' WHERE family = 'icdm'")
+        con.execute(
+            "UPDATE bse_debt SET name = 'TAPIR CONSTRUCTIONS LIMITED', trade_date = ? WHERE family = 'icdm'",
+            (trade_date,),
+        )
+        con.execute("UPDATE bse_debt SET symbol = '1250TCL30' WHERE family = 'fgroup'")
 
     queried = runner.invoke(app, ["debt", "query", "INE0K0Y08060", "--exact", "--db", str(db_path)])
 
     assert imported.exit_code == 0
     assert queried.exit_code == 0
-    assert "2031-06-18" in queried.stdout
-    assert "7.4000" in queried.stdout
-    assert "100000.00" in queried.stdout
-    assert "INE0K0Y08060" in queried.stdout
-    assert "978034" in queried.stdout
+    lines = queried.stdout.splitlines()
+    dates = ", ".join(sorted({"2026-10-16", trade_date}))
+    assert lines[-1] == f"Trade date: {dates}"
+    assert all("Trade date" not in line for line in lines[:-1])
+    assert any(all(value in line for value in ("2031-06-18", "INE0K0Y08060", "100000.00", "7.4000")) for line in lines)
+    assert any(all(value in line for value in ("fgroup", "978034", "1250TCL30")) for line in lines)
+    name_cells = [line.split("│")[4].strip() for line in lines if "│" in line]
+    assert name_cells == ["-", "TAPIR", "CONSTRUCTIONS", "LIMITED"]
+    assert all(len(line) <= 80 for line in lines)
     assert "…" not in queried.stdout
 
 
@@ -1310,6 +1319,7 @@ def test_debt_commands_print_json(tmp_path, runner) -> None:
     assert payload["total"] == 2
     assert payload["matches"][0]["symbol"] == "0MCIBPL28"
     assert payload["matches"][1]["coupon_pct"] == "7.4000"
+    assert all(match["trade_date"] == "2026-10-16" for match in payload["matches"])
 
 
 def test_debt_import_defaults_to_newest_archive(tmp_path, monkeypatch, runner) -> None:

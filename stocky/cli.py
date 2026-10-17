@@ -286,14 +286,13 @@ def _print_mf_search_result(term: str, result: MutualFundSearchResult) -> None:
 # Field labels and BseDebtMatch attributes in display order for BSE debt search results.
 _DEBT_FIELDS = (
     ("Family", "family"),
-    ("Trade date", "trade_date"),
-    ("Scrip code", "scrip_code"),
+    ("Scrip", "scrip_code"),
     ("Symbol", "symbol"),
     ("ISIN", "isin"),
     ("Name", "name"),
-    ("Coupon %", "coupon_pct"),
+    ("Cpn %", "coupon_pct"),
     ("Maturity", "maturity_date"),
-    ("Face value", "face_value"),
+    ("Face", "face_value"),
 )
 
 
@@ -302,22 +301,27 @@ def _print_debt_search_result(term: str, result: BseDebtSearchResult) -> None:
         console.print(f"[yellow]No BSE debt instruments match '{escape(term)}'.[/yellow]")
         return
 
-    table = Table(title=f"BSE debt matching '{escape(term)}'", padding=(0, 0))
-    identifier_widths = {"isin": 12, "scrip_code": 6, "trade_date": 10, "maturity_date": 10}
+    table = Table(title=f"BSE debt matching '{escape(term)}'", padding=(0, 0), show_edge=False)
+    identifier_widths = {"family": 6, "isin": 12, "scrip_code": 6, "maturity_date": 10}
     for header, field in _DEBT_FIELDS:
-        # Keep codes, dates and numbers readable; fold other values without losing text.
-        min_width = identifier_widths.get(field)
-        if field in ("coupon_pct", "face_value"):
-            min_width = max(len(getattr(match, field) or "-") for match in result.matches)
+        if field == "name":
+            table.add_column(header, overflow="fold", ratio=1)
+            continue
+        min_width = max(len(getattr(match, field) or "-") for match in result.matches)
+        min_width = max(min_width, identifier_widths.get(field, 0))
+        fold_symbol = field == "symbol" and min_width > 10
+        if fold_symbol:
+            min_width = 10
         table.add_column(
             header,
-            overflow="fold",
-            no_wrap=field in identifier_widths or field in ("coupon_pct", "face_value"),
+            overflow="fold" if fold_symbol else "ellipsis",
+            no_wrap=not fold_symbol,
             min_width=min_width,
         )
     for match in result.matches:
         table.add_row(*(getattr(match, field) or "-" for _, field in _DEBT_FIELDS))
     console.print(table)
+    console.print(f"Trade date: {', '.join(sorted({match.trade_date for match in result.matches}))}")
 
     if result.total > len(result.matches):
         console.print(f"[dim]Showing {len(result.matches)} of {result.total} matches. Raise --limit to see more.[/dim]")
