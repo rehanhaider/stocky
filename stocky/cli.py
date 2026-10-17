@@ -302,10 +302,19 @@ def _print_debt_search_result(term: str, result: BseDebtSearchResult) -> None:
         console.print(f"[yellow]No BSE debt instruments match '{escape(term)}'.[/yellow]")
         return
 
-    table = Table(title=f"BSE debt matching '{escape(term)}'")
+    table = Table(title=f"BSE debt matching '{escape(term)}'", padding=(0, 0))
+    identifier_widths = {"isin": 12, "scrip_code": 6, "trade_date": 10, "maturity_date": 10}
     for header, field in _DEBT_FIELDS:
-        # Identifiers stay whole so they can be copied; names and labels wrap instead.
-        table.add_column(header, no_wrap=field in ("isin", "scrip_code", "symbol"))
+        # Keep codes, dates and numbers readable; fold other values without losing text.
+        min_width = identifier_widths.get(field)
+        if field in ("coupon_pct", "face_value"):
+            min_width = max(len(getattr(match, field) or "-") for match in result.matches)
+        table.add_column(
+            header,
+            overflow="fold",
+            no_wrap=field in identifier_widths or field in ("coupon_pct", "face_value"),
+            min_width=min_width,
+        )
     for match in result.matches:
         table.add_row(*(getattr(match, field) or "-" for _, field in _DEBT_FIELDS))
     console.print(table)

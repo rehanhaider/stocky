@@ -1275,6 +1275,26 @@ def test_debt_import_and_query_commands(tmp_path, monkeypatch, runner) -> None:
     assert "Showing 1 of 2 matches" in queried.stdout
 
 
+def test_debt_query_keeps_metadata_readable_at_80_columns(tmp_path, monkeypatch, runner) -> None:
+    monkeypatch.setenv("COLUMNS", "80")
+    db_path = tmp_path / "stocky.db"
+    debt_path = _write_cli_debt_zip(tmp_path / "debt.zip")
+    imported = runner.invoke(app, ["debt", "import", "--file", str(debt_path), "--db", str(db_path)])
+    with sqlite3.connect(db_path) as con:
+        con.execute("UPDATE bse_debt SET name = 'TAPIR CONSTRUCTIONS LIMITED' WHERE family = 'icdm'")
+
+    queried = runner.invoke(app, ["debt", "query", "INE0K0Y08060", "--exact", "--db", str(db_path)])
+
+    assert imported.exit_code == 0
+    assert queried.exit_code == 0
+    assert "2031-06-18" in queried.stdout
+    assert "7.4000" in queried.stdout
+    assert "100000.00" in queried.stdout
+    assert "INE0K0Y08060" in queried.stdout
+    assert "978034" in queried.stdout
+    assert "…" not in queried.stdout
+
+
 def test_debt_commands_print_json(tmp_path, runner) -> None:
     db_path = tmp_path / "stocky.db"
     debt_path = _write_cli_debt_zip(tmp_path / "debt.zip")
