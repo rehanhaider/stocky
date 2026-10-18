@@ -344,7 +344,7 @@ _INDICES_FIELDS = (
 
 
 def _print_indices_search_result(term: str, result: IndicesSearchResult) -> None:
-    if result.total == 0:
+    if result.total == 0 or not result.matches:
         console.print(f"[yellow]No indices match '{escape(term)}'.[/yellow]")
         return
 

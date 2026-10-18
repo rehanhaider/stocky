@@ -121,6 +121,8 @@ def search_indices(
         params["exchange"] = exchange.strip().upper()
 
     with connect(db_path) as con:
+        # Keep the count and matching rows in one snapshot during concurrent imports.
+        con.execute("BEGIN")
         if not table_exists(con, INDICES_TABLE):
             raise RuntimeError(
                 f"Database table '{INDICES_TABLE}' does not exist in {db_path}. Run 'stocky indices import' first."

@@ -196,6 +196,26 @@ def test_search_indices_matches_fragments_and_exact_identifiers(tmp_path) -> Non
     assert search_indices("nifty", db_path, exact=True).total == 0
 
 
+def test_search_indices_reads_count_and_matches_in_one_transaction(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "stocky.db"
+    import_indices(_write_indices_csv(tmp_path / "instruments.csv"), db_path)
+    statements = []
+    with sqlite3.connect(db_path) as con:
+        con.set_trace_callback(statements.append)
+        monkeypatch.setattr(indices, "connect", lambda path: con)
+
+        result = search_indices("nifty", db_path)
+
+        assert not con.in_transaction
+
+    count_position = next(i for i, sql in enumerate(statements) if sql.startswith("SELECT COUNT(*)"))
+    rows_position = next(i for i, sql in enumerate(statements) if sql.lstrip().startswith("SELECT exchange,"))
+    assert statements.count("BEGIN") == 1
+    assert statements.count("COMMIT") == 1
+    assert statements.index("BEGIN") < count_position < rows_position < statements.index("COMMIT")
+    assert result.total == len(result.matches) == 2
+
+
 def test_search_indices_matches_name_fragments_but_not_exact_names(tmp_path) -> None:
     db_path = tmp_path / "stocky.db"
     row = (*INDICES_ROWS[0][:3], "Large cap benchmark", *INDICES_ROWS[0][4:])

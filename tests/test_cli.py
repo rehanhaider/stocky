@@ -1643,6 +1643,15 @@ def test_indices_query_reports_no_match_and_missing_table(tmp_path, seed_consoli
     assert "No indices match 'nothing-like-this'" in no_match.stdout
 
 
+def test_indices_query_reports_no_match_when_matches_are_empty(monkeypatch, runner) -> None:
+    monkeypatch.setattr(cli, "search_indices", lambda *args, **kwargs: cli.IndicesSearchResult(matches=[], total=131))
+
+    result = runner.invoke(app, ["indices", "query", "NIFTY"])
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "No indices match 'NIFTY'."
+
+
 @pytest.mark.parametrize("json_output", [False, True])
 def test_indices_import_reports_missing_file(tmp_path, runner, json_output) -> None:
     result = runner.invoke(
