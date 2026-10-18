@@ -91,6 +91,46 @@ must be present and unique. The symbol has an index. Price fields are not stored
 is imported; NCO commodity spot rows are excluded. The local `instruments.csv` snapshot is dated 2026-07-19.
 Yahoo index tickers are not mapped.
 
+## The broker_symbols table
+
+`broker_symbols` holds cash-market identifiers for Groww, Upstox, and Alice Blue on NSE and BSE. It is separate
+from `consolidated`, and `stocky rebuild` keeps it. Each import replaces only the selected broker's rows in one
+transaction. A failed broker import keeps its previous rows. Imports of earlier brokers remain committed if a
+later broker fails.
+
+| Column | Source |
+| --- | --- |
+| `broker` | `groww`, `upstox`, or `aliceblue` |
+| `exchange` | `NSE` or `BSE`, from the source exchange or Upstox segment |
+| `exchange_token` | Groww/Upstox `exchange_token`; Alice Blue `Token` |
+| `isin` | Groww/Upstox `isin`; Alice Blue lookup in `consolidated` at import time |
+| `symbol` | Groww/Upstox `trading_symbol`; Alice Blue `Trading Symbol` |
+| `broker_key` | Groww `groww_symbol`; Upstox `instrument_key`; Alice Blue `Token` |
+| `name` | Groww/Upstox `name`; Alice Blue `Instrument Name` |
+
+All seven columns are TEXT. Values are trimmed, and empty cells become SQL NULL. The primary key is
+`broker, exchange, exchange_token`; tokens must be present and unique within a broker and exchange. ISIN and
+symbol have indexes. Prices, lot sizes, and tick sizes are not stored.
+
+Only these rows are imported:
+
+- Groww: `exchange` is `NSE` or `BSE`, `segment` is `CASH`, and `instrument_type` is `EQ`. CASH `IDX` rows are excluded.
+- Upstox: `segment` is `NSE_EQ` or `BSE_EQ`, and `instrument_type` is not `INDEX`, `IDX`, `FUT`, `CE`, `PE`, or `W1`.
+  `W1` is a warrant series. All derivative, commodity, currency, and index segments are excluded.
+- Alice Blue: `Exch` is `NSE`, `Exchange Segment` is `nse_cm`, and `Instrument Type` is `0`, `2`, or `4`;
+  or `Exch` is `BSE`, `Exchange Segment` is `bse_cm`, and `Instrument Type` is `E`. Index segments and
+  NSE type `3` warrants are excluded.
+
+Cash rows include shares, funds, and bonds. No futures, options, warrants, or index rows are imported. Indices
+belong in `indices`. Alice Blue has no ISIN column. Its BSE Token matches `consolidated.bse_sc_code`; its NSE
+Symbol matches `consolidated.nse_symbol` only for Group Name `EQ`, `BE`, `BZ`, or `GB`. For example, an NSE
+`RELIANCE-EQ` row uses Symbol `RELIANCE` to obtain `INE002A01018`. An NSE row in series `N0` stays unmatched
+even if its Symbol also exists in `consolidated`. Unmatched ISINs are NULL. Run `stocky rebuild` before importing
+Alice Blue, and reimport it after rebuilding to refresh its ISIN mappings.
+
+The local source files were last modified on 2026-10-17 UTC. They do not provide a whole-file snapshot date;
+that modification date does not prove when the brokers generated their lists.
+
 # Installation
 Clone the repository.
 
@@ -323,6 +363,35 @@ uv run stocky indices query 256265 --exact
 uv run stocky indices query "NIFTY BANK" --json
 ```
 
+Download the broker files manually into the ignored folders:
+
+| Download | Local path |
+| --- | --- |
+| https://growwapi-assets.groww.in/instruments/instrument.csv | `data/marketData/brokers/groww/instrument.csv` |
+| https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz | `data/marketData/brokers/upstox/complete.json.gz` |
+| https://v2api.aliceblueonline.com/restpy/static/contract_master/NSE.csv | `data/marketData/brokers/aliceblue/NSE.csv` |
+| https://v2api.aliceblueonline.com/restpy/static/contract_master/BSE.csv | `data/marketData/brokers/aliceblue/BSE.csv` |
+
+Import all three brokers, or repeat `--broker` to select brokers. File options override the default paths;
+`--db` selects the database. The output lists rows, rows with an ISIN, and rows whose ISIN is in `consolidated`
+for each imported broker and exchange:
+
+```bash
+uv run stocky brokers import
+uv run stocky brokers import --broker groww --broker upstox
+uv run stocky brokers import --broker aliceblue --aliceblue-nse data/marketData/brokers/aliceblue/NSE.csv --aliceblue-bse data/marketData/brokers/aliceblue/BSE.csv --db data/output/stocky.db
+```
+
+Query by exact ISIN, symbol, exchange token, or broker key, or by symbol/name fragment. `--exact` disables
+fragment matching. Exact identifier matches come first, then name and exchange token. Broker and exchange
+break ties. `--broker` selects one broker; `--exchange` ignores case; `--limit` caps displayed rows:
+
+```bash
+uv run stocky brokers query INE002A01018 --exact
+uv run stocky brokers query "Reliance" --broker upstox --exchange nse --limit 10
+uv run stocky brokers query 'NSE_EQ|INE002A01018' --exact --json
+```
+
 Search and inspect equivalent identifiers in a standalone explorer:
 
 ```bash
@@ -335,7 +404,7 @@ uv run stocky explore
 uv run stocky status --json
 ```
 
-The `status`, `summary`, `query`, `lookup`, `explore`, `rebuild`, `screen`, `yahoo update`, `yahoo import-cache`, `yahoo fields`, `mf import`, `mf query`, `debt import`, `debt query`, `indices import`, and `indices query` commands accept `--json` and print JSON on stdout. With `--json`, `yahoo update` also writes its progress and error events to stderr as JSON lines, one per line.
+The `status`, `summary`, `query`, `lookup`, `explore`, `rebuild`, `screen`, `yahoo update`, `yahoo import-cache`, `yahoo fields`, `mf import`, `mf query`, `debt import`, `debt query`, `indices import`, `indices query`, and `brokers query` commands accept `--json` and print JSON on stdout. With `--json`, `yahoo update` also writes its progress and error events to stderr as JSON lines, one per line.
 
 ### Exporting the consolidated table
 

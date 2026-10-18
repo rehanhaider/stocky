@@ -7,6 +7,11 @@ inputs, so step 1 stays manual.
    - the BSE and NSE bhavcopies for one trade date into `data/marketData/bhavCopies`;
    - the Zerodha instruments file from `https://api.kite.trade/instruments` to `data/marketData/zerodha/instruments.csv`.
    - for mutual fund imports, AMFI scheme codes from `https://www.amfiindia.com/spages/NAVAll.txt` to `data/marketData/amfi/NAVAll.txt`.
+   - broker cash-market files:
+     - `https://growwapi-assets.groww.in/instruments/instrument.csv` to `data/marketData/brokers/groww/instrument.csv`;
+     - `https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz` to `data/marketData/brokers/upstox/complete.json.gz`;
+     - `https://v2api.aliceblueonline.com/restpy/static/contract_master/NSE.csv` to `data/marketData/brokers/aliceblue/NSE.csv`;
+     - `https://v2api.aliceblueonline.com/restpy/static/contract_master/BSE.csv` to `data/marketData/brokers/aliceblue/BSE.csv`.
 2. Preview the rebuild. Nothing is written:
 
    ```bash
@@ -35,6 +40,10 @@ inputs, so step 1 stays manual.
    For market indices, run `uv run stocky indices import` using the Zerodha instruments file from step 1.
 
    For BSE debt, download the archive into `data/marketData/bhavCopies/bseDebt` and run `uv run stocky debt import`.
+
+   For broker cash instruments, run `uv run stocky brokers import` after the rebuild. This imports all three
+   brokers, excludes derivatives and indices, and refreshes Alice Blue's ISIN lookups against `consolidated`.
+   Each broker replaces its own rows in one transaction; a later failure does not undo earlier brokers.
 
 5. Validate the database and write the summary. The command exits with status 1 when a check fails:
 
