@@ -68,6 +68,24 @@ from `consolidated`, and `stocky rebuild` does not change it. The same ISIN can 
 Numbers keep the source's trimmed text, and empty cells are SQL NULL. Each family's identifier must be unique:
 `scrip_code` for `fgroup` and `wdm`, and `isin` for `icdm`. Prices, volumes, and turnover are not stored.
 
+## The indices table
+
+`indices` holds market index identifiers from rows whose `segment` is `INDICES` in Zerodha's instruments file.
+It is separate from `consolidated`, and `stocky rebuild` does not change it.
+
+| Column | Source |
+| --- | --- |
+| `exchange` | Zerodha's `exchange`, such as `NSE`, `BSE`, `GLOBAL`, `MCX`, or `NSEIX` |
+| `zd_symbol` | Zerodha's `tradingsymbol`, such as `NIFTY 50` |
+| `name` | Zerodha's index `name` |
+| `zd_instrument_token` | Zerodha's `instrument_token`, the primary key, such as `256265` |
+| `exchange_token` | Zerodha's `exchange_token`, such as `1001` |
+
+All columns are TEXT, values keep the source's trimmed text, and empty cells are SQL NULL. Instrument tokens
+must be present and unique. The symbol has an index. Price fields are not stored. Only the `INDICES` segment
+is imported; NCO commodity spot rows are excluded. The local `instruments.csv` snapshot is dated 2026-07-19.
+Yahoo index tickers are not mapped.
+
 # Installation
 Clone the repository.
 
@@ -270,6 +288,25 @@ uv run stocky debt query "GOI" --limit 10
 uv run stocky debt query INE0K0Y08060 --exact
 ```
 
+Load market indices from `data/marketData/zerodha/instruments.csv` into the `indices` table. Each run replaces
+that table in one transaction and leaves the others as they are. A failed import keeps the previous table.
+`--file` reads a different instruments file and `--db` selects a database:
+
+```bash
+uv run stocky indices import
+uv run stocky indices import --file data/marketData/zerodha/instruments.csv --db data/output/stocky.db
+```
+
+Look up an index by exact symbol, instrument token, or exchange token, or by symbol or name fragment.
+`--exact` matches only the three identifiers. `--exchange` filters by exchange without regard to case;
+`--limit` sets the maximum number of results:
+
+```bash
+uv run stocky indices query "NIFTY" --exchange nse --limit 10
+uv run stocky indices query 256265 --exact
+uv run stocky indices query "NIFTY BANK" --json
+```
+
 Search and inspect equivalent identifiers in a standalone explorer:
 
 ```bash
@@ -282,7 +319,7 @@ uv run stocky explore
 uv run stocky status --json
 ```
 
-The `status`, `summary`, `query`, `lookup`, `explore`, `rebuild`, `screen`, `yahoo update`, `yahoo import-cache`, `yahoo fields`, `mf import`, `mf query`, `debt import`, and `debt query` commands accept `--json` and print JSON on stdout. With `--json`, `yahoo update` also writes its progress and error events to stderr as JSON lines, one per line.
+The `status`, `summary`, `query`, `lookup`, `explore`, `rebuild`, `screen`, `yahoo update`, `yahoo import-cache`, `yahoo fields`, `mf import`, `mf query`, `debt import`, `debt query`, `indices import`, and `indices query` commands accept `--json` and print JSON on stdout. With `--json`, `yahoo update` also writes its progress and error events to stderr as JSON lines, one per line.
 
 ### Exporting the consolidated table
 
