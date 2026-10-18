@@ -47,6 +47,7 @@ from stocky.enrich import (
     screen_instruments,
 )
 from stocky.export import SNAPSHOT_FORMATS, create_snapshot, export_consolidated, export_tickers
+from stocky.indices import IndicesSearchResult, import_indices, search_indices
 from stocky.mutual_funds import MutualFundSearchResult, import_mutual_funds, search_mutual_funds
 from stocky.pipeline import DEFAULT_DIFF_SAMPLE_SIZE, RebuildDiff, RebuildResult, SourcePreview, rebuild_database
 from stocky.sources import BhavcopyPaths, list_bhavcopy_pairs, resolve_bhavcopy_paths
@@ -57,6 +58,7 @@ console = Console()
 error_console = Console(stderr=True)
 app = typer.Typer(help="Consolidate Indian market instrument symbols.", no_args_is_help=False)
 yahoo_app = typer.Typer(help="Manage Yahoo Finance cache data.")
+indices_app = typer.Typer(help="Map market index identifiers from Zerodha instruments.")
 debt_app = typer.Typer(help="Map BSE debt identifiers from debt bhavcopies.")
 mf_app = typer.Typer(help="Map mutual fund ISINs to Zerodha identifiers and AMFI scheme codes.")
 
@@ -326,6 +328,36 @@ def _print_debt_search_result(term: str, result: BseDebtSearchResult) -> None:
         table.add_row(*(getattr(match, field) or "-" for _, field in _DEBT_FIELDS))
     console.print(table)
     console.print(f"Trade date: {', '.join(sorted({match.trade_date for match in result.matches}))}")
+
+    if result.total > len(result.matches):
+        console.print(f"[dim]Showing {len(result.matches)} of {result.total} matches. Raise --limit to see more.[/dim]")
+
+
+# Field labels and IndexMatch attributes in display order for index search results.
+_INDICES_FIELDS = (
+    ("Exchange", "exchange"),
+    ("Symbol", "zd_symbol"),
+    ("Name", "name"),
+    ("ZD token", "zd_instrument_token"),
+    ("Ex token", "exchange_token"),
+)
+
+
+def _print_indices_search_result(term: str, result: IndicesSearchResult) -> None:
+    if result.total == 0:
+        console.print(f"[yellow]No indices match '{escape(term)}'.[/yellow]")
+        return
+
+    table = Table(title=f"Indices matching '{escape(term)}'", padding=(0, 0), show_edge=False)
+    for header, field in _INDICES_FIELDS:
+        if field == "name":
+            table.add_column(header, overflow="fold", ratio=1)
+            continue
+        min_width = max(len(getattr(match, field) or "-") for match in result.matches)
+        table.add_column(header, no_wrap=True, min_width=min_width)
+    for match in result.matches:
+        table.add_row(*(getattr(match, field) or "-" for _, field in _INDICES_FIELDS))
+    console.print(table)
 
     if result.total > len(result.matches):
         console.print(f"[dim]Showing {len(result.matches)} of {result.total} matches. Raise --limit to see more.[/dim]")
@@ -1462,9 +1494,56 @@ def debt_query(
         _print_debt_search_result(term, result)
 
 
+@indices_app.command("import")
+def indices_import(
+    file: Annotated[Path, typer.Option("--file", help="Zerodha instruments CSV path.")] = DEFAULT_ZERODHA_INSTRUMENTS,
+    db_path: Annotated[Path, typer.Option("--db", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
+) -> None:
+    """Replace the indices table with the INDICES rows in Zerodha's instruments file."""
+    try:
+        result = import_indices(file, db_path)
+    except Exception as exc:
+        (error_console if json_output else console).print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    if json_output:
+        _emit_json(result)
+    else:
+        console.print(
+            f"[green]Imported {result.rows} indices from {escape(str(result.file))} "
+            f"into {escape(str(result.db_path))}.[/green]"
+        )
+
+
+@indices_app.command("query")
+def indices_query(
+    term: Annotated[str, typer.Argument(help="Symbol, instrument token, exchange token, or name fragment.")],
+    limit: Annotated[int, typer.Option("--limit", help="Maximum number of matches to display.")] = 20,
+    exact: Annotated[
+        bool, typer.Option("--exact", help="Match the symbol, instrument token, or exchange token exactly.")
+    ] = False,
+    exchange: Annotated[str | None, typer.Option("--exchange", help="Filter by exchange, case-insensitive.")] = None,
+    db_path: Annotated[Path, typer.Option("--db", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
+) -> None:
+    """Look up a market index by symbol, instrument token, exchange token, or name."""
+    try:
+        result = search_indices(term, db_path, limit=limit, exact=exact, exchange=exchange)
+    except Exception as exc:
+        (error_console if json_output else console).print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    if json_output:
+        _emit_json({"term": term, **dataclasses.asdict(result)})
+    else:
+        _print_indices_search_result(term, result)
+
+
 app.add_typer(yahoo_app, name="yahoo")
 app.add_typer(mf_app, name="mf")
 app.add_typer(debt_app, name="debt")
+app.add_typer(indices_app, name="indices")
 
 
 def main() -> None:

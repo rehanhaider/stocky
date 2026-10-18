@@ -1521,3 +1521,145 @@ def test_debt_import_reports_missing_archive_on_stderr_with_json(tmp_path, monke
     assert result.exit_code == 1
     assert result.stdout == ""
     assert "BSE debt bhavcopy archives not found" in result.stderr
+
+
+def _write_cli_indices_csv(path):
+    path.write_text(
+        "instrument_token,exchange_token,tradingsymbol,name,segment,exchange\n"
+        "256265,1001,NIFTY 50,NIFTY 50,INDICES,NSE\n"
+        "260105,1016,NIFTY BANK,NIFTY BANK,INDICES,NSE\n"
+        "265,1,SENSEX,SENSEX,INDICES,BSE\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_indices_import_and_query_commands(tmp_path, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    path = _write_cli_indices_csv(tmp_path / "instruments.csv")
+
+    imported = runner.invoke(app, ["indices", "import", "--file", str(path), "--db", str(db_path)])
+    queried = runner.invoke(app, ["indices", "query", "nifty", "--limit", "1", "--db", str(db_path)])
+
+    assert imported.exit_code == 0
+    assert "Imported 3 indices" in imported.stdout
+    assert queried.exit_code == 0
+    assert "Indices matching 'nifty'" in queried.stdout
+    assert "NIFTY 50" in queried.stdout
+    assert "NIFTY BANK" not in queried.stdout
+    assert "Showing 1 of 2 matches" in queried.stdout
+
+
+def test_indices_query_keeps_identifiers_and_wraps_long_name_at_80_columns(tmp_path, monkeypatch, runner) -> None:
+    monkeypatch.setenv("COLUMNS", "80")
+    db_path = tmp_path / "stocky.db"
+    path = _write_cli_indices_csv(tmp_path / "instruments.csv")
+    imported = runner.invoke(app, ["indices", "import", "--file", str(path), "--db", str(db_path)])
+    name = "NIFTY BANK LONG BENCHMARK NAME FOR LARGE BANKING COMPANIES"
+    with sqlite3.connect(db_path) as con:
+        con.execute("UPDATE indices SET name = ? WHERE zd_instrument_token = '260105'", (name,))
+
+    queried = runner.invoke(app, ["indices", "query", "NIFTY BANK", "--exact", "--db", str(db_path)])
+
+    assert imported.exit_code == 0
+    assert queried.exit_code == 0
+    lines = queried.stdout.splitlines()
+    assert all(len(line) <= 80 for line in lines)
+    assert any(all(value in line for value in ("NSE", "NIFTY BANK", "260105", "1016")) for line in lines)
+    name_cells = [line.split("│")[2].strip() for line in lines if "│" in line]
+    assert len(name_cells) > 1
+    assert "".join(name_cells).replace(" ", "") == name.replace(" ", "")
+    assert "…" not in queried.stdout
+
+
+def test_indices_commands_print_json_and_filter_exchange(tmp_path, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    path = _write_cli_indices_csv(tmp_path / "instruments.csv")
+
+    imported = runner.invoke(app, ["indices", "import", "--file", str(path), "--db", str(db_path), "--json"])
+    queried = runner.invoke(
+        app, ["indices", "query", "1016", "--exact", "--exchange", "nse", "--db", str(db_path), "--json"]
+    )
+    filtered = runner.invoke(app, ["indices", "query", "NIFTY", "--exchange", "bse", "--db", str(db_path), "--json"])
+
+    assert imported.exit_code == 0
+    assert json.loads(imported.stdout) == {"rows": 3, "db_path": str(db_path), "file": str(path)}
+    assert queried.exit_code == 0
+    assert json.loads(queried.stdout) == {
+        "term": "1016",
+        "total": 1,
+        "matches": [
+            {
+                "exchange": "NSE",
+                "zd_symbol": "NIFTY BANK",
+                "name": "NIFTY BANK",
+                "zd_instrument_token": "260105",
+                "exchange_token": "1016",
+            }
+        ],
+    }
+    assert filtered.exit_code == 0
+    assert json.loads(filtered.stdout)["total"] == 0
+
+
+def test_indices_import_defaults_to_zerodha_file(tmp_path, monkeypatch, runner) -> None:
+    directory = tmp_path / "data/marketData/zerodha"
+    directory.mkdir(parents=True)
+    path = _write_cli_indices_csv(directory / "instruments.csv")
+    monkeypatch.chdir(tmp_path)
+
+    imported = runner.invoke(app, ["indices", "import", "--json"])
+
+    assert imported.exit_code == 0
+    assert json.loads(imported.stdout) == {
+        "rows": 3,
+        "db_path": "data/output/stocky.db",
+        "file": str(path.relative_to(tmp_path)),
+    }
+
+
+def test_indices_query_reports_no_match_and_missing_table(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    missing = runner.invoke(app, ["indices", "query", "NIFTY", "--db", str(db_path), "--json"])
+    runner.invoke(
+        app,
+        [
+            "indices",
+            "import",
+            "--file",
+            str(_write_cli_indices_csv(tmp_path / "instruments.csv")),
+            "--db",
+            str(db_path),
+        ],
+    )
+    no_match = runner.invoke(app, ["indices", "query", "nothing-like-this", "--db", str(db_path)])
+
+    assert missing.exit_code == 1
+    assert missing.stdout == ""
+    assert "stocky indices import" in missing.stderr
+    assert no_match.exit_code == 0
+    assert "No indices match 'nothing-like-this'" in no_match.stdout
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_indices_import_reports_missing_file(tmp_path, runner, json_output) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "indices",
+            "import",
+            "--file",
+            str(tmp_path / "absent.csv"),
+            "--db",
+            str(tmp_path / "x.db"),
+            *(["--json"] if json_output else []),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Zerodha instruments not found" in (result.stderr if json_output else result.stdout)
+    assert not (tmp_path / "x.db").exists()
+    if json_output:
+        assert result.stdout == ""

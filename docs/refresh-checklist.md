@@ -30,6 +30,8 @@ inputs, so step 1 stays manual.
    uv run stocky yahoo update --exchange BSE --stale-days 90
    ```
 
+   For market indices, run `uv run stocky indices import` using the Zerodha instruments file from step 1.
+
    For BSE debt, download the archive into `data/marketData/bhavCopies/bseDebt` and run `uv run stocky debt import`.
 
 5. Validate the database and write the summary. The command exits with status 1 when a check fails:
