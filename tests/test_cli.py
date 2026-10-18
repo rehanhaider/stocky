@@ -1,3 +1,5 @@
+import csv
+import gzip
 import json
 import sqlite3
 import sys
@@ -1742,3 +1744,235 @@ def test_indices_import_reports_missing_file(tmp_path, runner, json_output) -> N
     assert not (tmp_path / "x.db").exists()
     if json_output:
         assert result.stdout == ""
+
+
+def _write_cli_broker_sources(directory):
+    files = {}
+    groww = {
+        "exchange": "NSE",
+        "exchange_token": "2885",
+        "isin": "INE002A01018",
+        "trading_symbol": "RELIANCE",
+        "groww_symbol": "NSE-RELIANCE",
+        "name": "Reliance Industries",
+        "segment": "CASH",
+        "instrument_type": "EQ",
+    }
+    upstox = {
+        "segment": "NSE_EQ",
+        "exchange_token": "2885",
+        "isin": "INE002A01018",
+        "trading_symbol": "RELIANCE",
+        "instrument_key": "NSE_EQ|INE002A01018",
+        "name": "Reliance Industries",
+        "instrument_type": "EQ",
+    }
+    nse = {
+        "Exch": "NSE",
+        "Exchange Segment": "nse_cm",
+        "Group Name": "EQ",
+        "Symbol": "RELIANCE",
+        "Token": "2885",
+        "Instrument Type": "0",
+        "Instrument Name": "Reliance Industries",
+        "Trading Symbol": "RELIANCE-EQ",
+    }
+    bse = {
+        "Exch": "BSE",
+        "Exchange Segment": "bse_cm",
+        "Symbol": "RELIANCE",
+        "Token": "500325",
+        "Instrument Type": "E",
+        "Instrument Name": "Reliance Industries",
+        "Trading Symbol": "RELIANCE",
+    }
+    for relative, record in [("groww/instrument.csv", groww), ("aliceblue/NSE.csv", nse), ("aliceblue/BSE.csv", bse)]:
+        path = directory / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8", newline="") as source:
+            writer = csv.DictWriter(source, fieldnames=list(record))
+            writer.writeheader()
+            writer.writerow(record)
+        files[relative] = path
+    path = directory / "upstox/complete.json.gz"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(path, "wt", encoding="utf-8") as source:
+        json.dump([upstox], source)
+    files["upstox/complete.json.gz"] = path
+    return files
+
+
+def test_brokers_import_defaults_to_all_three(tmp_path, monkeypatch, seed_consolidated, runner):
+    _write_cli_broker_sources(tmp_path / "data/marketData/brokers")
+    db = tmp_path / "data/output/stocky.db"
+    db.parent.mkdir(parents=True)
+    seed_consolidated(db)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["brokers", "import"])
+    assert result.exit_code == 0, result.output
+    assert all(label in result.stdout for label in ["Broker", "Exchange", "With ISIN", "In consolidated"])
+    assert all(broker in result.stdout for broker in ["groww", "upstox", "aliceblue"])
+    with sqlite3.connect(db) as con:
+        assert con.execute("SELECT COUNT(*) FROM broker_symbols").fetchone()[0] == 4
+
+
+def test_brokers_import_explicit_paths_and_repeated_selection(tmp_path, seed_consolidated, runner):
+    files = _write_cli_broker_sources(tmp_path)
+    db = tmp_path / "stocky.db"
+    seed_consolidated(db)
+    result = runner.invoke(
+        app,
+        [
+            "brokers",
+            "import",
+            "--broker",
+            "upstox",
+            "--broker",
+            "aliceblue",
+            "--db",
+            str(db),
+            "--upstox",
+            str(files["upstox/complete.json.gz"]),
+            "--aliceblue-nse",
+            str(files["aliceblue/NSE.csv"]),
+            "--aliceblue-bse",
+            str(files["aliceblue/BSE.csv"]),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    with sqlite3.connect(db) as con:
+        assert con.execute("SELECT DISTINCT broker FROM broker_symbols ORDER BY broker").fetchall() == [
+            ("aliceblue",),
+            ("upstox",),
+        ]
+    query = runner.invoke(
+        app,
+        [
+            "brokers",
+            "query",
+            "INE002A01018",
+            "--exact",
+            "--broker",
+            "aliceblue",
+            "--exchange",
+            "bse",
+            "--limit",
+            "1",
+            "--json",
+            "--db",
+            str(db),
+        ],
+    )
+    assert query.exit_code == 0, query.output
+    payload = json.loads(query.stdout)
+    assert payload["term"] == "INE002A01018"
+    assert payload["total"] == 1
+    assert payload["matches"] == [
+        {
+            "broker": "aliceblue",
+            "exchange": "BSE",
+            "exchange_token": "500325",
+            "isin": "INE002A01018",
+            "symbol": "RELIANCE",
+            "broker_key": "500325",
+            "name": "Reliance Industries",
+        }
+    ]
+
+
+def test_brokers_query_keeps_identifiers_and_wraps_name_at_80_columns(tmp_path, seed_consolidated, monkeypatch, runner):
+    files = _write_cli_broker_sources(tmp_path)
+    db = tmp_path / "stocky.db"
+    seed_consolidated(db)
+    for broker, path in [("groww", files["groww/instrument.csv"]), ("upstox", files["upstox/complete.json.gz"])]:
+        flag = "--groww" if broker == "groww" else "--upstox"
+        assert (
+            runner.invoke(app, ["brokers", "import", "--broker", broker, flag, str(path), "--db", str(db)]).exit_code
+            == 0
+        )
+    name = "RELIANCE INDUSTRIES LIMITED LONG COMPANY NAME WITH ALL WORDS VISIBLE"
+    with sqlite3.connect(db) as con:
+        con.execute("UPDATE broker_symbols SET name = ?", (name,))
+    monkeypatch.setenv("COLUMNS", "80")
+    result = runner.invoke(app, ["brokers", "query", "INE002A01018", "--exact", "--db", str(db)])
+    assert result.exit_code == 0, result.output
+    assert all(len(line) <= 80 for line in result.stdout.splitlines())
+    for key in ["NSE-RELIANCE", "NSE_EQ|INE002A01018"]:
+        assert any(
+            all(value in line for value in [key, "INE002A01018", "2885", "RELIANCE"])
+            for line in result.stdout.splitlines()
+        )
+    assert "…" not in result.stdout
+    cells = [line.split("│")[-1].strip() for line in result.stdout.splitlines() if "│" in line]
+    assert "".join(cells).replace(" ", "") == name.replace(" ", "") * 2
+    limited = runner.invoke(app, ["brokers", "query", "industr", "--limit", "1", "--db", str(db)])
+    assert limited.exit_code == 0
+    assert "Showing 1 of 2 matches" in limited.stdout
+
+
+@pytest.mark.parametrize("total", [0, 131])
+def test_brokers_empty_printer_does_not_measure_empty_list(monkeypatch, runner, total):
+    monkeypatch.setattr(cli, "search_brokers", lambda *args, **kwargs: cli.BrokerSearchResult(matches=[], total=total))
+    result = runner.invoke(app, ["brokers", "query", "nothing"])
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "No broker instruments match 'nothing'."
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_brokers_query_errors(tmp_path, seed_consolidated, runner, json_output):
+    db = tmp_path / "stocky.db"
+    seed_consolidated(db)
+    result = runner.invoke(app, ["brokers", "query", "test", "--db", str(db), *(["--json"] if json_output else [])])
+    assert result.exit_code == 1
+    assert "stocky brokers import" in (result.stderr if json_output else result.stdout)
+    if json_output:
+        assert result.stdout == ""
+
+
+def test_brokers_import_missing_file_and_consolidated(tmp_path, runner):
+    files = _write_cli_broker_sources(tmp_path)
+    db = tmp_path / "stocky.db"
+    missing = runner.invoke(
+        app, ["brokers", "import", "--broker", "groww", "--groww", str(tmp_path / "absent"), "--db", str(db)]
+    )
+    assert missing.exit_code == 1
+    assert "Groww instruments not found" in missing.stdout
+    no_consolidated = runner.invoke(
+        app,
+        [
+            "brokers",
+            "import",
+            "--broker",
+            "aliceblue",
+            "--aliceblue-nse",
+            str(files["aliceblue/NSE.csv"]),
+            "--aliceblue-bse",
+            str(files["aliceblue/BSE.csv"]),
+            "--db",
+            str(db),
+        ],
+    )
+    assert no_consolidated.exit_code == 1
+    assert "stocky rebuild" in no_consolidated.stdout
+
+
+def test_brokers_import_reports_earlier_commits_when_later_broker_fails(tmp_path, runner):
+    files = _write_cli_broker_sources(tmp_path)
+    db = tmp_path / "stocky.db"
+    result = runner.invoke(
+        app,
+        [
+            "brokers",
+            "import",
+            "--groww",
+            str(files["groww/instrument.csv"]),
+            "--upstox",
+            str(tmp_path / "absent"),
+            "--db",
+            str(db),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "groww" in result.stdout and "Upstox instruments not found" in result.stdout
+    with sqlite3.connect(db) as con:
+        assert con.execute("SELECT broker FROM broker_symbols").fetchall() == [("groww",)]

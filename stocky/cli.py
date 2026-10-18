@@ -15,14 +15,20 @@ from rich.console import Console
 from rich.markup import escape
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TaskID, TextColumn, TimeRemainingColumn
 from rich.table import Table
+from rich.text import Text
 
 from stocky import __version__
+from stocky.brokers import Broker, BrokerSearchResult, import_broker, search_brokers
 from stocky.bse_debt import BseDebtSearchResult, import_bse_debt, newest_bse_debt_archive, search_bse_debt
 from stocky.config import (
+    DEFAULT_ALICEBLUE_BSE,
+    DEFAULT_ALICEBLUE_NSE,
     DEFAULT_AMFI_NAV,
     DEFAULT_BHAVCOPY_DIR,
     DEFAULT_DB_PATH,
+    DEFAULT_GROWW_INSTRUMENTS,
     DEFAULT_SNAPSHOT_DIR,
+    DEFAULT_UPSTOX_INSTRUMENTS,
     DEFAULT_YAHOO_JSON_CACHE_DIR,
     DEFAULT_ZERODHA_INSTRUMENTS,
     DEFAULT_ZERODHA_MF_INSTRUMENTS,
@@ -58,6 +64,7 @@ console = Console()
 error_console = Console(stderr=True)
 app = typer.Typer(help="Consolidate Indian market instrument symbols.", no_args_is_help=False)
 yahoo_app = typer.Typer(help="Manage Yahoo Finance cache data.")
+brokers_app = typer.Typer(help="Map cash-market identifiers from Groww, Upstox, and Alice Blue.")
 indices_app = typer.Typer(help="Map market index identifiers from Zerodha instruments.")
 debt_app = typer.Typer(help="Map BSE debt identifiers from debt bhavcopies.")
 mf_app = typer.Typer(help="Map mutual fund ISINs to Zerodha identifiers and AMFI scheme codes.")
@@ -359,6 +366,36 @@ def _print_indices_search_result(term: str, result: IndicesSearchResult) -> None
         table.add_row(*(getattr(match, field) or "-" for _, field in _INDICES_FIELDS))
     console.print(table)
 
+    if result.total > len(result.matches):
+        console.print(f"[dim]Showing {len(result.matches)} of {result.total} matches. Raise --limit to see more.[/dim]")
+
+
+_BROKER_FIELDS = (
+    ("Broker", "broker"),
+    ("Ex", "exchange"),
+    ("Token", "exchange_token"),
+    ("ISIN", "isin"),
+    ("Symbol", "symbol"),
+    ("Key", "broker_key"),
+    ("Name", "name"),
+)
+
+
+def _print_broker_search_result(term: str, result: BrokerSearchResult) -> None:
+    if result.total == 0 or not result.matches:
+        console.print(f"[yellow]No broker instruments match '{escape(term)}'.[/yellow]")
+        return
+
+    table = Table(title=f"Broker instruments matching '{escape(term)}'", padding=(0, 0), show_edge=False)
+    for header, field in _BROKER_FIELDS:
+        if field == "name":
+            table.add_column(header, overflow="fold", ratio=1)
+        else:
+            width = max(len(getattr(match, field) or "-") for match in result.matches)
+            table.add_column(header, no_wrap=True, min_width=max(len(header), width))
+    for match in result.matches:
+        table.add_row(*(Text(getattr(match, field) or "-") for _, field in _BROKER_FIELDS))
+    console.print(table)
     if result.total > len(result.matches):
         console.print(f"[dim]Showing {len(result.matches)} of {result.total} matches. Raise --limit to see more.[/dim]")
 
@@ -1550,10 +1587,69 @@ def indices_query(
         _print_indices_search_result(term, result)
 
 
+@brokers_app.command("import")
+def brokers_import(
+    broker: Annotated[
+        list[Broker] | None, typer.Option("--broker", help="Import only these brokers; repeat to select several.")
+    ] = None,
+    groww: Annotated[Path, typer.Option("--groww", help="Groww instruments CSV path.")] = DEFAULT_GROWW_INSTRUMENTS,
+    upstox: Annotated[Path, typer.Option("--upstox", help="Upstox gzip JSON path.")] = DEFAULT_UPSTOX_INSTRUMENTS,
+    aliceblue_nse: Annotated[
+        Path, typer.Option("--aliceblue-nse", help="Alice Blue NSE CSV path.")
+    ] = DEFAULT_ALICEBLUE_NSE,
+    aliceblue_bse: Annotated[
+        Path, typer.Option("--aliceblue-bse", help="Alice Blue BSE CSV path.")
+    ] = DEFAULT_ALICEBLUE_BSE,
+    db_path: Annotated[Path, typer.Option("--db", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Replace each selected broker's cash-market mappings in its own transaction."""
+    paths = {Broker.groww: groww, Broker.upstox: upstox, Broker.aliceblue: aliceblue_nse}
+    table = Table(title="Broker cash instruments", padding=(0, 0), show_edge=False)
+    for label in ("Broker", "Exchange", "Rows", "With ISIN", "In consolidated"):
+        table.add_column(label, no_wrap=True)
+    for selected in dict.fromkeys(broker or list(Broker)):
+        try:
+            results = import_broker(selected, paths[selected], db_path, bse_path=aliceblue_bse)
+        except Exception as exc:
+            # Earlier brokers have committed independently. Show their counts before the error.
+            if table.row_count:
+                console.print(table)
+            console.print(f"[red]{escape(str(exc))}[/red]")
+            raise typer.Exit(1) from exc
+        for result in results:
+            table.add_row(
+                result.broker, result.exchange, str(result.rows), str(result.with_isin), str(result.in_consolidated)
+            )
+    console.print(table)
+
+
+@brokers_app.command("query")
+def brokers_query(
+    term: Annotated[str, typer.Argument(help="ISIN, symbol, token, broker key, or name fragment.")],
+    limit: Annotated[int, typer.Option("--limit", help="Maximum number of matches to display.")] = 20,
+    exact: Annotated[bool, typer.Option("--exact", help="Match identifiers exactly.")] = False,
+    broker: Annotated[Broker | None, typer.Option("--broker", help="Filter by broker.")] = None,
+    exchange: Annotated[str | None, typer.Option("--exchange", help="Filter by exchange, case-insensitive.")] = None,
+    db_path: Annotated[Path, typer.Option("--db", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
+) -> None:
+    """Look up broker cash-market identifiers or a symbol/name fragment."""
+    try:
+        result = search_brokers(term, db_path, limit=limit, exact=exact, broker=broker, exchange=exchange)
+    except Exception as exc:
+        (error_console if json_output else console).print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+    if json_output:
+        _emit_json({"term": term, **dataclasses.asdict(result)})
+    else:
+        _print_broker_search_result(term, result)
+
+
 app.add_typer(yahoo_app, name="yahoo")
 app.add_typer(mf_app, name="mf")
 app.add_typer(debt_app, name="debt")
 app.add_typer(indices_app, name="indices")
+app.add_typer(brokers_app, name="brokers")
 
 
 def main() -> None:
