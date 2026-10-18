@@ -1238,6 +1238,155 @@ def test_format_crore_keeps_the_fraction_of_small_market_caps(rupees, shown) -> 
     assert cli._format_crore(rupees) == shown
 
 
+def _write_cli_mf_files(directory):
+    mf_path = directory / "mf.csv"
+    mf_path.write_text(
+        "tradingsymbol,name,amc,scheme_type,plan,dividend_type\n"
+        "INF179K01KG8,HDFC Liquid Fund - Direct Plan,HDFCMutualFund_MF,Debt,direct,growth\n"
+        "INF179K01WT6,HDFC Liquid Fund,HDFCMutualFund_MF,Debt,regular,payout\n"
+        "INF209K01YN0,Aditya Birla Sun Life Tax Relief 96,ABSLMutualFund_MF,Equity,regular,growth\n",
+        encoding="utf-8",
+    )
+    amfi_path = directory / "NAVAll.txt"
+    amfi_path.write_text(
+        "Scheme Code;ISIN Div Payout/ ISIN Growth;ISIN Div Reinvestment;Scheme Name;Plan;Option;Net Asset Value;Date\n"
+        "100001;INF179K01KG8;INF179K01WT6;HDFC Liquid Fund;Direct;Growth;100;18-Oct-2026\n"
+        "100002;INF179K01WT6;-;Other Fund;Regular;Payout;100;18-Oct-2026\n",
+        encoding="utf-8",
+    )
+    return mf_path, amfi_path
+
+
+def test_mf_import_reports_amfi_counts_and_ambiguous_isins(tmp_path, runner) -> None:
+    mf_path, amfi_path = _write_cli_mf_files(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "mf",
+            "import",
+            "--mf-instruments",
+            str(mf_path),
+            "--amfi",
+            str(amfi_path),
+            "--db-path",
+            str(tmp_path / "x.db"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Imported 3 mutual funds" in result.stdout
+    assert "Rows with an AMFI code: 1" in result.stdout
+    assert "Ambiguous ISINs: 1" in result.stdout
+    assert "INF179K01WT6" in result.stdout
+
+
+def test_mf_import_lists_at_most_ten_ambiguous_isins(tmp_path, runner) -> None:
+    mf_path, amfi_path = _write_cli_mf_files(tmp_path)
+    isins = [f"INF{i:09d}" for i in range(12)]
+    mf_path.write_text(
+        "tradingsymbol,name,amc,scheme_type,plan,dividend_type\n"
+        + "".join(f"{isin},Fund,AMC,Debt,direct,growth\n" for isin in isins),
+        encoding="utf-8",
+    )
+    amfi_path.write_text(
+        "".join(f"{code};{isin};;Fund;Direct;Growth;100;18-Oct-2026\n" for isin in isins for code in (100001, 100002)),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "mf",
+            "import",
+            "--mf-instruments",
+            str(mf_path),
+            "--amfi",
+            str(amfi_path),
+            "--db-path",
+            str(tmp_path / "x.db"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Rows with an AMFI code: 0" in result.stdout
+    assert "Ambiguous ISINs: 12" in result.stdout
+    assert all(isin in result.stdout for isin in isins[:10])
+    assert all(isin not in result.stdout for isin in isins[10:])
+
+
+def test_mf_import_uses_default_amfi_path(tmp_path, monkeypatch, runner) -> None:
+    mf_path, amfi_path = _write_cli_mf_files(tmp_path)
+    destination = tmp_path / "data/marketData/amfi/NAVAll.txt"
+    destination.parent.mkdir(parents=True)
+    amfi_path.rename(destination)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["mf", "import", "--mf-instruments", str(mf_path), "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["amfi"] == "data/marketData/amfi/NAVAll.txt"
+    assert payload["rows"] == 3
+    assert payload["coded_rows"] == 1
+    assert payload["ambiguous_isins"] == ["INF179K01WT6"]
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_mf_import_requires_amfi_file(tmp_path, monkeypatch, runner, json_output) -> None:
+    mf_path, _ = _write_cli_mf_files(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app, ["mf", "import", "--mf-instruments", str(mf_path), *(["--json"] if json_output else [])]
+    )
+
+    assert result.exit_code == 1
+    message = " ".join((result.stderr if json_output else result.stdout).split())
+    assert "AMFI NAV file not found: data/marketData/amfi/NAVAll.txt" in message
+    assert "https://www.amfiindia.com/spages/NAVAll.txt" in message
+    assert not (tmp_path / "data/output/stocky.db").exists()
+    if json_output:
+        assert result.stdout == ""
+
+
+def test_mf_query_by_amfi_code_keeps_all_values_at_80_columns(tmp_path, monkeypatch, runner) -> None:
+    monkeypatch.setenv("COLUMNS", "80")
+    mf_path, amfi_path = _write_cli_mf_files(tmp_path)
+    db_path = tmp_path / "stocky.db"
+    imported = runner.invoke(
+        app, ["mf", "import", "--mf-instruments", str(mf_path), "--amfi", str(amfi_path), "--db-path", str(db_path)]
+    )
+
+    queried = runner.invoke(app, ["mf", "query", "100001", "--exact", "--db-path", str(db_path)])
+    partial = runner.invoke(app, ["mf", "query", "10000", "--db-path", str(db_path), "--json"])
+    json_result = runner.invoke(app, ["mf", "query", "100001", "--db-path", str(db_path), "--json"])
+
+    assert imported.exit_code == 0
+    assert queried.exit_code == 0
+    lines = queried.stdout.splitlines()
+    assert "AMFI" in queried.stdout
+    assert "…" not in queried.stdout
+    assert all(len(line) <= 80 for line in lines)
+    cells = [line.split("│") for line in lines if "│" in line]
+    expected = (
+        "INF179K01KG8",
+        "INF179K01KG8",
+        "100001",
+        "HDFC Liquid Fund - Direct Plan",
+        "HDFCMutualFund_MF",
+        "Debt",
+        "direct",
+        "growth",
+    )
+    for index, value in enumerate(expected):
+        assert "".join(row[index].strip() for row in cells).replace(" ", "") == value.replace(" ", "")
+    assert partial.exit_code == 0
+    assert json.loads(partial.stdout)["total"] == 0
+    assert json_result.exit_code == 0
+    assert json.loads(json_result.stdout)["matches"][0]["amfi_code"] == "100001"
+
+
 def _write_cli_debt_zip(path):
     with ZipFile(path, "w") as archive:
         archive.writestr(

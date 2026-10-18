@@ -19,6 +19,7 @@ from rich.table import Table
 from stocky import __version__
 from stocky.bse_debt import BseDebtSearchResult, import_bse_debt, newest_bse_debt_archive, search_bse_debt
 from stocky.config import (
+    DEFAULT_AMFI_NAV,
     DEFAULT_BHAVCOPY_DIR,
     DEFAULT_DB_PATH,
     DEFAULT_SNAPSHOT_DIR,
@@ -57,7 +58,7 @@ error_console = Console(stderr=True)
 app = typer.Typer(help="Consolidate Indian market instrument symbols.", no_args_is_help=False)
 yahoo_app = typer.Typer(help="Manage Yahoo Finance cache data.")
 debt_app = typer.Typer(help="Map BSE debt identifiers from debt bhavcopies.")
-mf_app = typer.Typer(help="Map mutual fund ISINs to Zerodha scheme identifiers.")
+mf_app = typer.Typer(help="Map mutual fund ISINs to Zerodha identifiers and AMFI scheme codes.")
 
 PLAIN_PROGRESS_EVERY = 50
 MAX_LISTED_BHAVCOPY_PAIRS = 10
@@ -258,6 +259,7 @@ def _print_search_result(term: str, result: SearchResult, *, numbered: bool = Fa
 _MF_FIELDS = (
     ("ISIN", "isin"),
     ("Zerodha", "zd_mf"),
+    ("AMFI", "amfi_code"),
     ("Name", "name"),
     ("AMC", "amc"),
     ("Type", "scheme_type"),
@@ -271,10 +273,12 @@ def _print_mf_search_result(term: str, result: MutualFundSearchResult) -> None:
         console.print(f"[yellow]No mutual funds match '{escape(term)}'.[/yellow]")
         return
 
-    table = Table(title=f"Mutual funds matching '{escape(term)}'")
+    table = Table(title=f"Mutual funds matching '{escape(term)}'", padding=(0, 0), show_edge=False)
     for header, field in _MF_FIELDS:
         # Identifiers stay whole so they can be copied; names and labels wrap instead.
-        table.add_column(header, no_wrap=field in ("isin", "zd_mf"))
+        identifier = field in ("isin", "zd_mf", "amfi_code")
+        min_width = max(len(getattr(match, field) or "-") for match in result.matches) if identifier else 0
+        table.add_column(header, no_wrap=identifier, min_width=min_width, overflow="fold")
     for match in result.matches:
         table.add_row(*(getattr(match, field) or "-" for _, field in _MF_FIELDS))
     console.print(table)
@@ -1368,12 +1372,13 @@ def mf_import(
         Path,
         typer.Option("--mf-instruments", help="Zerodha mutual fund instruments CSV path."),
     ] = DEFAULT_ZERODHA_MF_INSTRUMENTS,
+    amfi: Annotated[Path, typer.Option("--amfi", help="AMFI NAVAll.txt path.")] = DEFAULT_AMFI_NAV,
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
     json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
 ) -> None:
     """Replace the mutual_funds table with the schemes in Zerodha's mutual fund instruments file."""
     try:
-        result = import_mutual_funds(mf_instruments, db_path)
+        result = import_mutual_funds(mf_instruments, amfi, db_path)
     except Exception as exc:
         (error_console if json_output else console).print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(1) from exc
@@ -1385,19 +1390,23 @@ def mf_import(
             f"[green]Imported {result.rows} mutual funds from {escape(str(result.mf_instruments))} "
             f"into {escape(str(result.db_path))}.[/green]"
         )
+        console.print(f"Rows with an AMFI code: {result.coded_rows}")
+        console.print(f"Ambiguous ISINs: {len(result.ambiguous_isins)}")
+        if result.ambiguous_isins:
+            console.print(", ".join(result.ambiguous_isins[:10]))
 
 
 @mf_app.command("query")
 def mf_query(
-    term: Annotated[str, typer.Argument(help="ISIN, Zerodha scheme identifier, scheme name, or AMC fragment.")],
+    term: Annotated[str, typer.Argument(help="ISIN, Zerodha identifier, AMFI code, scheme name, or AMC fragment.")],
     limit: Annotated[int, typer.Option("--limit", help="Maximum number of matches to display.")] = 20,
     exact: Annotated[
-        bool, typer.Option("--exact", help="Match the ISIN, Zerodha identifier, or full name exactly.")
+        bool, typer.Option("--exact", help="Match the ISIN, Zerodha identifier, AMFI code, or full name exactly.")
     ] = False,
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
     json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
 ) -> None:
-    """Look up a mutual fund by ISIN, Zerodha identifier, name, or AMC."""
+    """Look up a mutual fund by ISIN, Zerodha identifier, AMFI code, name, or AMC."""
     try:
         result = search_mutual_funds(term, db_path, limit=limit, exact=exact)
     except Exception as exc:
