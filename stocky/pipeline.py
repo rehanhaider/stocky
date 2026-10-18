@@ -29,7 +29,7 @@ NSE_LEGACY_COLUMNS = {"SERIES", "ISIN", "SYMBOL"}
 NSE_UDIFF_COLUMNS = {"SctySrs", "ISIN", "TckrSymb", "FinInstrmId"}
 
 # EQ = rolling-settlement equities; BE/BZ = trade-for-trade equities.
-# SME platform (SM/ST) and debt/bond/ETF series stay excluded.
+# SME platform (SM/ST) and debt/bond series stay excluded unless SGBs are requested.
 NSE_EQUITY_SERIES = {"EQ", "BE", "BZ"}
 
 BSE_LEGACY_COLUMNS = {"SC_TYPE", "ISIN_CODE", "SC_CODE", "SC_NAME"}
@@ -107,10 +107,12 @@ def _require_columns(dataframe: pd.DataFrame, required_columns: set[str], source
         raise ValueError(f"{source_name} is missing required columns: {', '.join(missing)}")
 
 
-def load_bse_equities(path: Path) -> pd.DataFrame:
+def load_bse_equities(path: Path, *, include_sgb: bool = False) -> pd.DataFrame:
     bse_bhavcopy = _strip_dataframe_strings(pd.read_csv(path))
 
     if BSE_LEGACY_COLUMNS.issubset(bse_bhavcopy.columns):
+        if include_sgb:
+            raise ValueError(f"--include-sgb needs UDiFF bhavcopies; legacy BSE file: {path}")
         equities = bse_bhavcopy[bse_bhavcopy["SC_TYPE"] == "Q"][["ISIN_CODE", "SC_CODE", "SC_NAME"]].copy()
         equities.rename(
             columns={"ISIN_CODE": "isin", "SC_CODE": "bse_sc_code", "SC_NAME": "bse_sc_name"},
@@ -122,9 +124,11 @@ def load_bse_equities(path: Path) -> pd.DataFrame:
         return equities
 
     if BSE_UDIFF_COLUMNS.issubset(bse_bhavcopy.columns):
-        equities = bse_bhavcopy[~bse_bhavcopy["SctySrs"].isin(BSE_NON_EQUITY_UDIFF_SERIES)][
-            ["ISIN", "FinInstrmId", "TckrSymb", "FinInstrmNm"]
-        ].copy()
+        sgb_rows = (bse_bhavcopy["SctySrs"] == "G") & bse_bhavcopy["TckrSymb"].str.startswith("SGB", na=False)
+        selected = ~bse_bhavcopy["SctySrs"].isin(BSE_NON_EQUITY_UDIFF_SERIES)
+        if include_sgb:
+            selected |= sgb_rows
+        equities = bse_bhavcopy[selected][["ISIN", "FinInstrmId", "TckrSymb", "FinInstrmNm"]].copy()
         equities.rename(
             columns={
                 "ISIN": "isin",
@@ -135,6 +139,9 @@ def load_bse_equities(path: Path) -> pd.DataFrame:
             inplace=True,
         )
         equities["bse_sc_code"] = equities["bse_sc_code"].astype(str)
+        if include_sgb:
+            equities["ins_type"] = "equity"
+            equities.loc[sgb_rows.loc[equities.index], "ins_type"] = "sgb"
         return equities
 
     raise ValueError(
@@ -143,10 +150,12 @@ def load_bse_equities(path: Path) -> pd.DataFrame:
     )
 
 
-def load_nse_equities(path: Path) -> pd.DataFrame:
+def load_nse_equities(path: Path, *, include_sgb: bool = False) -> pd.DataFrame:
     nse_bhavcopy = _strip_dataframe_strings(pd.read_csv(path))
 
     if NSE_LEGACY_COLUMNS.issubset(nse_bhavcopy.columns):
+        if include_sgb:
+            raise ValueError(f"--include-sgb needs UDiFF bhavcopies; legacy NSE file: {path}")
         equities = nse_bhavcopy[nse_bhavcopy["SERIES"].isin(NSE_EQUITY_SERIES)][["ISIN", "SYMBOL"]].copy()
         equities.rename(columns={"ISIN": "isin", "SYMBOL": "nse_symbol"}, inplace=True)
         # Legacy files carry no instrument token, so Zerodha's NSE symbol is matched by name only.
@@ -154,11 +163,16 @@ def load_nse_equities(path: Path) -> pd.DataFrame:
         return equities
 
     if NSE_UDIFF_COLUMNS.issubset(nse_bhavcopy.columns):
-        equities = nse_bhavcopy[nse_bhavcopy["SctySrs"].isin(NSE_EQUITY_SERIES)][
-            ["ISIN", "TckrSymb", "FinInstrmId"]
-        ].copy()
+        sgb_rows = nse_bhavcopy["SctySrs"] == "GB"
+        selected = nse_bhavcopy["SctySrs"].isin(NSE_EQUITY_SERIES)
+        if include_sgb:
+            selected |= sgb_rows
+        equities = nse_bhavcopy[selected][["ISIN", "TckrSymb", "FinInstrmId"]].copy()
         equities.rename(columns={"ISIN": "isin", "TckrSymb": "nse_symbol", "FinInstrmId": "nse_token"}, inplace=True)
         equities["nse_token"] = equities["nse_token"].astype(str)
+        if include_sgb:
+            equities["ins_type"] = "equity"
+            equities.loc[sgb_rows.loc[equities.index], "ins_type"] = "sgb"
         return equities
 
     raise ValueError(
@@ -193,11 +207,11 @@ def match_zerodha_symbols(tokens: pd.Series, zerodha_instruments: pd.DataFrame, 
 
 
 def match_zerodha_symbols_by_name(symbols: pd.Series, zerodha_instruments: pd.DataFrame, segment: str) -> pd.Series:
-    """Find an exchange symbol in one Zerodha segment, as listed or with Zerodha's -BE/-BZ series suffix.
+    """Find an exchange symbol in one Zerodha segment, as listed or with a -BE/-BZ/-GB series suffix.
 
     NSE gives a share a new token when it moves between the EQ and BE series, so a Zerodha file from a
     different day can hold the share under its other token. Searching only the named segment keeps the
-    symbol from matching a different company on the other exchange.
+    symbol from matching a different company on the other exchange. Sovereign gold bonds use -GB.
     """
     listed = set(zerodha_instruments.loc[zerodha_instruments["segment"] == segment, "tradingsymbol"])
 
@@ -205,7 +219,12 @@ def match_zerodha_symbols_by_name(symbols: pd.Series, zerodha_instruments: pd.Da
         if pd.isna(symbol) or not str(symbol):
             return None
         return next(
-            (candidate for candidate in (f"{symbol}", f"{symbol}-BE", f"{symbol}-BZ") if candidate in listed), None
+            (
+                candidate
+                for candidate in (f"{symbol}", f"{symbol}-BE", f"{symbol}-BZ", f"{symbol}-GB")
+                if candidate in listed
+            ),
+            None,
         )
 
     return symbols.map(match)
@@ -221,10 +240,17 @@ def build_consolidated_dataframe(
     bse_equities: pd.DataFrame,
     nse_equities: pd.DataFrame,
     zerodha_instruments: pd.DataFrame,
+    include_sgb: bool = False,
 ) -> pd.DataFrame:
     equities = pd.merge(nse_equities, bse_equities, on="isin", how="outer")
     equities.set_index("isin", inplace=True)
     equities["ins_type"] = "equity"
+    equities.loc[equities.index.str.startswith("INF", na=False), "ins_type"] = "etf"
+    if include_sgb:
+        for listings in (nse_equities, bse_equities):
+            if "ins_type" in listings.columns:
+                sgb_isins = listings.loc[listings["ins_type"] == "sgb", "isin"]
+                equities.loc[equities.index.isin(sgb_isins), "ins_type"] = "sgb"
     equities["zd_ns"] = match_zerodha_symbols(equities["nse_token"], zerodha_instruments, "NSE").fillna(
         match_zerodha_symbols_by_name(equities["nse_symbol"], zerodha_instruments, "NSE")
     )
@@ -395,6 +421,7 @@ def rebuild_database(
     backup_dir: Path = DEFAULT_BACKUP_DIR,
     backup: bool = True,
     dry_run: bool = False,
+    include_sgb: bool = False,
     sample_size: int = DEFAULT_DIFF_SAMPLE_SIZE,
     progress: Callable[[str], None] | None = None,
 ) -> RebuildResult:
@@ -405,9 +432,9 @@ def rebuild_database(
     require_existing_files(paths)
 
     report("Loading BSE bhavcopy")
-    bse_equities = load_bse_equities(paths.bse)
+    bse_equities = load_bse_equities(paths.bse, include_sgb=include_sgb)
     report("Loading NSE bhavcopy")
-    nse_equities = load_nse_equities(paths.nse)
+    nse_equities = load_nse_equities(paths.nse, include_sgb=include_sgb)
     report("Loading Zerodha instruments")
     zerodha_instruments = load_zerodha_instruments(paths.zerodha)
 
@@ -416,6 +443,7 @@ def rebuild_database(
         bse_equities=bse_equities,
         nse_equities=nse_equities,
         zerodha_instruments=zerodha_instruments,
+        include_sgb=include_sgb,
     )
 
     report("Recording source files")

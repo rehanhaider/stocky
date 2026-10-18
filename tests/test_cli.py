@@ -70,6 +70,76 @@ def _rebuild_path_args(paths, db_path) -> list[str]:
     ]
 
 
+@pytest.fixture
+def sgb_cli_paths(tmp_path, market_csv_builder):
+    paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2026, 7, 17))
+    paths.bse.write_text(
+        "SctySrs,ISIN,FinInstrmId,TckrSymb,FinInstrmNm\n"
+        "E,INF204KB14I2,590103,GOLDBEES,GOLD ETF\n"
+        "G,IN0020200286,800001,SGBN28VIII,SOVEREIGN GOLD BOND\n"
+        "G,IN0020200096,800002,92GS2030,GOVERNMENT SECURITY\n",
+        encoding="utf-8",
+    )
+    with ZipFile(paths.nse, "w") as archive:
+        archive.writestr(
+            paths.nse.stem,
+            "SctySrs,ISIN,FinInstrmId,TckrSymb\nEQ,INF204KB14I2,14428,GOLDBEES\nGB,IN0020200286,1342,SGBN28VIII\n",
+        )
+    paths.zerodha.write_text(
+        "segment,exchange_token,tradingsymbol\nNSE,1342,SGBN28VIII-GB\nBSE,800001,SGBN28VIII\n",
+        encoding="utf-8",
+    )
+    return paths
+
+
+def test_rebuild_include_sgb_writes_gold_bonds(sgb_cli_paths, tmp_path, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+
+    result = runner.invoke(
+        app, ["rebuild", *_rebuild_path_args(sgb_cli_paths, db_path), "--include-sgb", "--no-backup"]
+    )
+
+    assert result.exit_code == 0
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("SELECT isin, ins_type, zd_ns FROM consolidated ORDER BY isin").fetchall() == [
+            ("IN0020200286", "sgb", "SGBN28VIII-GB"),
+            ("INF204KB14I2", "etf", None),
+        ]
+
+
+def test_rebuild_include_sgb_dry_run_reports_diff_without_writing(sgb_cli_paths, tmp_path, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    initial = runner.invoke(app, ["rebuild", *_rebuild_path_args(sgb_cli_paths, db_path), "--no-backup"])
+    assert initial.exit_code == 0
+    before = db_path.read_bytes()
+
+    result = runner.invoke(
+        app, ["rebuild", *_rebuild_path_args(sgb_cli_paths, db_path), "--include-sgb", "--dry-run", "--json"]
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["dry_run"] is True
+    assert payload["rows"] == 2
+    assert (payload["diff"]["added"], payload["diff"]["removed"], payload["diff"]["changed"]) == (1, 0, 0)
+    assert payload["diff"]["sample_added"][0]["ins_type"] == "sgb"
+    assert db_path.read_bytes() == before
+
+
+def test_rebuild_include_sgb_reports_legacy_file_error(tmp_path, market_csv_builder, runner) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+
+    result = runner.invoke(
+        app, ["rebuild", *_rebuild_path_args(paths, db_path), "--include-sgb"], env={"COLUMNS": "200"}
+    )
+
+    assert result.exit_code == 1
+    assert "--include-sgb needs UDiFF bhavcopies" in result.stdout
+    assert paths.bse.name in result.stdout
+    assert not db_path.exists()
+
+
 def test_rebuild_dry_run_prints_summary_without_creating_database(tmp_path, market_csv_builder, runner) -> None:
     paths = market_csv_builder(tmp_path / "inputs")
     db_path = tmp_path / "fresh.db"
