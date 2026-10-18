@@ -41,10 +41,12 @@ from `consolidated`, and `stocky rebuild` does not change it.
 | --- | --- |
 | `isin` | The scheme option's ISIN, such as `INF179K01KG8`. Each plan (regular or direct) and option (growth, payout, reinvest) has its own ISIN |
 | `zd_mf` | Zerodha's `tradingsymbol`, the identifier Kite's mutual fund orders take. Zerodha uses the ISIN here |
+| `amfi_code` | AMFI scheme code from `NAVAll.txt`, stored as TEXT. NULL when the ISIN is unmatched or has more than one scheme code |
 | `name`, `amc` | Scheme name and Zerodha's AMC label, such as `HDFCMutualFund_MF` |
 | `scheme_type`, `plan`, `dividend_type` | Category (`Debt`, `Equity`, ...), `regular` or `direct`, and `growth`, `payout`, or `reinvest` |
 
-Zerodha's file has no AMFI scheme code, so the table does not carry one.
+Zerodha's file has no AMFI scheme code. The import joins AMFI's NAV file by ISIN, using both ISIN fields and keeping
+only valid ISINs. Codes shared by multiple ISINs are allowed; an ISIN with multiple codes gets NULL.
 
 ## The bse_debt table
 
@@ -94,6 +96,7 @@ uv sync
     - This project treats exchange bhavcopies as manually downloaded local inputs; do not add automated NSE downloads here.
 3. Zerodha Instruments: Download from `https://api.kite.trade/instruments`
 4. Optional, for mutual funds: Zerodha mutual fund instruments from `https://api.kite.trade/mf/instruments`
+   and AMFI scheme codes from `https://www.amfiindia.com/spages/NAVAll.txt`. Both files are required for `mf import`.
 5. Optional, for BSE debt: download `https://www.bseindia.com/download/BhavCopy/Debt/DEBTBHAVCOPY<DDMMYYYY>.zip`,
    replacing `<DDMMYYYY>` with the trade date, such as `16102026`.
 
@@ -102,6 +105,7 @@ uv sync
 2. NSE Bhavcopy: `data/marketData/bhavCopies`. Current NSE UDiFF `.csv.zip` files can be used directly.
 3. Zerodha Instruments: `data/marketData/zerodha`. The filename should be `instruments.csv`
 4. Zerodha mutual fund instruments: `data/marketData/zerodha`. The filename should be `mf_instruments.csv`
+   AMFI scheme codes: `data/marketData/amfi/NAVAll.txt`.
 5. BSE debt bhavcopy archives: `data/marketData/bhavCopies/bseDebt`. Keep the `DEBTBHAVCOPY<DDMMYYYY>.zip` filename;
    the loader reads `fgroup<DDMMYYYY>.csv`, `icdm<DDMMYYYY>.csv`, and `wdm<DDMMYYYY>.csv` directly from the zip.
 
@@ -230,19 +234,23 @@ Show every known identifier for one exact match:
 uv run stocky lookup 500325
 ```
 
-Load the Zerodha mutual fund file into the `mutual_funds` table. Each run replaces that table and leaves the others as
-they are; `--mf-instruments` reads a different file:
+Load the Zerodha mutual fund file and AMFI scheme codes into the `mutual_funds` table. Download
+`https://www.amfiindia.com/spages/NAVAll.txt` to `data/marketData/amfi/NAVAll.txt` first. Each run requires both files,
+replaces that table, and leaves the others as they are. `--mf-instruments` and `--amfi` read different source files.
+The output reports total rows, rows with an AMFI code, and ambiguous ISINs in Zerodha's list, listing up to 10:
 
 ```bash
 uv run stocky mf import
+uv run stocky mf import --amfi data/marketData/amfi/NAVAll.txt
 ```
 
-Look up a mutual fund by ISIN, Zerodha identifier, scheme name, or AMC fragment. `--exact` matches the ISIN, Zerodha
-identifier, or full scheme name only:
+Look up a mutual fund by ISIN, Zerodha identifier, AMFI code, scheme name, or AMC fragment. AMFI codes match exactly.
+`--exact` matches the ISIN, Zerodha identifier, AMFI code, or full scheme name only:
 
 ```bash
 uv run stocky mf query "parag parikh"
 uv run stocky mf query INF179K01KG8 --exact
+uv run stocky mf query 119091 --exact
 ```
 
 Load the newest BSE debt archive by the date in its filename into the `bse_debt` table. Each run replaces that table

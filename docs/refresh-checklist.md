@@ -6,6 +6,7 @@ inputs, so step 1 stays manual.
 1. Download the inputs into the ignored local folders:
    - the BSE and NSE bhavcopies for one trade date into `data/marketData/bhavCopies`;
    - the Zerodha instruments file from `https://api.kite.trade/instruments` to `data/marketData/zerodha/instruments.csv`.
+   - for mutual fund imports, AMFI scheme codes from `https://www.amfiindia.com/spages/NAVAll.txt` to `data/marketData/amfi/NAVAll.txt`.
 2. Preview the rebuild. Nothing is written:
 
    ```bash
