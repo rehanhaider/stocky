@@ -10,7 +10,7 @@ inputs, so step 1 stays manual.
 2. Preview the rebuild. Nothing is written:
 
    ```bash
-   uv run stocky rebuild --date YYYY-MM-DD --dry-run
+   uv run stocky rebuild --date YYYY-MM-DD --include-sgb --dry-run
    ```
 
    Check the source row counts, the added, removed, and changed rows, and the sample differences. A large number of
@@ -18,8 +18,10 @@ inputs, so step 1 stays manual.
 3. Rebuild. This backs up the database, replaces the `consolidated` table, and records the source files:
 
    ```bash
-   uv run stocky rebuild --date YYYY-MM-DD
+   uv run stocky rebuild --date YYYY-MM-DD --include-sgb
    ```
+
+   Keep `--include-sgb`: a rebuild without the flag drops the SGB rows. It needs UDiFF bhavcopies.
 
 4. Preview the Yahoo update, then run it for each exchange. `--stale-days` fetches only tickers with no response or
    an old one; add `--symbols` to refresh named tickers only:

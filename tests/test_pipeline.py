@@ -23,6 +23,172 @@ from stocky.pipeline import (
 )
 
 
+@pytest.fixture
+def sgb_market_paths(tmp_path, market_csv_builder):
+    paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2026, 7, 17))
+    paths.bse.write_text(
+        "SctySrs,ISIN,FinInstrmId,TckrSymb,FinInstrmNm\n"
+        "A,INE002A01018,500325,RELIANCE,RELIANCE INDUSTRIES\n"
+        "E,INF204KB14I2,590103,GOLDBEES,GOLD ETF\n"
+        "G,IN0020200286,800001,SGBN28VIII,SOVEREIGN GOLD BOND\n"
+        "G,IN0020220029,800002,SGBMAR30,SOVEREIGN GOLD BOND BSE ONLY\n"
+        "G,IN0020200096,800003,92GS2030,GOVERNMENT SECURITY\n"
+        "F,IN0000000001,800004,SGBEXCLUDED,EXCLUDED FIXED INCOME\n",
+        encoding="utf-8",
+    )
+    with ZipFile(paths.nse, "w", compression=ZIP_DEFLATED) as archive:
+        archive.writestr(
+            paths.nse.stem,
+            "SctySrs,ISIN,FinInstrmId,TckrSymb\n"
+            "EQ,INE002A01018,2885,RELIANCE\n"
+            "EQ,INF204KB14I2,14428,GOLDBEES\n"
+            "GB,IN0020200286,1342,SGBN28VIII\n"
+            "GB,IN0020210319,2000,SGBJAN29\n"
+            "SM,INE000000002,3000,SMESTOCK\n",
+        )
+    paths.zerodha.write_text(
+        "segment,exchange_token,tradingsymbol\n"
+        "NSE,2885,RELIANCE\n"
+        "BSE,500325,RELIANCE\n"
+        "NSE,14428,GOLDBEES\n"
+        "BSE,590103,GOLDBEES\n"
+        "NSE,1342,SGBN28VIII-GB\n"
+        "BSE,800001,SGBN28VIII\n"
+        "NSE,2001,SGBJAN29-GB\n"
+        "BSE,800002,SGBMAR30\n",
+        encoding="utf-8",
+    )
+    return paths
+
+
+@pytest.mark.parametrize("include_sgb", [False, True])
+def test_build_consolidated_dataframe_labels_inf_as_etf(sgb_market_paths, include_sgb) -> None:
+    paths = sgb_market_paths
+
+    result = build_consolidated_dataframe(
+        bse_equities=load_bse_equities(paths.bse, include_sgb=include_sgb),
+        nse_equities=load_nse_equities(paths.nse, include_sgb=include_sgb),
+        zerodha_instruments=load_zerodha_instruments(paths.zerodha),
+        include_sgb=include_sgb,
+    )
+
+    assert result.loc["INF204KB14I2", "ins_type"] == "etf"
+    assert result.loc["INE002A01018", "ins_type"] == "equity"
+    assert list(result.columns) == [column for column in CONSOLIDATED_COLUMNS if column != "isin"]
+
+
+@pytest.mark.parametrize("exchange", ["nse", "bse"])
+def test_build_consolidated_dataframe_labels_exchange_only_etfs(sgb_market_paths, exchange) -> None:
+    bse = load_bse_equities(sgb_market_paths.bse)
+    nse = load_nse_equities(sgb_market_paths.nse)
+    if exchange == "nse":
+        bse = bse[bse["isin"] != "INF204KB14I2"]
+    else:
+        nse = nse[nse["isin"] != "INF204KB14I2"]
+
+    result = build_consolidated_dataframe(
+        bse_equities=bse, nse_equities=nse, zerodha_instruments=load_zerodha_instruments(sgb_market_paths.zerodha)
+    )
+
+    assert result.loc["INF204KB14I2", "ins_type"] == "etf"
+
+
+def test_rebuild_database_includes_sgbs_and_merges_on_isin(sgb_market_paths, tmp_path) -> None:
+    db_path = tmp_path / "stocky.db"
+
+    result = rebuild_database(sgb_market_paths, db_path=db_path, include_sgb=True, backup=False)
+
+    assert result.rows == 5
+    with sqlite3.connect(db_path) as con:
+        rows = pd.read_sql("SELECT * FROM consolidated", con).set_index("isin")
+    assert rows["ins_type"].value_counts().to_dict() == {"sgb": 3, "equity": 1, "etf": 1}
+    assert rows.loc["IN0020200286", ["nse_symbol", "bse_symbol", "zd_ns", "zd_bo", "yq_ns", "yq_bo"]].tolist() == [
+        "SGBN28VIII",
+        "SGBN28VIII",
+        "SGBN28VIII-GB",
+        "SGBN28VIII",
+        "SGBN28VIII.NS",
+        "SGBN28VIII.BO",
+    ]
+    assert rows.loc["IN0020210319", "zd_ns"] == "SGBJAN29-GB"
+    assert pd.isna(rows.loc["IN0020210319", "bse_symbol"])
+    assert rows.loc["IN0020220029", "zd_bo"] == "SGBMAR30"
+    assert pd.isna(rows.loc["IN0020220029", "nse_symbol"])
+    assert "IN0020200096" not in rows.index
+    assert "IN0000000001" not in rows.index
+
+
+@pytest.mark.parametrize("existing_sgbs", [False, True])
+def test_rebuild_database_excludes_sgbs_by_default(sgb_market_paths, tmp_path, existing_sgbs) -> None:
+    db_path = tmp_path / "stocky.db"
+    if existing_sgbs:
+        rebuild_database(sgb_market_paths, db_path=db_path, include_sgb=True, backup=False)
+
+    rebuild_database(sgb_market_paths, db_path=db_path, backup=False)
+
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("SELECT isin, ins_type FROM consolidated ORDER BY isin").fetchall() == [
+            ("INE002A01018", "equity"),
+            ("INF204KB14I2", "etf"),
+        ]
+
+
+@pytest.mark.parametrize("exchange", ["bse", "nse"])
+def test_rebuild_database_include_sgb_rejects_either_legacy_file(
+    sgb_market_paths, market_csv_builder, tmp_path, exchange
+) -> None:
+    legacy = market_csv_builder(tmp_path / "legacy")
+    paths = sgb_market_paths
+    legacy_path = getattr(legacy, exchange)
+    paths = type(paths)(**{**vars(paths), exchange: legacy_path})
+    db_path = tmp_path / "stocky.db"
+
+    with pytest.raises(ValueError, match="--include-sgb needs UDiFF bhavcopies") as error:
+        rebuild_database(paths, db_path=db_path, include_sgb=True, backup=False)
+
+    assert str(legacy_path) in str(error.value)
+    assert not db_path.exists()
+
+
+def test_rebuild_database_dry_run_with_sgbs_reports_additions_and_etf_relabels(sgb_market_paths, tmp_path) -> None:
+    db_path = tmp_path / "stocky.db"
+    rebuild_database(sgb_market_paths, db_path=db_path, backup=False)
+    with sqlite3.connect(db_path) as con:
+        con.execute("UPDATE consolidated SET ins_type = 'equity'")
+    before = db_path.read_bytes()
+
+    result = rebuild_database(
+        sgb_market_paths, db_path=db_path, include_sgb=True, dry_run=True, backup_dir=tmp_path / "backups"
+    )
+
+    assert result.diff is not None
+    assert (result.diff.added, result.diff.changed, result.diff.removed, result.diff.unchanged) == (3, 1, 0, 1)
+    assert result.diff.column_changes == {"ins_type": 1}
+    assert result.diff.sample_changed == [RowChange(isin="INF204KB14I2", changes={"ins_type": ("equity", "etf")})]
+    assert {row["ins_type"] for row in result.diff.sample_added} == {"sgb"}
+    assert db_path.read_bytes() == before
+    assert not (tmp_path / "backups").exists()
+
+
+def test_match_zerodha_symbols_by_name_uses_gb_suffix_after_equity_suffixes() -> None:
+    zerodha = pd.DataFrame(
+        [
+            {"segment": "NSE", "exchange_token": str(index), "tradingsymbol": symbol}
+            for index, symbol in enumerate(
+                ["SGBN28VIII-GB", "FIRST", "FIRST-GB", "SECOND-BE", "SECOND-GB", "THIRD-BZ", "THIRD-GB"]
+            )
+        ]
+        + [{"segment": "BSE", "exchange_token": "99", "tradingsymbol": "BSEONLY-GB"}]
+    )
+
+    result = match_zerodha_symbols_by_name(
+        pd.Series(["SGBN28VIII", "FIRST", "SECOND", "THIRD", "BSEONLY", None, ""]), zerodha, "NSE"
+    )
+
+    assert result[:4].tolist() == ["SGBN28VIII-GB", "FIRST", "SECOND-BE", "THIRD-BZ"]
+    assert result[4:].isna().all()
+
+
 def test_build_consolidated_dataframe_fills_each_exchange_only_where_it_lists_the_isin() -> None:
     bse = pd.DataFrame(
         [

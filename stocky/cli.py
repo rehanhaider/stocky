@@ -808,6 +808,7 @@ def _rebuild_impl(
     zerodha_instruments: Path = DEFAULT_ZERODHA_INSTRUMENTS,
     db_path: Path = DEFAULT_DB_PATH,
     dry_run: bool = False,
+    include_sgb: bool = False,
     no_backup: bool = False,
     sample_size: int = DEFAULT_DIFF_SAMPLE_SIZE,
     progress: Callable[[str], None] | None = None,
@@ -825,6 +826,7 @@ def _rebuild_impl(
         db_path=db_path,
         backup=not no_backup,
         dry_run=dry_run,
+        include_sgb=include_sgb,
         sample_size=sample_size,
         progress=progress,
     )
@@ -847,6 +849,13 @@ def rebuild(
         typer.Option("--zerodha-instruments", help="Zerodha instruments CSV path."),
     ] = DEFAULT_ZERODHA_INSTRUMENTS,
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite output DB path.")] = DEFAULT_DB_PATH,
+    include_sgb: Annotated[
+        bool,
+        typer.Option(
+            "--include-sgb",
+            help="Add sovereign gold bonds (NSE GB and BSE G SGB series) as ins_type 'sgb'.",
+        ),
+    ] = False,
     dry_run: Annotated[
         bool,
         typer.Option(
@@ -875,6 +884,7 @@ def rebuild(
             zerodha_instruments=zerodha_instruments,
             db_path=db_path,
             dry_run=dry_run,
+            include_sgb=include_sgb,
             no_backup=no_backup,
             sample_size=sample,
         )

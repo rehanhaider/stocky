@@ -15,6 +15,11 @@
 symbol can differ, so every symbol column belongs to one exchange. A column stays empty when that exchange does not list
 the ISIN in the bhavcopy used for the rebuild.
 
+`ins_type` is `equity` for shares, `etf` for exchange-traded funds whose ISIN starts with `INF`, and `sgb` for
+sovereign gold bonds. Every rebuild labels ETFs, so filtering ins_type = 'equity' no longer returns ETFs.
+SGBs are included only with `stocky rebuild --include-sgb`. This needs UDiFF bhavcopies and includes NSE series `GB`
+and BSE series `G` symbols starting with `SGB`. Other government securities stay excluded.
+
 | Column | NSE | BSE | Source |
 | --- | --- | --- | --- |
 | `nse_symbol` / `bse_symbol` | yes | yes | `TckrSymb` in each exchange's bhavcopy |
@@ -179,10 +184,21 @@ shows the source row counts, the added, removed, changed, and unchanged rows, pe
 uv run stocky rebuild --latest --dry-run
 ```
 
+Include sovereign gold bonds in both the preview and the rebuild:
+
+```bash
+uv run stocky rebuild --date 2026-07-17 --include-sgb --dry-run
+uv run stocky rebuild --date 2026-07-17 --include-sgb
+```
+
+A rebuild without `--include-sgb` drops the SGB rows. The interactive menu and terminal UI do not offer this flag.
+SGB Yahoo tickers follow the exchange symbol rules above; rebuilding does not fetch Yahoo responses.
+
 Every rebuild records its source files in the database: the BSE and NSE bhavcopy names with their trade dates and the
 Zerodha instruments file, each with its SHA-256 hash, size, modification time, and usable row count, plus the build
 time and Stocky version. The `provenance_builds` and `provenance_sources` tables keep every build; `stocky status`
 shows the latest one. Only file names are stored, not local paths.
+The `--include-sgb` flag is not recorded in provenance.
 
 Rebuild for a specific source date:
 
