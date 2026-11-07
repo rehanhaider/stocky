@@ -1049,10 +1049,10 @@ def test_interactive_rebuild_reports_sgb_on_legacy_files(tmp_path, market_csv_bu
 
     result = runner.invoke(app, ["interactive"], input="1\n1\ny\n6\n")
 
-    message = " ".join(result.stdout.split())
+    error = " ".join(result.stderr.split())
 
     assert result.exit_code == 0
-    assert "Cannot rebuild: --include-sgb needs UDiFF bhavcopies" in message
+    assert "Cannot rebuild: --include-sgb needs UDiFF bhavcopies" in error
     assert not db_path.exists()
     assert result.stdout.count("Choose an option") == 2
 
@@ -1065,10 +1065,10 @@ def test_interactive_rebuild_reports_an_unreadable_database(tmp_path, market_csv
 
     result = runner.invoke(app, ["interactive"], input="1\n1\n6\n")
 
-    message = " ".join(result.stdout.split())
+    error = " ".join(result.stderr.split())
 
     assert result.exit_code == 0
-    assert "Cannot rebuild: file is not a database" in message
+    assert "Cannot rebuild: file is not a database" in error
     assert db_path.read_text(encoding="utf-8") == "not a database"
     assert result.stdout.count("Choose an option") == 2
 
@@ -1294,9 +1294,10 @@ def test_interactive_yahoo_update_rejects_invalid_stale_days(
     result = runner.invoke(app, ["interactive"], input=f"2\nBSE\n\n\nn\n{stale_days}\n6\n")
 
     message = " ".join(result.stdout.split())
+    error = " ".join(result.stderr.split())
 
     assert result.exit_code == 0
-    assert "Enter a number of days of 0 or more, or leave blank for any age." in message
+    assert "Enter a number of days of 0 or more, or leave blank for any age." in error
     assert "tickers to fetch from Yahoo Finance" not in message
     assert result.stdout.count("Choose an option") == 2
 

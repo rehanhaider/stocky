@@ -653,7 +653,7 @@ def _interactive_rebuild() -> None:
     try:
         current_has_sgb = has_sgb_rows(DEFAULT_DB_PATH)
     except Exception as exc:
-        console.print(f"[red]Cannot rebuild: {escape(str(exc))}[/red]")
+        _print_error(f"Cannot rebuild: {exc}")
         return
     include_sgb = typer.confirm("Include sovereign gold bonds (needs UDiFF bhavcopies)?", default=current_has_sgb)
 
@@ -756,7 +756,7 @@ def _interactive_yahoo_update() -> None:
         except ValueError:
             stale_days = -1
         if not stale_days >= 0:
-            console.print("[red]Enter a number of days of 0 or more, or leave blank for any age.[/red]")
+            _print_error("Enter a number of days of 0 or more, or leave blank for any age.")
             return
 
     manager = YahooDataManager(DEFAULT_DB_PATH)
