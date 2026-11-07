@@ -183,11 +183,10 @@ uv run stocky
 ```
 
 The rebuild option lists the BSE/NSE bhavcopy pairs it found in `data/marketData/bhavCopies`, lets you pick one by row
-number or trade date, and previews the resolved files, their row counts, and the row changes before you confirm the
-rebuild. The Yahoo
-option asks for the exchange, an optional limit, and whether to fetch only uncached tickers, then shows how many tickers
-it will fetch and a progress bar while it runs. Both options run exactly what `stocky rebuild` and
-`stocky yahoo update` run.
+number or trade date, asks whether to include sovereign gold bonds, and previews the resolved files, their row counts,
+and the row changes before you confirm the rebuild. The Yahoo option asks for the exchange, optional symbols, an optional
+limit, whether to fetch only uncached tickers, and an optional stale-days age, then shows how many tickers it will fetch
+and a progress bar while it runs. Both options run exactly what `stocky rebuild` and `stocky yahoo update` run.
 
 Open the full-screen terminal UI:
 
@@ -200,9 +199,10 @@ The TUI needs the optional Textual extra; install it with `uv sync --extra tui` 
 over the same code as the commands:
 
 - **Rebuild** resolves the bhavcopies from the latest pair, a discovered trade date, or files you pick in the file tree,
-  previews each file's row count, and shows each stage and any validation failure while `stocky rebuild` runs.
-- **Yahoo update** takes the exchange, limit, and missing-only choices, counts the tickers to fetch, and shows a live
-  progress bar while `stocky yahoo update` runs.
+  previews each file's row count, and shows each stage and any validation failure while `stocky rebuild` runs. The
+  **Rebuild** button first runs a dry run and shows its row changes; it writes only after you choose **Write database**.
+- **Yahoo update** takes the exchange, symbols, limit, missing-only, and stale-days choices, counts the tickers to fetch,
+  and shows a live progress bar while `stocky yahoo update` runs.
 - **Status** shows the `stocky status` tables, opens the database folder, and exports the consolidated table to CSV, JSON,
   or Parquet.
 - **Search** lists matches for a symbol, ISIN, BSE scrip code, or name; select a row to see its equivalents.
@@ -231,7 +231,9 @@ uv run stocky rebuild --date 2026-07-17 --include-sgb --dry-run
 uv run stocky rebuild --date 2026-07-17 --include-sgb
 ```
 
-A rebuild without `--include-sgb` drops the SGB rows. The interactive menu and terminal UI do not offer this flag.
+A rebuild without `--include-sgb` drops the SGB rows. The interactive menu's "Include sovereign gold bonds" prompt and
+the terminal UI's **Include SGBs** checkbox set the same option. Both default to on when the current `consolidated`
+table has `sgb` rows, so a refresh keeps them. Turn the option off to rebuild from legacy (pre-UDiFF) bhavcopies.
 SGB Yahoo tickers follow the exchange symbol rules above; rebuilding does not fetch Yahoo responses.
 
 Every rebuild records its source files in the database: the BSE and NSE bhavcopy names with their trade dates and the

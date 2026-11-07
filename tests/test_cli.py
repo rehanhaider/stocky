@@ -935,7 +935,7 @@ def test_interactive_reports_yahoo_update_errors_and_keeps_going(
     seed_consolidated(db_path, [("INE001", "equity", None, None, None, None, None, None, "", "")])
     monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
 
-    result = runner.invoke(app, ["interactive"], input="2\nBSE\n\nn\n6\n")
+    result = runner.invoke(app, ["interactive"], input="2\nBSE\n\n\nn\n\n6\n")
 
     error = " ".join(result.stderr.split())
 
@@ -964,7 +964,7 @@ def test_interactive_rebuild_previews_and_writes_database(tmp_path, market_csv_b
     db_path = tmp_path / "stocky.db"
     _use_interactive_defaults(monkeypatch, paths, db_path)
 
-    result = runner.invoke(app, ["interactive"], input="1\n1\ny\n6\n")
+    result = runner.invoke(app, ["interactive"], input="1\n1\n\ny\n6\n")
 
     message = " ".join(result.stdout.split())
 
@@ -978,6 +978,98 @@ def test_interactive_rebuild_previews_and_writes_database(tmp_path, market_csv_b
     assert "Rebuild summary" in message
     with sqlite3.connect(db_path) as con:
         assert con.execute("SELECT COUNT(*) FROM consolidated").fetchone()[0] == 1
+    assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_rebuild_keeps_sgb_rows_when_the_current_table_has_them(
+    sgb_cli_paths, tmp_path, monkeypatch, runner
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    initial = runner.invoke(
+        app, ["rebuild", *_rebuild_path_args(sgb_cli_paths, db_path), "--include-sgb", "--no-backup"]
+    )
+    assert initial.exit_code == 0
+    _use_interactive_defaults(monkeypatch, sgb_cli_paths, db_path)
+
+    result = runner.invoke(app, ["interactive"], input="1\n1\n\ny\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "Include sovereign gold bonds (needs UDiFF bhavcopies)? [Y/n]" in message
+    assert "Rebuild summary" in message
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("SELECT isin, ins_type FROM consolidated ORDER BY isin").fetchall() == [
+            ("IN0020200286", "sgb"),
+            ("INF204KB14I2", "etf"),
+        ]
+
+
+def test_interactive_rebuild_shows_the_sgb_rows_an_opt_out_would_drop(
+    sgb_cli_paths, tmp_path, monkeypatch, runner
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    initial = runner.invoke(
+        app, ["rebuild", *_rebuild_path_args(sgb_cli_paths, db_path), "--include-sgb", "--no-backup"]
+    )
+    assert initial.exit_code == 0
+    before = db_path.read_bytes()
+    _use_interactive_defaults(monkeypatch, sgb_cli_paths, db_path)
+
+    result = runner.invoke(app, ["interactive"], input="1\n1\nn\nn\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "│ Removed │ 1 │" in message
+    assert "│ removed │ IN0020200286 │ SGBN28VIII │" in message
+    assert db_path.read_bytes() == before
+
+
+def test_interactive_rebuild_offers_sgb_off_by_default_without_sgb_rows(
+    sgb_cli_paths, tmp_path, monkeypatch, runner
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    _use_interactive_defaults(monkeypatch, sgb_cli_paths, db_path)
+
+    result = runner.invoke(app, ["interactive"], input="1\n1\n\ny\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "Include sovereign gold bonds (needs UDiFF bhavcopies)? [y/N]" in message
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("SELECT isin, ins_type FROM consolidated").fetchall() == [("INF204KB14I2", "etf")]
+
+
+def test_interactive_rebuild_reports_sgb_on_legacy_files(tmp_path, market_csv_builder, monkeypatch, runner) -> None:
+    paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 5, 3))
+    db_path = tmp_path / "stocky.db"
+    _use_interactive_defaults(monkeypatch, paths, db_path)
+
+    result = runner.invoke(app, ["interactive"], input="1\n1\ny\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "Cannot rebuild: --include-sgb needs UDiFF bhavcopies" in message
+    assert not db_path.exists()
+    assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_rebuild_reports_an_unreadable_database(tmp_path, market_csv_builder, monkeypatch, runner) -> None:
+    paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 5, 3))
+    db_path = tmp_path / "stocky.db"
+    db_path.write_text("not a database", encoding="utf-8")
+    _use_interactive_defaults(monkeypatch, paths, db_path)
+
+    result = runner.invoke(app, ["interactive"], input="1\n1\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "Cannot rebuild: file is not a database" in message
+    assert db_path.read_text(encoding="utf-8") == "not a database"
     assert result.stdout.count("Choose an option") == 2
 
 
@@ -1004,7 +1096,7 @@ def test_interactive_rebuild_reports_malformed_source_file(tmp_path, market_csv_
     db_path = tmp_path / "stocky.db"
     _use_interactive_defaults(monkeypatch, paths, db_path)
 
-    result = runner.invoke(app, ["interactive"], input="1\n1\n6\n")
+    result = runner.invoke(app, ["interactive"], input="1\n1\n\n6\n")
 
     message = " ".join(result.stdout.split())
     error = " ".join(result.stderr.split())
@@ -1070,7 +1162,7 @@ def test_interactive_rebuild_declined_leaves_database_untouched(
     db_path = tmp_path / "stocky.db"
     _use_interactive_defaults(monkeypatch, paths, db_path)
 
-    result = runner.invoke(app, ["interactive"], input="1\n1\nn\n6\n")
+    result = runner.invoke(app, ["interactive"], input="1\n1\n\nn\n6\n")
 
     message = " ".join(result.stdout.split())
 
@@ -1090,7 +1182,7 @@ def test_interactive_rebuild_accepts_a_date_with_an_unzipped_nse_file(
     db_path = tmp_path / "stocky.db"
     _use_interactive_defaults(monkeypatch, paths, db_path)
 
-    result = runner.invoke(app, ["interactive"], input="1\n2026-07-17\ny\n6\n")
+    result = runner.invoke(app, ["interactive"], input="1\n2026-07-17\n\ny\n6\n")
 
     message = " ".join(result.stdout.split())
 
@@ -1112,7 +1204,7 @@ def test_interactive_rebuild_accepts_a_date_below_the_listed_rows(
     db_path = tmp_path / "stocky.db"
     _use_interactive_defaults(monkeypatch, paths, db_path)
 
-    result = runner.invoke(app, ["interactive"], input="1\n2021-05-03\ny\n6\n")
+    result = runner.invoke(app, ["interactive"], input="1\n2021-05-03\n\ny\n6\n")
 
     message = " ".join(result.stdout.split())
 
@@ -1133,7 +1225,7 @@ def test_interactive_yahoo_update_prompts_and_reports_progress(
     monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
     _use_fake_yahooquery(monkeypatch)
 
-    result = runner.invoke(app, ["interactive"], input="2\nnse\n2\nn\ny\n6\n")
+    result = runner.invoke(app, ["interactive"], input="2\nnse\n\n2\nn\n\ny\n6\n")
 
     message = " ".join(result.stdout.split())
 
@@ -1141,6 +1233,71 @@ def test_interactive_yahoo_update_prompts_and_reports_progress(
     assert "2 tickers to fetch from Yahoo Finance (NSE, yq_ns)." in message
     assert "Processed 2; wrote 2; skipped 0." in message
     assert "2/2 processed; 2 written; 0 skipped" in result.stderr
+    assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_yahoo_update_passes_symbols_and_stale_days(tmp_path, monkeypatch, runner) -> None:
+    calls = []
+
+    class FakeManager:
+        def __init__(self, selected_db_path) -> None:
+            pass
+
+        def update_data(self, **options):
+            calls.append({key: value for key, value in options.items() if key != "progress"})
+            return YahooUpdateResult(processed=2, written=2, skipped=0, dry_run=bool(options.get("dry_run")))
+
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(cli, "YahooDataManager", FakeManager)
+
+    result = runner.invoke(app, ["interactive"], input="2\nNSE\nRELIANCE.NS, INFY\n\nn\n30\ny\n6\n")
+
+    assert result.exit_code == 0
+    request = {
+        "exchange": "NSE",
+        "limit": None,
+        "missing_only": False,
+        "symbols": ["RELIANCE.NS", "INFY"],
+        "stale_days": 30.0,
+    }
+    assert calls == [request | {"dry_run": True}, request]
+
+
+def test_interactive_yahoo_update_stops_when_no_ticker_is_stale(
+    tmp_path, monkeypatch, seed_consolidated, runner
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    _seed_cached_yahoo_responses(db_path, ["RELIANCE", "INFY", "20MICRONS", "INFYBEES"])
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
+
+    result = runner.invoke(app, ["interactive"], input="2\nBSE\n\n\nn\n7\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "0 tickers to fetch from Yahoo Finance (BSE, yq_bo)." in message
+    assert "Nothing to fetch; every ticker was fetched in the last 7 days." in message
+    assert "Start the update?" not in message
+
+
+@pytest.mark.parametrize("stale_days", ["-1", "soon", "nan"])
+def test_interactive_yahoo_update_rejects_invalid_stale_days(
+    stale_days, tmp_path, monkeypatch, seed_consolidated, runner
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
+
+    result = runner.invoke(app, ["interactive"], input=f"2\nBSE\n\n\nn\n{stale_days}\n6\n")
+
+    message = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "Enter a number of days of 0 or more, or leave blank for any age." in message
+    assert "tickers to fetch from Yahoo Finance" not in message
     assert result.stdout.count("Choose an option") == 2
 
 
@@ -1165,7 +1322,7 @@ def test_interactive_yahoo_update_rejects_non_numeric_limit(tmp_path, monkeypatc
     monkeypatch.setenv("COLUMNS", "200")
     monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
 
-    result = runner.invoke(app, ["interactive"], input="2\nBSE\nmany\n6\n")
+    result = runner.invoke(app, ["interactive"], input="2\nBSE\n\nmany\n6\n")
 
     error = " ".join(result.stderr.split())
 
@@ -1180,7 +1337,7 @@ def test_interactive_yahoo_update_stops_when_nothing_to_fetch(tmp_path, monkeypa
     monkeypatch.setenv("COLUMNS", "200")
     monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
 
-    result = runner.invoke(app, ["interactive"], input="2\nBSE\n\ny\n6\n")
+    result = runner.invoke(app, ["interactive"], input="2\nBSE\n\n\ny\n\n6\n")
 
     message = " ".join(result.stdout.split())
 
@@ -1197,7 +1354,7 @@ def test_interactive_yahoo_update_rejects_zero_limit(tmp_path, monkeypatch, seed
     monkeypatch.setenv("COLUMNS", "200")
     monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
 
-    result = runner.invoke(app, ["interactive"], input="2\nBSE\n0\n6\n")
+    result = runner.invoke(app, ["interactive"], input="2\nBSE\n\n0\n6\n")
 
     message = " ".join(result.stdout.split())
     error = " ".join(result.stderr.split())

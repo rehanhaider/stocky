@@ -7,10 +7,12 @@ from pathlib import Path
 from typing import Any
 
 import typer
+from rich.console import Group
 from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
     Checkbox,
@@ -39,11 +41,13 @@ from stocky.cli import (
     _format_percent,
     _format_size,
     _format_timestamp,
+    _rebuild_diff_renderables,
     _rebuild_impl,
+    _split_columns,
     _yahoo_cached_rows,
 )
 from stocky.config import DEFAULT_BHAVCOPY_DIR, DEFAULT_DB_PATH, DEFAULT_ZERODHA_INSTRUMENTS
-from stocky.database import DatabaseStatus, InstrumentMatch, read_status, search_instruments
+from stocky.database import DatabaseStatus, InstrumentMatch, has_sgb_rows, read_status, search_instruments
 from stocky.export import export_consolidated
 from stocky.pipeline import RebuildResult, preview_sources
 from stocky.sources import BhavcopyPair, list_bhavcopy_pairs, resolve_bhavcopy_paths
@@ -58,6 +62,50 @@ SEARCH_LIMIT = 50
 
 class RunCancelled(Exception):
     """Raised from a progress callback to stop a run when the user quits."""
+
+
+class ConfirmRebuildScreen(ModalScreen[bool]):
+    """Show a dry run's comparison with the current table and ask before writing, as the menu does."""
+
+    CSS = """
+    ConfirmRebuildScreen { align: center middle; }
+    #confirm-dialog { width: 90%; height: 90%; border: thick $warning; background: $surface; padding: 1 2; }
+    #confirm-diff { height: 1fr; }
+    #confirm-buttons { height: auto; margin-top: 1; }
+    #confirm-buttons > * { margin-right: 2; }
+    """
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, planned: RebuildResult) -> None:
+        super().__init__()
+        self.planned = planned
+
+    def compose(self) -> ComposeResult:
+        planned = self.planned
+        summary = Text(
+            f"Write {planned.rows} rows from {planned.bse_bhavcopy.name} and {planned.nse_bhavcopy.name} "
+            f"to {planned.db_path}?",
+            style="bold",
+        )
+        diff = _rebuild_diff_renderables(planned.diff) if planned.diff is not None else []
+        with Vertical(id="confirm-dialog"):
+            yield Static(summary, id="confirm-summary")
+            with VerticalScroll(id="confirm-diff"):
+                yield Static(Group(*diff), id="confirm-diff-tables")
+            with Horizontal(id="confirm-buttons"):
+                yield Button("Write database", id="confirm-write", variant="warning")
+                yield Button("Cancel", id="confirm-cancel")
+
+    @on(Button.Pressed, "#confirm-write")
+    def on_write(self) -> None:
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#confirm-cancel")
+    def on_cancel(self) -> None:
+        self.dismiss(False)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
 
 
 class StockyApp(App[None]):
@@ -77,7 +125,8 @@ class StockyApp(App[None]):
     .row Vertical Select { width: 1fr; }
     .row Checkbox { width: auto; }
     #bse-path, #nse-path, #zerodha-path, #search-term { width: 1fr; }
-    #limit { width: 28; }
+    #limit, #stale-days { width: 36; }
+    #symbols { width: 1fr; }
     #export-path { width: 1fr; }
     #picker { height: 12; border: round $secondary; }
     DataTable { height: auto; max-height: 16; margin-bottom: 1; }
@@ -129,6 +178,7 @@ class StockyApp(App[None]):
                 with Horizontal(classes="row"):
                     yield Checkbox("Dry run", id="rebuild-dry-run")
                     yield Checkbox("No backup", id="rebuild-no-backup")
+                    yield Checkbox("Include SGBs (UDiFF only)", id="rebuild-include-sgb")
                     yield Button("Preview", id="rebuild-preview")
                     yield Button("Rebuild", id="rebuild-run", variant="primary")
                 yield DataTable(id="rebuild-preview-table", show_cursor=False)
@@ -141,6 +191,9 @@ class StockyApp(App[None]):
                     )
                     yield Input(placeholder="Limit (blank = all)", id="limit", type="integer")
                     yield Checkbox("Missing only", id="missing-only")
+                    yield Input(placeholder="Stale after days (blank = any age)", id="stale-days", type="number")
+                with Horizontal(classes="row"):
+                    yield Input(placeholder="Symbols or tickers, comma-separated (blank = all)", id="symbols")
                 with Horizontal(classes="row"):
                     yield Button("Count tickers", id="yahoo-plan")
                     yield Button("Update", id="yahoo-run", variant="primary")
@@ -172,6 +225,7 @@ class StockyApp(App[None]):
         self.query_one("#rebuild-preview-table", DataTable).add_columns("Source", "File", "Rows")
         self.query_one("#search-results", DataTable).add_columns(*(label for label, _ in _SEARCH_FIELDS))
         self.query_one("#equivalents", DataTable).add_columns("Field", "Value")
+        self.query_one("#rebuild-include-sgb", Checkbox).value = self.current_has_sgb()
         self.refresh_pairs()
         self.refresh_status()
         self.log_line("Ready. Every run logs its progress and errors here.", "dim")
@@ -217,6 +271,14 @@ class StockyApp(App[None]):
 
     # Rebuild
 
+    def current_has_sgb(self) -> bool:
+        """Default the SGB choice to what the current table holds, so a refresh keeps its gold bonds."""
+        try:
+            return has_sgb_rows(self.db_path)
+        except Exception as exc:
+            self.log_line(f"Could not check the current table for SGB rows: {exc}", "yellow")
+            return False
+
     def refresh_pairs(self) -> None:
         self.pairs = list_bhavcopy_pairs(self.input_dir) if self.input_dir.is_dir() else []
         select = self.query_one("#pair", Select)
@@ -243,6 +305,7 @@ class StockyApp(App[None]):
             "db_path": self.db_path,
             "dry_run": self.query_one("#rebuild-dry-run", Checkbox).value,
             "no_backup": self.query_one("#rebuild-no-backup", Checkbox).value,
+            "include_sgb": self.query_one("#rebuild-include-sgb", Checkbox).value,
         }
 
         mode = self.source_mode()
@@ -312,11 +375,16 @@ class StockyApp(App[None]):
         if not self.start_job():
             return
         self.query_one("#rebuild-progress", ProgressBar).update(total=None, progress=0)
-        self.log_line("Rebuild started.", "bold")
-        self.run_rebuild(request)
+        if request["dry_run"]:
+            self.log_line("Dry run started.", "bold")
+            self.run_rebuild(request)
+        else:
+            # Compare first and write only once the user confirms, so a write never goes unseen.
+            self.log_line("Comparing the rebuild with the current database before writing.", "bold")
+            self.run_rebuild(request | {"dry_run": True}, confirm=request)
 
     @work(thread=True, group="job")
-    def run_rebuild(self, request: dict[str, Any]) -> None:
+    def run_rebuild(self, request: dict[str, Any], confirm: dict[str, Any] | None = None) -> None:
         def progress(stage: str) -> None:
             self.check_cancelled()
             self.call_from_thread(self.on_rebuild_stage, stage)
@@ -328,7 +396,37 @@ class StockyApp(App[None]):
         except Exception as exc:
             self.call_from_thread(self.on_rebuild_failed, exc)
         else:
-            self.call_from_thread(self.on_rebuild_done, result)
+            if confirm is None:
+                self.call_from_thread(self.on_rebuild_done, result)
+            else:
+                self.call_from_thread(self.on_rebuild_planned, result, confirm)
+
+    def on_rebuild_planned(self, planned: RebuildResult, request: dict[str, Any]) -> None:
+        """Show the comparison, then write from the same files only if the user confirms."""
+        self.query_one("#rebuild-stage", Static).update("Waiting for confirmation")
+        self.query_one("#rebuild-progress", ProgressBar).update(total=1, progress=0)
+        self.log_rebuild_diff(planned)
+        # Write from the files the dry run resolved, as the menu does, so a pair that arrives while the
+        # dialog is open cannot replace the one it describes.
+        request = {key: value for key, value in request.items() if key != "latest"} | {
+            "bse_bhavcopy": planned.bse_bhavcopy,
+            "nse_bhavcopy": planned.nse_bhavcopy,
+            "zerodha_instruments": planned.zerodha_instruments,
+        }
+
+        def confirmed(write: bool | None) -> None:
+            if self.cancel_requested:
+                return
+            if not write:
+                self.query_one("#rebuild-stage", Static).update("Rebuild cancelled")
+                self.log_line("Rebuild cancelled; the database was not changed.", "yellow")
+                self.finish_job()
+                return
+            self.query_one("#rebuild-progress", ProgressBar).update(total=None, progress=0)
+            self.log_line("Rebuild started.", "bold")
+            self.run_rebuild(request)
+
+        self.push_screen(ConfirmRebuildScreen(planned), confirmed)
 
     def on_rebuild_stage(self, stage: str) -> None:
         self.query_one("#rebuild-stage", Static).update(f"{stage}...")
@@ -346,13 +444,16 @@ class StockyApp(App[None]):
         backup = f"; backup {result.backup_path}" if result.backup_path else ""
         verb = "Validated" if result.dry_run else "Wrote"
         self.log_line(f"{verb} {result.rows} rows to {result.db_path}{backup}.", "bold green")
+        self.log_rebuild_diff(result)
+        self.finish_job()
+
+    def log_rebuild_diff(self, result: RebuildResult) -> None:
         if result.diff is not None:
             diff = result.diff
             self.log_line(
                 f"Against the previous table: {diff.added} added, {diff.removed} removed, "
                 f"{diff.changed} changed, {diff.unchanged} unchanged."
             )
-        self.finish_job()
 
     # Yahoo update
 
@@ -361,10 +462,20 @@ class StockyApp(App[None]):
         limit = int(raw_limit) if raw_limit else None
         if limit is not None and limit < 1:
             raise ValueError("Enter a positive limit, or leave it blank for all tickers.")
+        raw_stale_days = self.query_one("#stale-days", Input).value.strip()
+        try:
+            stale_days = float(raw_stale_days) if raw_stale_days else None
+        except ValueError:
+            stale_days = -1.0
+        if stale_days is not None and not stale_days >= 0:
+            raise ValueError("Enter stale days of 0 or more, or leave it blank for any age.")
+        raw_symbols = self.query_one("#symbols", Input).value.strip()
         return {
             "exchange": str(self.query_one("#exchange", Select).value),
             "limit": limit,
             "missing_only": self.query_one("#missing-only", Checkbox).value,
+            "symbols": _split_columns(raw_symbols) if raw_symbols else None,
+            "stale_days": stale_days,
         }
 
     @on(Button.Pressed, "#yahoo-plan")

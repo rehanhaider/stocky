@@ -324,6 +324,20 @@ def fetch_consolidated_symbols(
     return [str(row[0]) for row in rows]
 
 
+def has_sgb_rows(db_path: Path = DEFAULT_DB_PATH) -> bool:
+    """Report whether the consolidated table holds sovereign gold bonds, so a refresh can keep them by default."""
+    if not db_path.exists():
+        return False
+
+    with connect(db_path) as con:
+        if not table_exists(con, CONSOLIDATED_TABLE):
+            return False
+        if "ins_type" not in {row[1] for row in con.execute(f"PRAGMA table_info({CONSOLIDATED_TABLE})")}:
+            return False
+        row = con.execute(f"SELECT 1 FROM {CONSOLIDATED_TABLE} WHERE ins_type = 'sgb' LIMIT 1").fetchone()
+    return row is not None
+
+
 def read_status(db_path: Path = DEFAULT_DB_PATH) -> DatabaseStatus:
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {db_path}. Run 'stocky rebuild' first.")
