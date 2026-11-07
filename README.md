@@ -404,7 +404,7 @@ uv run stocky explore
 uv run stocky status --json
 ```
 
-The `status`, `summary`, `query`, `lookup`, `explore`, `rebuild`, `screen`, `yahoo update`, `yahoo import-cache`, `yahoo fields`, `mf import`, `mf query`, `debt import`, `debt query`, `indices import`, `indices query`, and `brokers query` commands accept `--json` and print JSON on stdout. With `--json`, `yahoo update` also writes its progress and error events to stderr as JSON lines, one per line.
+The `status`, `summary`, `query`, `lookup`, `explore`, `rebuild`, `screen`, `yahoo update`, `yahoo import-cache`, `yahoo fields`, `mf import`, `mf query`, `debt import`, `debt query`, `indices import`, `indices query`, and `brokers query` commands accept `--json` and print JSON on stdout. With `--json`, `yahoo update` also writes its progress and error events to stderr as JSON lines, one per line. Every command prints its errors on stderr, with or without `--json`, so stdout carries only results.
 
 ### Exporting the consolidated table
 

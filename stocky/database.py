@@ -552,6 +552,10 @@ def import_yahoo_json_cache(
     cache_dir: Path,
     db_path: Path = DEFAULT_DB_PATH,
 ) -> JsonImportResult:
+    # Check before initialize_database, so a mistyped directory fails without creating an empty database.
+    if not cache_dir.is_dir():
+        raise FileNotFoundError(f"Yahoo JSON cache directory not found: {cache_dir}")
+
     initialize_database(db_path)
 
     imported = 0

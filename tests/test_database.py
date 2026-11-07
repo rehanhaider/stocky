@@ -92,6 +92,15 @@ def test_import_yahoo_json_cache_skips_bad_file(tmp_path) -> None:
     assert read_available_yahoo_symbols(tmp_path / "stocky.db") == {"GOOD.NS"}
 
 
+def test_import_yahoo_json_cache_rejects_missing_dir_without_creating_database(tmp_path) -> None:
+    db_path = tmp_path / "stocky.db"
+
+    with pytest.raises(FileNotFoundError, match="Yahoo JSON cache directory not found"):
+        import_yahoo_json_cache(tmp_path / "missing", db_path)
+
+    assert not db_path.exists()
+
+
 def test_consolidated_table_name_is_the_db_contract(tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path)

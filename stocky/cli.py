@@ -81,6 +81,15 @@ def _emit_json(payload: object) -> None:
     )
 
 
+def _print_error(message: str) -> None:
+    """Print an error on stderr in every output mode, so stdout carries only results.
+
+    The message is escaped because it often holds user input or exception text, and Rich would
+    read a bracketed fragment such as '[/]' as a markup tag and raise MarkupError.
+    """
+    error_console.print(f"[red]{escape(message)}[/red]")
+
+
 def _parse_date(value: str | None) -> date | None:
     if value is None:
         return None
@@ -242,13 +251,13 @@ def _print_provenance(provenance: BuildProvenance | None) -> None:
 
 def _print_search_result(term: str, result: SearchResult, *, numbered: bool = False) -> None:
     if result.total == 0:
-        console.print(f"[yellow]No matches for '{term}'.[/yellow]")
+        console.print(f"[yellow]No matches for '{escape(term)}'.[/yellow]")
         return
 
     if result.fuzzy:
         console.print("[dim]No direct matches; showing closest names.[/dim]")
 
-    table = Table(title=f"Matches for '{term}'")
+    table = Table(title=f"Matches for '{escape(term)}'")
     if numbered:
         table.add_column("#", justify="right")
     for header, _ in _SEARCH_FIELDS:
@@ -256,7 +265,7 @@ def _print_search_result(term: str, result: SearchResult, *, numbered: bool = Fa
     for index, match in enumerate(result.matches, start=1):
         table.add_row(
             *([str(index)] if numbered else []),
-            *(getattr(match, field) or "-" for _, field in _SEARCH_FIELDS),
+            *(escape(getattr(match, field) or "-") for _, field in _SEARCH_FIELDS),
         )
     console.print(table)
 
@@ -402,11 +411,11 @@ def _print_broker_search_result(term: str, result: BrokerSearchResult) -> None:
 
 def _print_equivalents(match: InstrumentMatch, term: str | None = None) -> None:
     identifier = term or match.nse_symbol or match.bse_symbol or match.isin or "-"
-    table = Table(title=f"Equivalents for '{identifier}'")
+    table = Table(title=f"Equivalents for '{escape(identifier)}'")
     table.add_column("Field")
     table.add_column("Value")
     for label, field in _MATCH_FIELDS:
-        table.add_row(label, getattr(match, field) or "-")
+        table.add_row(label, escape(getattr(match, field) or "-"))
     console.print(table)
 
 
@@ -587,9 +596,9 @@ def _select_bhavcopy_paths() -> BhavcopyPaths | None:
     """Ask which bhavcopy pair to rebuild from; return None to go back to the menu."""
     pairs = list_bhavcopy_pairs(DEFAULT_BHAVCOPY_DIR)
     if not pairs:
-        console.print(
-            f"[red]No BSE/NSE bhavcopy pairs found in {DEFAULT_BHAVCOPY_DIR}. "
-            "Download the bhavcopy files into that directory first.[/red]"
+        _print_error(
+            f"No BSE/NSE bhavcopy pairs found in {DEFAULT_BHAVCOPY_DIR}. "
+            "Download the bhavcopy files into that directory first."
         )
         return None
 
@@ -599,23 +608,23 @@ def _select_bhavcopy_paths() -> BhavcopyPaths | None:
     if selection.isdigit():
         row_number = int(selection)
         if not 1 <= row_number <= listed:
-            console.print(f"[red]Enter a number between 1 and {listed}.[/red]")
+            _print_error(f"Enter a number between 1 and {listed}.")
             return None
         pair = pairs[row_number - 1]
     else:
         try:
             trade_date = date.fromisoformat(selection)
         except ValueError:
-            console.print("[red]Enter a row number or a date like 2026-09-19.[/red]")
+            _print_error("Enter a row number or a date like 2026-09-19.")
             return None
 
         # Resolve against the discovered pairs rather than the canonical filenames, so every
         # accepted spelling works and dates below the displayed rows stay reachable.
         pair = next((candidate for candidate in pairs if candidate.trade_date == trade_date), None)
         if pair is None:
-            console.print(
-                f"[red]No BSE/NSE bhavcopy pair for {trade_date} in {DEFAULT_BHAVCOPY_DIR}. "
-                "Pick a listed row or download that day's files.[/red]"
+            _print_error(
+                f"No BSE/NSE bhavcopy pair for {trade_date} in {DEFAULT_BHAVCOPY_DIR}. "
+                "Pick a listed row or download that day's files."
             )
             return None
 
@@ -637,7 +646,7 @@ def _interactive_rebuild() -> None:
                 dry_run=True,
             )
     except Exception as exc:
-        console.print(f"[red]Cannot rebuild: {escape(str(exc))}[/red]")
+        _print_error(f"Cannot rebuild: {exc}")
         return
 
     rows = {source.role: source.rows for source in planned.sources}
@@ -665,7 +674,7 @@ def _interactive_rebuild() -> None:
                 progress=lambda stage: spinner.update(f"{stage}..."),
             )
     except Exception as exc:
-        console.print(f"[red]Rebuild failed: {escape(str(exc))}[/red]")
+        _print_error(f"Rebuild failed: {exc}")
         return
 
     _print_rebuild_result(result)
@@ -693,7 +702,7 @@ def _interactive_show_matches(term: str, result: SearchResult) -> None:
 def _interactive_yahoo_update() -> None:
     exchange = typer.prompt("Exchange", default="BSE").strip().upper()
     if exchange not in YAHOO_EXCHANGES:
-        console.print(f"[red]Enter one of {', '.join(YAHOO_EXCHANGES)}.[/red]")
+        _print_error(f"Enter one of {', '.join(YAHOO_EXCHANGES)}.")
         return
 
     raw_limit = typer.prompt("Limit (blank = all)", default="", show_default=False).strip()
@@ -704,7 +713,7 @@ def _interactive_yahoo_update() -> None:
         except ValueError:
             limit = 0
         if limit < 1:
-            console.print("[red]Enter a positive number, or leave blank for all.[/red]")
+            _print_error("Enter a positive number, or leave blank for all.")
             return
 
     missing_only = typer.confirm("Only fetch tickers with no cached response?", default=False)
@@ -718,7 +727,7 @@ def _interactive_yahoo_update() -> None:
             missing_only=missing_only,
         )
     except Exception as exc:
-        console.print(f"[red]{escape(str(exc))}[/red]")
+        _print_error(str(exc))
         return
 
     console.print(
@@ -746,7 +755,7 @@ def _interactive_yahoo_update() -> None:
                 progress=print_progress,
             )
     except Exception as exc:
-        console.print(f"[red]{escape(str(exc))}[/red]")
+        _print_error(str(exc))
         return
 
     console.print(f"[green]Processed {result.processed}; wrote {result.written}; skipped {result.skipped}.[/green]")
@@ -789,25 +798,29 @@ def interactive() -> None:
         elif choice == "2":
             _interactive_yahoo_update()
         elif choice == "3":
-            result = import_yahoo_json_cache(DEFAULT_YAHOO_JSON_CACHE_DIR, DEFAULT_DB_PATH)
-            console.print(f"[green]Imported {result.imported}; skipped {result.skipped}.[/green]")
+            try:
+                result = import_yahoo_json_cache(DEFAULT_YAHOO_JSON_CACHE_DIR, DEFAULT_DB_PATH)
+            except Exception as exc:
+                _print_error(str(exc))
+            else:
+                console.print(f"[green]Imported {result.imported}; skipped {result.skipped}.[/green]")
         elif choice == "4":
             try:
                 _print_status(read_status(DEFAULT_DB_PATH))
             except Exception as exc:
-                console.print(f"[red]{exc}[/red]")
+                _print_error(str(exc))
         elif choice == "5":
             term = typer.prompt("Search term").strip()
             try:
                 result = search_instruments(term, DEFAULT_DB_PATH)
             except Exception as exc:
-                console.print(f"[red]{exc}[/red]")
+                _print_error(str(exc))
             else:
                 _interactive_show_matches(term, result)
         elif choice == "6":
             raise typer.Exit()
         else:
-            console.print("[red]Not a valid selection.[/red]")
+            _print_error("Not a valid selection.")
 
 
 @app.command()
@@ -827,9 +840,7 @@ def tui(
     except ModuleNotFoundError as exc:
         if exc.name is None or exc.name.partition(".")[0] != "textual":
             raise
-        error_console.print(
-            "[red]The TUI needs Textual. Install it with 'uv sync --extra tui' or 'pip install \"stocky[tui]\"'.[/red]"
-        )
+        _print_error("The TUI needs Textual. Install it with 'uv sync --extra tui' or 'pip install \"stocky[tui]\"'.")
         raise typer.Exit(1) from exc
 
     StockyApp(db_path=db_path, input_dir=input_dir, zerodha_instruments=zerodha_instruments).run()
@@ -926,7 +937,7 @@ def rebuild(
             sample_size=sample,
         )
     except Exception as exc:
-        (error_console if json_output else console).print(f"[red]{exc}[/red]")
+        _print_error(str(exc))
         raise typer.Exit(1) from exc
 
     if json_output:
@@ -944,7 +955,7 @@ def status(
     try:
         result = read_status(db_path)
     except Exception as exc:
-        (error_console if json_output else console).print(f"[red]{exc}[/red]")
+        _print_error(str(exc))
         raise typer.Exit(1) from exc
 
     if json_output:
@@ -973,7 +984,7 @@ def summary(
     try:
         result = build_refresh_summary(db_path, sample_size=sample)
     except Exception as exc:
-        error_console.print(f"[red]{escape(str(exc))}[/red]")
+        _print_error(str(exc))
         raise typer.Exit(1) from exc
 
     if json_output:
@@ -987,7 +998,7 @@ def summary(
 
     if not result.passed:
         failed = ", ".join(check.name for check in result.checks if not check.passed)
-        error_console.print(f"[red]Validation failed: {escape(failed)}.[/red]")
+        _print_error(f"Validation failed: {failed}.")
         raise typer.Exit(1)
 
 
@@ -1005,7 +1016,7 @@ def query(
     try:
         result = search_instruments(term, db_path, limit=limit, exact=exact)
     except Exception as exc:
-        (error_console if json_output else console).print(f"[red]{exc}[/red]")
+        _print_error(str(exc))
         raise typer.Exit(1) from exc
 
     if json_output:
@@ -1027,13 +1038,13 @@ def lookup(
     try:
         result = search_instruments(identifier, db_path, exact=True, limit=limit)
     except Exception as exc:
-        (error_console if json_output else console).print(f"[red]{exc}[/red]")
+        _print_error(str(exc))
         raise typer.Exit(1) from exc
 
     if result.total == 0:
-        (error_console if json_output else console).print(
-            f"[red]No instrument matches '{identifier}' exactly.\n"
-            f"Try 'stocky query {shlex.quote(identifier)}' for a fuzzy search.[/red]"
+        _print_error(
+            f"No instrument matches '{identifier}' exactly.\n"
+            f"Try 'stocky query {shlex.quote(identifier)}' for a fuzzy search."
         )
         raise typer.Exit(1)
     if result.total > 1:
@@ -1059,13 +1070,11 @@ def explore(
 ) -> None:
     """Search instruments and inspect their equivalent identifiers."""
     if limit < 1:
-        (error_console if json_output else console).print("[red]Limit must be at least 1.[/red]")
+        _print_error("Limit must be at least 1.")
         raise typer.Exit(1)
 
     if not db_path.exists():
-        (error_console if json_output else console).print(
-            f"[red]Database not found: {db_path}. Run 'stocky rebuild' first.[/red]"
-        )
+        _print_error(f"Database not found: {db_path}. Run 'stocky rebuild' first.")
         raise typer.Exit(1)
 
     while True:
@@ -1077,10 +1086,10 @@ def explore(
         try:
             result = search_instruments(term, db_path, limit=limit)
         except ValueError as exc:
-            (error_console if json_output else console).print(f"[red]{exc}[/red]")
+            _print_error(str(exc))
             continue
         except Exception as exc:
-            (error_console if json_output else console).print(f"[red]{exc}[/red]")
+            _print_error(str(exc))
             raise typer.Exit(1) from exc
 
         if json_output:
@@ -1172,7 +1181,7 @@ def export(
                 require=_split_columns(require),
             )
     except Exception as exc:
-        error_console.print(f"[red]{escape(str(exc))}[/red]")
+        _print_error(str(exc))
         raise typer.Exit(1) from exc
 
     if result.output is None:
@@ -1209,7 +1218,7 @@ def snapshot(
     try:
         result = create_snapshot(db_path, output_dir=output_dir, version=version, formats=_split_columns(formats))
     except Exception as exc:
-        error_console.print(f"[red]{escape(str(exc))}[/red]")
+        _print_error(str(exc))
         raise typer.Exit(1) from exc
 
     if json_output:
@@ -1255,7 +1264,7 @@ def screen(
             limit=limit,
         )
     except Exception as exc:
-        (error_console if json_output else console).print(f"[red]{escape(str(exc))}[/red]")
+        _print_error(str(exc))
         raise typer.Exit(1) from exc
 
     if json_output:
@@ -1361,7 +1370,7 @@ def yahoo_update(
             sys.stderr.write(json.dumps({"event": "error", "message": str(exc)}) + "\n")
             sys.stderr.flush()
         else:
-            error_console.print(f"[red]{escape(str(exc))}[/red]")
+            _print_error(str(exc))
         raise typer.Exit(1) from exc
 
     if json_output:
@@ -1383,7 +1392,11 @@ def yahoo_import_cache(
     json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
 ) -> None:
     """Import legacy Yahoo JSON files into SQLite."""
-    result = import_yahoo_json_cache(cache_dir, db_path)
+    try:
+        result = import_yahoo_json_cache(cache_dir, db_path)
+    except Exception as exc:
+        _print_error(str(exc))
+        raise typer.Exit(1) from exc
     if json_output:
         _emit_json(result)
     else:
@@ -1400,13 +1413,13 @@ def yahoo_fields(
     try:
         rows = lookup_fields(identifier, db_path)
     except Exception as exc:
-        (error_console if json_output else console).print(f"[red]{escape(str(exc))}[/red]")
+        _print_error(str(exc))
         raise typer.Exit(1) from exc
 
     if not rows:
-        (error_console if json_output else console).print(
-            f"[red]No instrument with a Yahoo ticker matches '{escape(identifier)}' exactly.\n"
-            f"Try 'stocky query {escape(shlex.quote(identifier))}' for a fuzzy search.[/red]"
+        _print_error(
+            f"No instrument with a Yahoo ticker matches '{identifier}' exactly.\n"
+            f"Try 'stocky query {shlex.quote(identifier)}' for a fuzzy search."
         )
         raise typer.Exit(1)
 
@@ -1436,7 +1449,7 @@ def yahoo_enriched(
     try:
         result = export_enriched(db_path, output=output, format=format, exchange=exchange)
     except Exception as exc:
-        error_console.print(f"[red]{escape(str(exc))}[/red]")
+        _print_error(str(exc))
         raise typer.Exit(1) from exc
 
     if result.output is not None:
@@ -1459,7 +1472,7 @@ def mf_import(
     try:
         result = import_mutual_funds(mf_instruments, amfi, db_path)
     except Exception as exc:
-        (error_console if json_output else console).print(f"[red]{escape(str(exc))}[/red]")
+        _print_error(str(exc))
         raise typer.Exit(1) from exc
 
     if json_output:
@@ -1489,7 +1502,7 @@ def mf_query(
     try:
         result = search_mutual_funds(term, db_path, limit=limit, exact=exact)
     except Exception as exc:
-        (error_console if json_output else console).print(f"[red]{escape(str(exc))}[/red]")
+        _print_error(str(exc))
         raise typer.Exit(1) from exc
 
     if json_output:
@@ -1508,7 +1521,7 @@ def debt_import(
     try:
         result = import_bse_debt(file if file is not None else newest_bse_debt_archive(), db_path)
     except Exception as exc:
-        (error_console if json_output else console).print(f"[red]{escape(str(exc))}[/red]")
+        _print_error(str(exc))
         raise typer.Exit(1) from exc
 
     if json_output:
@@ -1532,7 +1545,7 @@ def debt_query(
     try:
         result = search_bse_debt(term, db_path, limit=limit, exact=exact)
     except Exception as exc:
-        (error_console if json_output else console).print(f"[red]{escape(str(exc))}[/red]")
+        _print_error(str(exc))
         raise typer.Exit(1) from exc
 
     if json_output:
@@ -1551,7 +1564,7 @@ def indices_import(
     try:
         result = import_indices(file, db_path)
     except Exception as exc:
-        (error_console if json_output else console).print(f"[red]{escape(str(exc))}[/red]")
+        _print_error(str(exc))
         raise typer.Exit(1) from exc
 
     if json_output:
@@ -1578,7 +1591,7 @@ def indices_query(
     try:
         result = search_indices(term, db_path, limit=limit, exact=exact, exchange=exchange)
     except Exception as exc:
-        (error_console if json_output else console).print(f"[red]{escape(str(exc))}[/red]")
+        _print_error(str(exc))
         raise typer.Exit(1) from exc
 
     if json_output:
@@ -1614,7 +1627,7 @@ def brokers_import(
             # Earlier brokers have committed independently. Show their counts before the error.
             if table.row_count:
                 console.print(table)
-            console.print(f"[red]{escape(str(exc))}[/red]")
+            _print_error(str(exc))
             raise typer.Exit(1) from exc
         for result in results:
             table.add_row(
@@ -1637,7 +1650,7 @@ def brokers_query(
     try:
         result = search_brokers(term, db_path, limit=limit, exact=exact, broker=broker, exchange=exchange)
     except Exception as exc:
-        (error_console if json_output else console).print(f"[red]{escape(str(exc))}[/red]")
+        _print_error(str(exc))
         raise typer.Exit(1) from exc
     if json_output:
         _emit_json({"term": term, **dataclasses.asdict(result)})

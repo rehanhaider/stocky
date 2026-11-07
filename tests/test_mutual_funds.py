@@ -390,7 +390,7 @@ def test_mf_import_reports_missing_file(tmp_path, runner, amfi_path) -> None:
     )
 
     assert result.exit_code == 1
-    assert "mutual fund instruments not found" in result.stdout
+    assert "mutual fund instruments not found" in result.stderr
 
 
 def test_rebuild_keeps_mutual_funds_table(tmp_path, market_csv_builder, amfi_path) -> None:

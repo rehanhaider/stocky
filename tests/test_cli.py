@@ -137,8 +137,8 @@ def test_rebuild_include_sgb_reports_legacy_file_error(tmp_path, market_csv_buil
     )
 
     assert result.exit_code == 1
-    assert "--include-sgb needs UDiFF bhavcopies" in result.stdout
-    assert paths.bse.name in result.stdout
+    assert "--include-sgb needs UDiFF bhavcopies" in result.stderr
+    assert paths.bse.name in result.stderr
     assert not db_path.exists()
 
 
@@ -332,7 +332,7 @@ def test_rebuild_missing_files_reports_failure(tmp_path, runner) -> None:
     )
 
     assert result.exit_code == 1
-    assert "Required input files are missing" in result.stdout
+    assert "Required input files are missing" in result.stderr
 
 
 def test_status_prints_seeded_database(tmp_path, seed_consolidated, runner) -> None:
@@ -386,7 +386,19 @@ def test_status_reports_missing_database(tmp_path, runner) -> None:
     result = runner.invoke(app, ["status", "--db-path", str(tmp_path / "missing.db")])
 
     assert result.exit_code == 1
-    assert "Database not found" in result.stdout
+    assert "Database not found" in result.stderr
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_status_reports_bracketed_error_text_on_stderr(tmp_path, runner, json_output) -> None:
+    db_path = tmp_path / "[/]" / "missing.db"
+
+    result = runner.invoke(app, ["status", "--db-path", str(db_path), *(["--json"] if json_output else [])])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "[/]" in result.stderr
+    assert "Database not found" in result.stderr
 
 
 def test_status_handles_database_without_tables(tmp_path, runner) -> None:
@@ -436,6 +448,33 @@ def test_query_prints_no_hit(tmp_path, seed_consolidated, runner) -> None:
     assert "No matches for 'MISSING'." in result.stdout
 
 
+def test_query_prints_bracketed_term_literally(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = runner.invoke(app, ["query", "[/]", "--db-path", str(db_path)])
+
+    assert result.exit_code == 0
+    assert "No matches for '[/]'." in result.stdout
+
+
+def test_query_and_lookup_print_bracketed_values_literally(tmp_path, seed_consolidated, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(
+        db_path,
+        [("INE000A01010", "equity", "ACME", "ACME", "500001", "ACME [/] LTD", "ACME", "ACME", "ACME.NS", "ACME.BO")],
+    )
+
+    query = runner.invoke(app, ["query", "ACME", "--db-path", str(db_path)])
+    lookup = runner.invoke(app, ["lookup", "ACME [/] LTD", "--db-path", str(db_path)])
+
+    assert query.exit_code == 0
+    assert "ACME [/] LTD" in query.stdout
+    assert lookup.exit_code == 0
+    assert "Equivalents for 'ACME [/] LTD'" in lookup.stdout
+    assert lookup.stdout.count("ACME [/] LTD") == 2  # the title and the name row
+
+
 def test_query_prints_fuzzy_hint(tmp_path, seed_consolidated, runner) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path)
@@ -483,8 +522,21 @@ def test_lookup_reports_no_exact_match(tmp_path, seed_consolidated, runner) -> N
     result = runner.invoke(app, ["lookup", "RELIANC", "--db-path", str(db_path)])
 
     assert result.exit_code == 1
-    assert "No instrument matches 'RELIANC' exactly." in result.stdout
-    assert "Try 'stocky query RELIANC' for a fuzzy" in result.stdout
+    assert "No instrument matches 'RELIANC' exactly." in result.stderr
+    assert "Try 'stocky query RELIANC' for a fuzzy" in result.stderr
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_lookup_reports_bracketed_identifier_on_stderr(tmp_path, seed_consolidated, runner, json_output) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = runner.invoke(app, ["lookup", "[/]", "--db-path", str(db_path), *(["--json"] if json_output else [])])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "No instrument matches '[/]' exactly." in result.stderr
+    assert "Try 'stocky query '[/]'' for a fuzzy search." in result.stderr
 
 
 def test_lookup_quotes_multi_word_identifier_in_query_hint(tmp_path, seed_consolidated, runner) -> None:
@@ -494,7 +546,7 @@ def test_lookup_quotes_multi_word_identifier_in_query_hint(tmp_path, seed_consol
     result = runner.invoke(app, ["lookup", "RELIANC INDUSTRIES", "--db-path", str(db_path)])
 
     assert result.exit_code == 1
-    assert "stocky query 'RELIANC INDUSTRIES'" in result.stdout
+    assert "stocky query 'RELIANC INDUSTRIES'" in result.stderr
 
 
 def test_lookup_prints_multiple_match_hint(tmp_path, seed_consolidated, runner) -> None:
@@ -592,7 +644,7 @@ def test_explore_missing_database_exits(tmp_path, runner) -> None:
     result = runner.invoke(app, ["explore", "--db-path", str(tmp_path / "missing.db")])
 
     assert result.exit_code == 1
-    assert "Database not found" in result.stdout
+    assert "Database not found" in result.stderr
 
 
 def test_explore_exits_when_consolidated_table_is_missing(tmp_path, runner) -> None:
@@ -602,7 +654,7 @@ def test_explore_exits_when_consolidated_table_is_missing(tmp_path, runner) -> N
     result = runner.invoke(app, ["explore", "--db-path", str(db_path)], input="INFY\n")
 
     assert result.exit_code == 1
-    assert "does not exist" in result.stdout
+    assert "does not exist" in result.stderr
     assert result.stdout.count("Search (blank to quit)") == 1
 
 
@@ -613,7 +665,7 @@ def test_explore_rejects_invalid_limit_before_prompting(tmp_path, seed_consolida
     result = runner.invoke(app, ["explore", "--limit", "0", "--db-path", str(db_path)])
 
     assert result.exit_code == 1
-    assert "Limit must be at least 1." in result.stdout
+    assert "Limit must be at least 1." in result.stderr
     assert "Search" not in result.stdout
 
 
@@ -624,7 +676,7 @@ def test_query_rejects_invalid_limit(tmp_path, seed_consolidated, runner) -> Non
     result = runner.invoke(app, ["query", "INFY", "--limit", "0", "--db-path", str(db_path)])
 
     assert result.exit_code == 1
-    assert "Limit must be at least 1" in result.stdout
+    assert "Limit must be at least 1" in result.stderr
 
 
 def test_yahoo_update_passes_options_and_prints_progress(tmp_path, monkeypatch, runner) -> None:
@@ -783,6 +835,30 @@ def test_yahoo_import_cache_skips_bad_file(tmp_path, runner) -> None:
     assert "Imported 1; skipped 1." in result.stdout
 
 
+@pytest.mark.parametrize("json_output", [False, True])
+def test_yahoo_import_cache_fails_when_cache_dir_is_missing(tmp_path, runner, json_output) -> None:
+    db_path = tmp_path / "stocky.db"
+    cache_dir = tmp_path / "missing"
+
+    result = runner.invoke(
+        app,
+        [
+            "yahoo",
+            "import-cache",
+            "--cache-dir",
+            str(cache_dir),
+            "--db-path",
+            str(db_path),
+            *(["--json"] if json_output else []),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "Yahoo JSON cache directory not found" in " ".join(result.stderr.split())
+    assert not db_path.exists()
+
+
 def test_yahoo_import_cache_json_prints_result(tmp_path, runner) -> None:
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
@@ -861,12 +937,26 @@ def test_interactive_reports_yahoo_update_errors_and_keeps_going(
 
     result = runner.invoke(app, ["interactive"], input="2\nBSE\n\nn\n6\n")
 
-    message = " ".join(result.stdout.split())
+    error = " ".join(result.stderr.split())
 
     assert result.exit_code == 0
-    assert "No BSE tickers found in yq_bo" in message
-    assert "Run 'stocky rebuild' first." in message
+    assert "No BSE tickers found in yq_bo" in error
+    assert "Run 'stocky rebuild' first." in error
     assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_reports_missing_yahoo_cache_dir_and_keeps_going(tmp_path, monkeypatch, runner) -> None:
+    db_path = tmp_path / "stocky.db"
+    monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
+    monkeypatch.setattr(cli, "DEFAULT_YAHOO_JSON_CACHE_DIR", tmp_path / "missing")
+
+    result = runner.invoke(app, ["interactive"], input="3\n6\n")
+
+    assert result.exit_code == 0
+    assert "Yahoo JSON cache directory not found" in " ".join(result.stderr.split())
+    assert "Imported" not in result.stdout
+    assert result.stdout.count("Choose an option") == 2
+    assert not db_path.exists()
 
 
 def test_interactive_rebuild_previews_and_writes_database(tmp_path, market_csv_builder, monkeypatch, runner) -> None:
@@ -900,11 +990,11 @@ def test_interactive_rebuild_reports_empty_input_directory(tmp_path, monkeypatch
 
     result = runner.invoke(app, ["interactive"], input="1\n6\n")
 
-    message = " ".join(result.stdout.split())
+    error = " ".join(result.stderr.split())
 
     assert result.exit_code == 0
-    assert f"No BSE/NSE bhavcopy pairs found in {empty_dir}" in message
-    assert "Download the bhavcopy files into that directory first." in message
+    assert f"No BSE/NSE bhavcopy pairs found in {empty_dir}" in error
+    assert "Download the bhavcopy files into that directory first." in error
     assert result.stdout.count("Choose an option") == 2
 
 
@@ -917,10 +1007,11 @@ def test_interactive_rebuild_reports_malformed_source_file(tmp_path, market_csv_
     result = runner.invoke(app, ["interactive"], input="1\n1\n6\n")
 
     message = " ".join(result.stdout.split())
+    error = " ".join(result.stderr.split())
 
     assert result.exit_code == 0
-    assert "Cannot rebuild: BSE bhavcopy is missing required columns" in message
-    assert str(paths.bse) in message
+    assert "Cannot rebuild: BSE bhavcopy is missing required columns" in error
+    assert str(paths.bse) in error
     assert "Rebuild preview" not in message
     assert not db_path.exists()
     assert result.stdout.count("Choose an option") == 2
@@ -934,10 +1025,11 @@ def test_interactive_rebuild_reports_date_without_a_pair(tmp_path, market_csv_bu
     result = runner.invoke(app, ["interactive"], input="1\n2021-05-04\n6\n")
 
     message = " ".join(result.stdout.split())
+    error = " ".join(result.stderr.split())
 
     assert result.exit_code == 0
-    assert f"No BSE/NSE bhavcopy pair for 2021-05-04 in {paths.bse.parent}" in message
-    assert "Pick a listed row or download that day's files." in message
+    assert f"No BSE/NSE bhavcopy pair for 2021-05-04 in {paths.bse.parent}" in error
+    assert "Pick a listed row or download that day's files." in error
     assert "Rebuild preview" not in message
     assert not db_path.exists()
     assert result.stdout.count("Choose an option") == 2
@@ -950,10 +1042,10 @@ def test_interactive_rebuild_rejects_out_of_range_row(tmp_path, market_csv_build
 
     result = runner.invoke(app, ["interactive"], input="1\n4\n6\n")
 
-    message = " ".join(result.stdout.split())
+    error = " ".join(result.stderr.split())
 
     assert result.exit_code == 0
-    assert "Enter a number between 1 and 1." in message
+    assert "Enter a number between 1 and 1." in error
     assert not db_path.exists()
 
 
@@ -964,10 +1056,10 @@ def test_interactive_rebuild_rejects_unparseable_selection(tmp_path, market_csv_
 
     result = runner.invoke(app, ["interactive"], input="1\nlatest\n6\n")
 
-    message = " ".join(result.stdout.split())
+    error = " ".join(result.stderr.split())
 
     assert result.exit_code == 0
-    assert "Enter a row number or a date like 2026-09-19." in message
+    assert "Enter a row number or a date like 2026-09-19." in error
     assert not db_path.exists()
 
 
@@ -1060,10 +1152,10 @@ def test_interactive_yahoo_update_rejects_unknown_exchange(tmp_path, monkeypatch
 
     result = runner.invoke(app, ["interactive"], input="2\nNYSE\n6\n")
 
-    message = " ".join(result.stdout.split())
+    error = " ".join(result.stderr.split())
 
     assert result.exit_code == 0
-    assert "Enter one of BSE, NSE." in message
+    assert "Enter one of BSE, NSE." in error
     assert result.stdout.count("Choose an option") == 2
 
 
@@ -1075,10 +1167,10 @@ def test_interactive_yahoo_update_rejects_non_numeric_limit(tmp_path, monkeypatc
 
     result = runner.invoke(app, ["interactive"], input="2\nBSE\nmany\n6\n")
 
-    message = " ".join(result.stdout.split())
+    error = " ".join(result.stderr.split())
 
     assert result.exit_code == 0
-    assert "Enter a positive number, or leave blank for all." in message
+    assert "Enter a positive number, or leave blank for all." in error
 
 
 def test_interactive_yahoo_update_stops_when_nothing_to_fetch(tmp_path, monkeypatch, seed_consolidated, runner) -> None:
@@ -1108,9 +1200,10 @@ def test_interactive_yahoo_update_rejects_zero_limit(tmp_path, monkeypatch, seed
     result = runner.invoke(app, ["interactive"], input="2\nBSE\n0\n6\n")
 
     message = " ".join(result.stdout.split())
+    error = " ".join(result.stderr.split())
 
     assert result.exit_code == 0
-    assert "Enter a positive number, or leave blank for all." in message
+    assert "Enter a positive number, or leave blank for all." in error
     assert "tickers to fetch from Yahoo Finance" not in message
     assert result.stdout.count("Choose an option") == 2
 
@@ -1237,7 +1330,7 @@ def test_screen_reports_no_match_and_rejects_an_unknown_exchange(tmp_path, seed_
 
     result = runner.invoke(app, ["screen", "--exchange", "MCX", "--db-path", str(db_path)])
     assert result.exit_code == 1
-    assert "Unsupported exchange: MCX" in result.stdout
+    assert "Unsupported exchange: MCX" in result.stderr
 
 
 def test_yahoo_fields_prints_one_table_per_exchange(tmp_path, seed_consolidated, runner, monkeypatch) -> None:
@@ -1272,7 +1365,7 @@ def test_yahoo_fields_reports_no_exact_match(tmp_path, seed_consolidated, runner
     result = runner.invoke(app, ["yahoo", "fields", "RELIANC", "--db-path", str(db_path)])
 
     assert result.exit_code == 1
-    assert "No instrument with a Yahoo ticker matches 'RELIANC' exactly." in result.stdout
+    assert "No instrument with a Yahoo ticker matches 'RELIANC' exactly." in result.stderr
 
 
 def test_yahoo_enriched_writes_the_view_to_a_file(tmp_path, seed_consolidated, runner) -> None:
@@ -1414,12 +1507,11 @@ def test_mf_import_requires_amfi_file(tmp_path, monkeypatch, runner, json_output
     )
 
     assert result.exit_code == 1
-    message = " ".join((result.stderr if json_output else result.stdout).split())
+    message = " ".join(result.stderr.split())
     assert "AMFI NAV file not found: data/marketData/amfi/NAVAll.txt" in message
     assert "https://www.amfiindia.com/spages/NAVAll.txt" in message
     assert not (tmp_path / "data/output/stocky.db").exists()
-    if json_output:
-        assert result.stdout == ""
+    assert result.stdout == ""
 
 
 def test_mf_query_by_amfi_code_keeps_all_values_at_80_columns(tmp_path, monkeypatch, runner) -> None:
@@ -1582,7 +1674,7 @@ def test_debt_import_reports_missing_file(tmp_path, runner) -> None:
     )
 
     assert result.exit_code == 1
-    assert "BSE debt bhavcopy not found" in result.stdout
+    assert "BSE debt bhavcopy not found" in result.stderr
 
 
 def test_debt_import_reports_missing_archive_on_stderr_with_json(tmp_path, monkeypatch, runner) -> None:
@@ -1740,7 +1832,7 @@ def test_indices_import_reports_missing_file(tmp_path, runner, json_output) -> N
     )
 
     assert result.exit_code == 1
-    assert "Zerodha instruments not found" in (result.stderr if json_output else result.stdout)
+    assert "Zerodha instruments not found" in result.stderr
     assert not (tmp_path / "x.db").exists()
     if json_output:
         assert result.stdout == ""
@@ -1924,7 +2016,7 @@ def test_brokers_query_errors(tmp_path, seed_consolidated, runner, json_output):
     seed_consolidated(db)
     result = runner.invoke(app, ["brokers", "query", "test", "--db", str(db), *(["--json"] if json_output else [])])
     assert result.exit_code == 1
-    assert "stocky brokers import" in (result.stderr if json_output else result.stdout)
+    assert "stocky brokers import" in result.stderr
     if json_output:
         assert result.stdout == ""
 
@@ -1936,7 +2028,7 @@ def test_brokers_import_missing_file_and_consolidated(tmp_path, runner):
         app, ["brokers", "import", "--broker", "groww", "--groww", str(tmp_path / "absent"), "--db", str(db)]
     )
     assert missing.exit_code == 1
-    assert "Groww instruments not found" in missing.stdout
+    assert "Groww instruments not found" in missing.stderr
     no_consolidated = runner.invoke(
         app,
         [
@@ -1953,7 +2045,7 @@ def test_brokers_import_missing_file_and_consolidated(tmp_path, runner):
         ],
     )
     assert no_consolidated.exit_code == 1
-    assert "stocky rebuild" in no_consolidated.stdout
+    assert "stocky rebuild" in no_consolidated.stderr
 
 
 def test_brokers_import_reports_earlier_commits_when_later_broker_fails(tmp_path, runner):
@@ -1973,6 +2065,6 @@ def test_brokers_import_reports_earlier_commits_when_later_broker_fails(tmp_path
         ],
     )
     assert result.exit_code == 1
-    assert "groww" in result.stdout and "Upstox instruments not found" in result.stdout
+    assert "groww" in result.stdout and "Upstox instruments not found" in result.stderr
     with sqlite3.connect(db) as con:
         assert con.execute("SELECT broker FROM broker_symbols").fetchall() == [("groww",)]
