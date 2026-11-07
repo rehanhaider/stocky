@@ -402,10 +402,17 @@ class StockyApp(App[None]):
                 self.call_from_thread(self.on_rebuild_planned, result, confirm)
 
     def on_rebuild_planned(self, planned: RebuildResult, request: dict[str, Any]) -> None:
-        """Show the comparison, then write with the same request only if the user confirms."""
+        """Show the comparison, then write from the same files only if the user confirms."""
         self.query_one("#rebuild-stage", Static).update("Waiting for confirmation")
         self.query_one("#rebuild-progress", ProgressBar).update(total=1, progress=0)
         self.log_rebuild_diff(planned)
+        # Write from the files the dry run resolved, as the menu does, so a pair that arrives while the
+        # dialog is open cannot replace the one it describes.
+        request = {key: value for key, value in request.items() if key != "latest"} | {
+            "bse_bhavcopy": planned.bse_bhavcopy,
+            "nse_bhavcopy": planned.nse_bhavcopy,
+            "zerodha_instruments": planned.zerodha_instruments,
+        }
 
         def confirmed(write: bool | None) -> None:
             if self.cancel_requested:

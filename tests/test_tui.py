@@ -181,6 +181,31 @@ def test_rebuild_shows_the_diff_and_writes_nothing_when_cancelled(
     assert db_path.read_bytes() == before
 
 
+def test_rebuild_writes_the_pair_the_confirmation_showed(tmp_path, market_csv_builder) -> None:
+    inputs = tmp_path / "inputs"
+    shown = market_csv_builder(inputs, trade_date=date(2021, 5, 3))
+    db_path = tmp_path / "stocky.db"
+    stocky_app = StockyApp(db_path=db_path, input_dir=inputs, zerodha_instruments=shown.zerodha)
+
+    async def scenario(stocky_app, pilot) -> None:
+        stocky_app.query_one("#rebuild-no-backup", Checkbox).value = True
+        await pilot.pause()
+        await _press(stocky_app, pilot, "#rebuild-run")
+        assert isinstance(stocky_app.screen, ConfirmRebuildScreen)
+
+        # A newer pair lands while the dialog is open; the write must still use the pair it described.
+        market_csv_builder(inputs, trade_date=date(2021, 9, 30))
+        await _press(stocky_app, pilot, "#confirm-write")
+
+        assert _static_text(stocky_app, "#rebuild-stage") == "Rebuild complete"
+
+    _run(stocky_app, scenario)
+
+    with sqlite3.connect(db_path) as con:
+        written = {row[0] for row in con.execute("SELECT file_name FROM provenance_sources")}
+    assert {shown.bse.name, shown.nse.name} <= written
+
+
 def test_rebuild_dry_run_skips_the_confirmation(tmp_path, market_csv_builder) -> None:
     paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 9, 30))
     db_path = tmp_path / "stocky.db"
