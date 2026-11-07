@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from rich.console import Console
+from rich.console import Console, RenderableType
 from rich.markup import escape
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TaskID, TextColumn, TimeRemainingColumn
 from rich.table import Table
@@ -39,6 +39,7 @@ from stocky.database import (
     InstrumentMatch,
     SearchResult,
     SourceRecord,
+    has_sgb_rows,
     import_yahoo_json_cache,
     read_status,
     search_instruments,
@@ -212,6 +213,10 @@ _SOURCE_LABELS = {
 
 
 def _print_sources(title: str, sources: list[SourceRecord]) -> None:
+    console.print(_sources_table(title, sources))
+
+
+def _sources_table(title: str, sources: list[SourceRecord]) -> Table:
     table = Table(title=title)
     table.add_column("Source")
     table.add_column("File")
@@ -226,7 +231,7 @@ def _print_sources(title: str, sources: list[SourceRecord]) -> None:
             str(source.rows),
             source.sha256[:12],
         )
-    console.print(table)
+    return table
 
 
 def _print_provenance(provenance: BuildProvenance | None) -> None:
@@ -494,10 +499,17 @@ def _sample_label(row: dict[str, str | None]) -> str:
 
 
 def _print_rebuild_diff(diff: RebuildDiff) -> None:
+    for renderable in _rebuild_diff_renderables(diff):
+        console.print(renderable)
+
+
+def _rebuild_diff_renderables(diff: RebuildDiff) -> list[RenderableType]:
+    """Build the tables that compare a rebuilt table with the current one, for the CLI, menu, and TUI."""
+    renderables: list[RenderableType] = []
     if diff.current_provenance is not None:
-        _print_sources("Current database was built from", diff.current_provenance.sources)
+        renderables.append(_sources_table("Current database was built from", diff.current_provenance.sources))
     elif diff.current_rows:
-        console.print("[dim]The current database records no source provenance.[/dim]")
+        renderables.append(Text("The current database records no source provenance.", style="dim"))
 
     counts = Table(title="Row changes")
     counts.add_column("Field")
@@ -513,7 +525,7 @@ def _print_rebuild_diff(diff: RebuildDiff) -> None:
         counts.add_row("Duplicate ISIN rows (rebuilt)", str(diff.duplicate_rebuilt))
     for column, count in diff.column_changes.items():
         counts.add_row(f"  {_COLUMN_LABELS.get(column, column)} changed", str(count))
-    console.print(counts)
+    renderables.append(counts)
 
     if diff.sample_added or diff.sample_removed or diff.sample_changed or diff.sample_duplicates:
         samples = Table(title="Sample differences")
@@ -532,7 +544,8 @@ def _print_rebuild_diff(diff: RebuildDiff) -> None:
             samples.add_row("changed", change.isin, escape(detail))
         for isin in diff.sample_duplicates:
             samples.add_row("duplicate", isin, "ISIN appears more than once; the first row is compared")
-        console.print(samples)
+        renderables.append(samples)
+    return renderables
 
 
 def _print_rebuild_result(result: RebuildResult) -> None:
@@ -627,6 +640,14 @@ def _interactive_rebuild() -> None:
     if paths is None:
         return
 
+    # Default to what the current table holds, so a refresh keeps the SGB rows of an --include-sgb build.
+    try:
+        current_has_sgb = has_sgb_rows(DEFAULT_DB_PATH)
+    except Exception as exc:
+        console.print(f"[red]Cannot rebuild: {escape(str(exc))}[/red]")
+        return
+    include_sgb = typer.confirm("Include sovereign gold bonds (needs UDiFF bhavcopies)?", default=current_has_sgb)
+
     try:
         with console.status("Reading source files..."):
             planned = _rebuild_impl(
@@ -635,6 +656,7 @@ def _interactive_rebuild() -> None:
                 zerodha_instruments=paths.zerodha,
                 db_path=DEFAULT_DB_PATH,
                 dry_run=True,
+                include_sgb=include_sgb,
             )
     except Exception as exc:
         console.print(f"[red]Cannot rebuild: {escape(str(exc))}[/red]")
@@ -662,6 +684,7 @@ def _interactive_rebuild() -> None:
                 nse_bhavcopy=paths.nse,
                 zerodha_instruments=paths.zerodha,
                 db_path=DEFAULT_DB_PATH,
+                include_sgb=include_sgb,
                 progress=lambda stage: spinner.update(f"{stage}..."),
             )
     except Exception as exc:
@@ -696,6 +719,11 @@ def _interactive_yahoo_update() -> None:
         console.print(f"[red]Enter one of {', '.join(YAHOO_EXCHANGES)}.[/red]")
         return
 
+    raw_symbols = typer.prompt(
+        "Symbols or tickers, comma-separated (blank = all)", default="", show_default=False
+    ).strip()
+    symbols = _split_columns(raw_symbols) if raw_symbols else None
+
     raw_limit = typer.prompt("Limit (blank = all)", default="", show_default=False).strip()
     limit: int | None = None
     if raw_limit:
@@ -709,6 +737,19 @@ def _interactive_yahoo_update() -> None:
 
     missing_only = typer.confirm("Only fetch tickers with no cached response?", default=False)
 
+    raw_stale_days = typer.prompt(
+        "Only fetch tickers not fetched in this many days (blank = any age)", default="", show_default=False
+    ).strip()
+    stale_days: float | None = None
+    if raw_stale_days:
+        try:
+            stale_days = float(raw_stale_days)
+        except ValueError:
+            stale_days = -1
+        if not stale_days >= 0:
+            console.print("[red]Enter a number of days of 0 or more, or leave blank for any age.[/red]")
+            return
+
     manager = YahooDataManager(DEFAULT_DB_PATH)
     try:
         planned = manager.update_data(
@@ -716,6 +757,8 @@ def _interactive_yahoo_update() -> None:
             dry_run=True,
             limit=limit,
             missing_only=missing_only,
+            symbols=symbols,
+            stale_days=stale_days,
         )
     except Exception as exc:
         console.print(f"[red]{escape(str(exc))}[/red]")
@@ -725,13 +768,14 @@ def _interactive_yahoo_update() -> None:
         f"[cyan]{planned.processed} tickers to fetch from Yahoo Finance ({exchange}, {ticker_column(exchange)}).[/cyan]"
     )
     if planned.processed == 0:
-        # update_data raises when the column holds no tickers at all, so an empty plan means
-        # missing_only filtered out every ticker it found.
-        console.print(
-            "[green]Nothing to fetch; every ticker already has a cached response.[/green]"
-            if missing_only
-            else f"[green]No {exchange} tickers found.[/green]"
-        )
+        # update_data raises when the column holds no tickers at all, and when a named symbol is not
+        # listed, so an empty plan means missing_only or stale_days filtered out every ticker it found.
+        if missing_only:
+            console.print("[green]Nothing to fetch; every ticker already has a cached response.[/green]")
+        elif stale_days is not None:
+            console.print(f"[green]Nothing to fetch; every ticker was fetched in the last {stale_days:g} days.[/green]")
+        else:
+            console.print(f"[green]No {exchange} tickers found.[/green]")
         return
 
     if not typer.confirm("Start the update? This may take a long time."):
@@ -743,6 +787,8 @@ def _interactive_yahoo_update() -> None:
                 exchange=exchange,
                 limit=limit,
                 missing_only=missing_only,
+                symbols=symbols,
+                stale_days=stale_days,
                 progress=print_progress,
             )
     except Exception as exc:

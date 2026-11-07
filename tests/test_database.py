@@ -10,6 +10,7 @@ from stocky.database import (
     decode_response_json,
     encode_response_json,
     fetch_consolidated_symbols,
+    has_sgb_rows,
     import_yahoo_json_cache,
     initialize_database,
     read_available_yahoo_symbols,
@@ -189,6 +190,29 @@ def test_read_status_counts_cached_tickers_per_exchange_by_full_ticker(tmp_path,
 
     assert status.yahoo_cached_ns == 2
     assert status.yahoo_cached_bo == 1
+
+
+def test_has_sgb_rows_reports_gold_bonds_in_the_consolidated_table(tmp_path, seed_consolidated) -> None:
+    missing = tmp_path / "missing.db"
+    assert has_sgb_rows(missing) is False
+    assert not missing.exists()
+
+    no_table = tmp_path / "empty.db"
+    initialize_database(no_table)
+    assert has_sgb_rows(no_table) is False
+
+    legacy = tmp_path / "legacy.db"
+    with sqlite3.connect(legacy) as con:
+        con.execute(f"CREATE TABLE {CONSOLIDATED_TABLE} (isin TEXT)")
+    assert has_sgb_rows(legacy) is False
+
+    equities = tmp_path / "equities.db"
+    seed_consolidated(equities)
+    assert has_sgb_rows(equities) is False
+
+    with_sgb = tmp_path / "sgb.db"
+    seed_consolidated(with_sgb, [("IN0020200286", "sgb", "SGBN28VIII", None, None, None, None, None, None, None)])
+    assert has_sgb_rows(with_sgb) is True
 
 
 def test_read_status_missing_db_raises_without_creating_file(tmp_path) -> None:

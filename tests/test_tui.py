@@ -1,16 +1,18 @@
 import asyncio
+import io
 import sqlite3
 import sys
 import threading
 import time
 from datetime import date
 
+from rich.console import Console
 from textual.widgets import Button, Checkbox, DataTable, Input, ProgressBar, RadioButton, RichLog, Select, Static
 
 import stocky.cli as cli
 import stocky.tui as tui
 from stocky.cli import app
-from stocky.tui import StockyApp
+from stocky.tui import ConfirmRebuildScreen, StockyApp
 from stocky.yahoo import YahooUpdateResult
 
 
@@ -25,7 +27,8 @@ def _run(stocky_app, scenario) -> None:
 
 
 async def _press(stocky_app, pilot, button_id: str) -> None:
-    stocky_app.query_one(button_id, Button).press()
+    # App.query_one searches the main screen; the active screen also reaches the rebuild confirmation.
+    stocky_app.screen.query_one(button_id, Button).press()
     await pilot.pause()
     await _settle(stocky_app, pilot)
 
@@ -69,6 +72,10 @@ def test_rebuild_latest_pair_writes_database_and_refreshes_status(tmp_path, mark
         stocky_app.query_one("#rebuild-no-backup", Checkbox).value = True
         await pilot.pause()
         await _press(stocky_app, pilot, "#rebuild-run")
+
+        assert isinstance(stocky_app.screen, ConfirmRebuildScreen)
+        assert not db_path.exists()
+        await _press(stocky_app, pilot, "#confirm-write")
 
         log = _log_text(stocky_app)
         assert _squash("Loading BSE bhavcopy...") in log
@@ -137,6 +144,105 @@ def test_rebuild_explicit_files_come_from_the_file_picker(tmp_path, market_csv_b
     assert not db_path.exists()
 
 
+def test_rebuild_shows_the_diff_and_writes_nothing_when_cancelled(
+    tmp_path, market_csv_builder, seed_consolidated
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 9, 30))
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    before = db_path.read_bytes()
+    stocky_app = StockyApp(db_path=db_path, input_dir=paths.bse.parent, zerodha_instruments=paths.zerodha)
+
+    async def scenario(stocky_app, pilot) -> None:
+        await _press(stocky_app, pilot, "#rebuild-run")
+
+        screen = stocky_app.screen
+        assert isinstance(screen, ConfirmRebuildScreen)
+        summary = _squash(str(screen.query_one("#confirm-summary", Static).content))
+        assert _squash(f"Write 1 rows from {paths.bse.name} and {paths.nse.name}") in summary
+        recorder = Console(file=io.StringIO(), width=200)
+        recorder.print(screen.query_one("#confirm-diff-tables", Static).content)
+        rendered = _squash(recorder.file.getvalue())
+        assert "Rowchanges" in rendered
+        assert "Currentrows" in rendered
+        assert "removed" in rendered
+        assert stocky_app.busy
+
+        await _press(stocky_app, pilot, "#confirm-cancel")
+
+        assert not isinstance(stocky_app.screen, ConfirmRebuildScreen)
+        assert _squash("Rebuild cancelled; the database was not changed.") in _log_text(stocky_app)
+        assert _static_text(stocky_app, "#rebuild-stage") == "Rebuild cancelled"
+        assert not stocky_app.busy
+        assert not stocky_app.query_one("#rebuild-run", Button).disabled
+
+    _run(stocky_app, scenario)
+
+    assert db_path.read_bytes() == before
+
+
+def test_rebuild_dry_run_skips_the_confirmation(tmp_path, market_csv_builder) -> None:
+    paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 9, 30))
+    db_path = tmp_path / "stocky.db"
+    stocky_app = StockyApp(db_path=db_path, input_dir=paths.bse.parent, zerodha_instruments=paths.zerodha)
+
+    async def scenario(stocky_app, pilot) -> None:
+        stocky_app.query_one("#rebuild-dry-run", Checkbox).value = True
+        await pilot.pause()
+        await _press(stocky_app, pilot, "#rebuild-run")
+
+        assert not isinstance(stocky_app.screen, ConfirmRebuildScreen)
+        assert _static_text(stocky_app, "#rebuild-stage") == "Dry run complete"
+
+    _run(stocky_app, scenario)
+
+    assert not db_path.exists()
+
+
+def test_include_sgb_defaults_to_the_current_table_and_reaches_the_rebuild(
+    tmp_path, market_csv_builder, seed_consolidated, monkeypatch
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2026, 7, 17))
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path, [("IN0020200286", "sgb", "SGBN28VIII", None, None, None, None, None, None, None)])
+    requests = []
+
+    def recording_rebuild(**request):
+        requests.append({key: value for key, value in request.items() if key != "progress"})
+        return cli._rebuild_impl(**request)
+
+    monkeypatch.setattr(tui, "_rebuild_impl", recording_rebuild)
+    stocky_app = StockyApp(db_path=db_path, input_dir=paths.bse.parent, zerodha_instruments=paths.zerodha)
+
+    async def scenario(stocky_app, pilot) -> None:
+        checkbox = stocky_app.query_one("#rebuild-include-sgb", Checkbox)
+        assert checkbox.value is True
+        stocky_app.query_one("#rebuild-dry-run", Checkbox).value = True
+        await pilot.pause()
+        await _press(stocky_app, pilot, "#rebuild-run")
+
+        checkbox.value = False
+        await pilot.pause()
+        await _press(stocky_app, pilot, "#rebuild-run")
+
+    _run(stocky_app, scenario)
+
+    assert [request["include_sgb"] for request in requests] == [True, False]
+
+
+def test_include_sgb_defaults_off_without_sgb_rows(tmp_path, seed_consolidated) -> None:
+    missing = StockyApp(db_path=tmp_path / "missing.db", input_dir=tmp_path)
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    equities = StockyApp(db_path=db_path, input_dir=tmp_path)
+
+    async def scenario(stocky_app, pilot) -> None:
+        assert stocky_app.query_one("#rebuild-include-sgb", Checkbox).value is False
+
+    _run(missing, scenario)
+    _run(equities, scenario)
+
+
 def test_rebuild_explicit_files_require_both_bhavcopies(tmp_path, market_csv_builder) -> None:
     paths = market_csv_builder(tmp_path / "inputs")
     stocky_app = StockyApp(db_path=tmp_path / "stocky.db", input_dir=paths.bse.parent)
@@ -192,7 +298,7 @@ def test_rebuild_is_refused_while_a_run_or_status_read_is_in_progress(
     paths = market_csv_builder(tmp_path / "inputs")
     stocky_app = StockyApp(db_path=tmp_path / "stocky.db", input_dir=paths.bse.parent)
     calls = []
-    monkeypatch.setattr(stocky_app, "run_rebuild", lambda request: calls.append(request))
+    monkeypatch.setattr(stocky_app, "run_rebuild", lambda request, confirm=None: calls.append(request))
 
     async def scenario(stocky_app, pilot) -> None:
         stocky_app.busy = True
@@ -235,6 +341,8 @@ def test_yahoo_update_drives_the_progress_bar(tmp_path, monkeypatch) -> None:
         stocky_app.query_one("#exchange", Select).value = "NSE"
         stocky_app.query_one("#limit", Input).value = "3"
         stocky_app.query_one("#missing-only", Checkbox).value = True
+        stocky_app.query_one("#symbols", Input).value = "RELIANCE.NS, INFY"
+        stocky_app.query_one("#stale-days", Input).value = "7.5"
         await pilot.pause()
 
         await _press(stocky_app, pilot, "#yahoo-plan")
@@ -250,7 +358,13 @@ def test_yahoo_update_drives_the_progress_bar(tmp_path, monkeypatch) -> None:
 
     _run(stocky_app, scenario)
 
-    request = {"exchange": "NSE", "limit": 3, "missing_only": True}
+    request = {
+        "exchange": "NSE",
+        "limit": 3,
+        "missing_only": True,
+        "symbols": ["RELIANCE.NS", "INFY"],
+        "stale_days": 7.5,
+    }
     assert calls == [request | {"dry_run": True}, request]
 
 
@@ -314,6 +428,20 @@ def test_yahoo_update_rejects_a_zero_limit(tmp_path, monkeypatch) -> None:
         await _press(stocky_app, pilot, "#yahoo-run")
 
         assert _squash("Enter a positive limit, or leave it blank for all tickers.") in _log_text(stocky_app)
+
+    _run(stocky_app, scenario)
+
+
+def test_yahoo_update_rejects_negative_stale_days(tmp_path, monkeypatch) -> None:
+    stocky_app = StockyApp(db_path=tmp_path / "stocky.db", input_dir=tmp_path)
+    monkeypatch.setattr(stocky_app, "run_yahoo", lambda request: (_ for _ in ()).throw(AssertionError("ran")))
+
+    async def scenario(stocky_app, pilot) -> None:
+        stocky_app.query_one("#stale-days", Input).value = "-1"
+        await pilot.pause()
+        await _press(stocky_app, pilot, "#yahoo-run")
+
+        assert _squash("Enter stale days of 0 or more, or leave it blank for any age.") in _log_text(stocky_app)
 
     _run(stocky_app, scenario)
 
