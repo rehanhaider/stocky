@@ -90,6 +90,9 @@ class ConfirmRebuildScreen(ModalScreen[bool]):
         diff = _rebuild_diff_renderables(planned.diff) if planned.diff is not None else []
         with Vertical(id="confirm-dialog"):
             yield Static(summary, id="confirm-summary")
+            if planned.warnings:
+                warnings = "\n".join(f"Warning: {warning}" for warning in planned.warnings)
+                yield Static(Text(warnings, style="bold yellow"), id="confirm-warnings")
             with VerticalScroll(id="confirm-diff"):
                 yield Static(Group(*diff), id="confirm-diff-tables")
             with Horizontal(id="confirm-buttons"):
@@ -448,6 +451,8 @@ class StockyApp(App[None]):
         self.finish_job()
 
     def log_rebuild_diff(self, result: RebuildResult) -> None:
+        for warning in result.warnings:
+            self.log_line(f"Warning: {warning}", "bold yellow")
         if result.diff is not None:
             diff = result.diff
             self.log_line(
