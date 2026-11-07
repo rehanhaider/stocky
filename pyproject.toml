@@ -7,7 +7,7 @@ name = "stocky"
 version = "2.0.0"
 description = "Consolidate Indian market instrument symbols across BSE, NSE, Zerodha, and Yahoo Finance."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "GPL-3.0-or-later"
 authors = [{ name = "Rehan Haider" }]
 dependencies = [
@@ -37,7 +37,7 @@ packages = ["stocky"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
