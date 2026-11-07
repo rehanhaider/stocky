@@ -8,7 +8,7 @@ import sys
 import uuid
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 
@@ -250,7 +250,7 @@ def _resolve_snapshot_formats(formats: Sequence[str] | None) -> tuple[str, ...]:
 
 def _resolve_snapshot_version(version: str | None) -> str:
     if version is None:
-        return datetime.now(timezone.utc).date().isoformat()
+        return datetime.now(UTC).date().isoformat()
     if not _VERSION_PATTERN.fullmatch(version):
         raise ValueError(
             f"Invalid snapshot version '{version}'. Use letters, digits, '.', '_' or '-', starting with a letter or digit."
@@ -295,7 +295,7 @@ def create_snapshot(
 
         manifest = {
             "version": resolved_version,
-            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "stocky_version": __version__,
             "table": CONSOLIDATED_TABLE,
             "rows": len(frame.index),

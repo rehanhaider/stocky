@@ -2,7 +2,7 @@ import hashlib
 import json
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pandas as pd
 import pyarrow as pa
@@ -526,7 +526,7 @@ def test_snapshot_defaults_to_todays_utc_date(tmp_path, seed_consolidated) -> No
 
     result = create_snapshot(db_path, output_dir=tmp_path, formats=["json"])
 
-    assert result.version == datetime.now(timezone.utc).date().isoformat()
+    assert result.version == datetime.now(UTC).date().isoformat()
     assert [file.name for file in result.files] == ["consolidated.json"]
     assert len(json.loads((result.directory / "consolidated.json").read_text(encoding="utf-8"))) == 4
 
