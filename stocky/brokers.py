@@ -4,7 +4,7 @@ import gzip
 import json
 import sqlite3
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 import pandas as pd
@@ -40,7 +40,7 @@ EXACT_COLUMNS = ("isin", "symbol", "exchange_token", "broker_key")
 FRAGMENT_COLUMNS = ("symbol", "name")
 
 
-class Broker(str, Enum):
+class Broker(StrEnum):
     groww = "groww"
     upstox = "upstox"
     aliceblue = "aliceblue"
