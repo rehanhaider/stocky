@@ -206,6 +206,52 @@ def test_rebuild_writes_the_pair_the_confirmation_showed(tmp_path, market_csv_bu
     assert {shown.bse.name, shown.nse.name} <= written
 
 
+def test_rebuild_confirmation_warns_about_inputs_older_than_the_current_build(tmp_path, market_csv_builder) -> None:
+    db_path = tmp_path / "stocky.db"
+    newer = market_csv_builder(tmp_path / "newer", trade_date=date(2021, 9, 30))
+    cli._rebuild_impl(
+        bse_bhavcopy=newer.bse,
+        nse_bhavcopy=newer.nse,
+        zerodha_instruments=newer.zerodha,
+        db_path=db_path,
+        no_backup=True,
+    )
+    before = db_path.read_bytes()
+    older = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 5, 3))
+    stocky_app = StockyApp(db_path=db_path, input_dir=older.bse.parent, zerodha_instruments=older.zerodha)
+
+    async def scenario(stocky_app, pilot) -> None:
+        await _press(stocky_app, pilot, "#rebuild-run")
+
+        screen = stocky_app.screen
+        assert isinstance(screen, ConfirmRebuildScreen)
+        warning = _squash(str(screen.query_one("#confirm-warnings", Static).content))
+        assert _squash("Warning: These bhavcopies are from 2021-05-03, older than the 2021-09-30") in warning
+        assert _squash("older than the 2021-09-30 bhavcopies") in _log_text(stocky_app)
+
+        await _press(stocky_app, pilot, "#confirm-cancel")
+
+    _run(stocky_app, scenario)
+
+    assert db_path.read_bytes() == before
+
+
+def test_rebuild_confirmation_has_no_warning_for_current_inputs(tmp_path, market_csv_builder) -> None:
+    paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 9, 30))
+    stocky_app = StockyApp(
+        db_path=tmp_path / "stocky.db", input_dir=paths.bse.parent, zerodha_instruments=paths.zerodha
+    )
+
+    async def scenario(stocky_app, pilot) -> None:
+        await _press(stocky_app, pilot, "#rebuild-run")
+
+        assert isinstance(stocky_app.screen, ConfirmRebuildScreen)
+        assert not stocky_app.screen.query("#confirm-warnings")
+        await _press(stocky_app, pilot, "#confirm-cancel")
+
+    _run(stocky_app, scenario)
+
+
 def test_rebuild_dry_run_skips_the_confirmation(tmp_path, market_csv_builder) -> None:
     paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 9, 30))
     db_path = tmp_path / "stocky.db"

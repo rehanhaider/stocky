@@ -224,6 +224,16 @@ shows the source row counts, the added, removed, changed, and unchanged rows, pe
 uv run stocky rebuild --latest --dry-run
 ```
 
+Before it backs up or writes anything, a rebuild checks its inputs and stops with an error when:
+
+- the BSE and NSE bhavcopies are from different trade dates, or a file name carries no trade date. Rename such a file to
+  its exchange's standard name, such as `BhavCopy_BSE_CM_0_0_0_20260717_F_0000.CSV`; the error lists every pattern;
+- the rebuilt table is empty, or has rows with no ISIN or ISINs on more than one row. The error lists them.
+
+When the bhavcopies are older than the ones that built the current table, the rebuild prints a warning on stderr and
+adds it to the `warnings` list of `--json` output. The interactive menu and the terminal UI show the warning and ask
+before writing. A dry run applies the same checks and warning.
+
 Include sovereign gold bonds in both the preview and the rebuild:
 
 ```bash

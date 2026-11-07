@@ -313,6 +313,41 @@ def test_rebuild_date_resolves_bhavcopy_names(tmp_path, market_csv_builder, monk
     assert calls[0]["input_dir"] == paths.bse.parent
 
 
+@pytest.mark.parametrize("dry_run", [[], ["--dry-run"]])
+def test_rebuild_rejects_bhavcopies_from_different_trade_dates(tmp_path, market_csv_builder, dry_run, runner) -> None:
+    older = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 5, 3))
+    newer = market_csv_builder(tmp_path / "inputs", trade_date=date(2026, 7, 17))
+    db_path = tmp_path / "stocky.db"
+    paths = type(older)(bse=newer.bse, nse=older.nse, zerodha=older.zerodha)
+
+    result = runner.invoke(app, ["rebuild", *_rebuild_path_args(paths, db_path), *dry_run], env={"COLUMNS": "200"})
+
+    error = " ".join(result.stderr.split())
+    assert result.exit_code == 1
+    assert f"BSE {newer.bse.name} is from 2026-07-17, NSE {older.nse.name} is from 2021-05-03" in error
+    assert result.stdout == ""
+    assert not db_path.exists()
+
+
+def test_rebuild_warns_on_stderr_when_inputs_are_older_than_the_current_build(
+    tmp_path, market_csv_builder, runner
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    newer = market_csv_builder(tmp_path / "newer", trade_date=date(2021, 9, 30))
+    older = market_csv_builder(tmp_path / "older", trade_date=date(2021, 5, 3))
+    assert runner.invoke(app, ["rebuild", *_rebuild_path_args(newer, db_path), "--no-backup"]).exit_code == 0
+
+    text = runner.invoke(app, ["rebuild", *_rebuild_path_args(older, db_path), "--dry-run"], env={"COLUMNS": "200"})
+    as_json = runner.invoke(app, ["rebuild", *_rebuild_path_args(older, db_path), "--dry-run", "--json"])
+
+    warning = "These bhavcopies are from 2021-05-03, older than the 2021-09-30 bhavcopies that built the current table."
+    assert text.exit_code == 0
+    assert warning in " ".join(text.stderr.split())
+    assert warning not in " ".join(text.stdout.split())
+    assert as_json.exit_code == 0
+    assert json.loads(as_json.stdout)["warnings"] == [warning + " A rebuild replaces newer listings with older ones."]
+
+
 def test_rebuild_missing_files_reports_failure(tmp_path, runner) -> None:
     missing = tmp_path / "missing.csv"
 
@@ -1153,6 +1188,35 @@ def test_interactive_rebuild_rejects_unparseable_selection(tmp_path, market_csv_
     assert result.exit_code == 0
     assert "Enter a row number or a date like 2026-09-19." in error
     assert not db_path.exists()
+
+
+def test_interactive_rebuild_asks_again_before_writing_older_inputs(
+    tmp_path, market_csv_builder, monkeypatch, runner
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    newer = market_csv_builder(tmp_path / "newer", trade_date=date(2021, 9, 30))
+    assert runner.invoke(app, ["rebuild", *_rebuild_path_args(newer, db_path), "--no-backup"]).exit_code == 0
+    before = db_path.read_bytes()
+    older = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 5, 3))
+    _use_interactive_defaults(monkeypatch, older, db_path)
+
+    declined = runner.invoke(app, ["interactive"], input="1\n1\n\n\n6\n")
+
+    message = " ".join(declined.stdout.split())
+    assert declined.exit_code == 0
+    assert "Warning: These bhavcopies are from 2021-05-03, older than the 2021-09-30 bhavcopies" in message
+    assert "Rebuild from these older files anyway? [y/N]" in message
+    assert "Rebuild summary" not in message
+    assert db_path.read_bytes() == before
+
+    accepted = runner.invoke(app, ["interactive"], input="1\n1\n\ny\n6\n")
+
+    assert accepted.exit_code == 0
+    assert "Rebuild summary" in " ".join(accepted.stdout.split())
+    with sqlite3.connect(db_path) as con:
+        assert con.execute(
+            "SELECT trade_date FROM provenance_sources WHERE role = 'bse_bhavcopy' ORDER BY build_id DESC LIMIT 1"
+        ).fetchone() == ("2021-05-03",)
 
 
 def test_interactive_rebuild_declined_leaves_database_untouched(

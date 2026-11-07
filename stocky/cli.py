@@ -683,7 +683,14 @@ def _interactive_rebuild() -> None:
     _print_source_preview(preview, DEFAULT_DB_PATH)
     if planned.diff is not None:
         _print_rebuild_diff(planned.diff)
-    if not typer.confirm("Rebuild the consolidated table from these files?"):
+    for warning in planned.warnings:
+        console.print(f"[yellow]Warning: {escape(warning)}[/yellow]")
+    question = (
+        "Rebuild from these older files anyway?"
+        if planned.warnings
+        else "Rebuild the consolidated table from these files?"
+    )
+    if not typer.confirm(question):
         return
 
     try:
@@ -990,6 +997,8 @@ def rebuild(
         _emit_json(result)
     else:
         _print_rebuild_result(result)
+        for warning in result.warnings:
+            error_console.print(f"[yellow]Warning: {escape(warning)}[/yellow]")
 
 
 @app.command()

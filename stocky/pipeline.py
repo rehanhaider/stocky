@@ -95,6 +95,8 @@ class RebuildResult:
     build_id: int | None = None
     sources: list[SourceRecord] = field(default_factory=list)
     diff: RebuildDiff | None = None
+    # Reasons to look twice before writing, such as inputs older than the current build.
+    warnings: list[str] = field(default_factory=list)
 
 
 def _strip_dataframe_strings(dataframe: pd.DataFrame) -> pd.DataFrame:
@@ -379,6 +381,95 @@ def diff_consolidated(
     )
 
 
+# How many offending rows a validation error names before it summarizes the rest.
+MAX_LISTED_OFFENDERS = 10
+
+
+def _listed(items: list[str]) -> str:
+    shown = ", ".join(items[:MAX_LISTED_OFFENDERS])
+    if len(items) > MAX_LISTED_OFFENDERS:
+        shown += f", and {len(items) - MAX_LISTED_OFFENDERS} more"
+    return shown
+
+
+def require_matching_trade_dates(paths: BhavcopyPaths) -> date:
+    """Return the pair's trade date, or fail when either name carries none or the two dates differ."""
+    bse_date = parse_bse_bhavcopy_date(paths.bse)
+    nse_date = parse_nse_bhavcopy_date(paths.nse)
+    unreadable = [
+        f"{label} bhavcopy {path.name}"
+        for label, path, parsed in (("BSE", paths.bse, bse_date), ("NSE", paths.nse, nse_date))
+        if parsed is None
+    ]
+    if unreadable:
+        raise ValueError(
+            f"Cannot read the trade date from the name of the {' or the '.join(unreadable)}. Stocky checks that "
+            "the BSE and NSE files are from the same day, so rename each file to its exchange's standard name: "
+            "BhavCopy_BSE_CM_0_0_0_YYYYMMDD_F_0000.CSV and BhavCopy_NSE_CM_0_0_0_YYYYMMDD_F_0000.csv.zip, or "
+            "BSE-EQ_ISINCODE_DDMMYY.CSV and NSE-cmDDMONYYYYbhav.csv for files before 2024-07-08."
+        )
+    if bse_date != nse_date:
+        raise ValueError(
+            f"The BSE and NSE bhavcopies are from different trade dates: BSE {paths.bse.name} is from "
+            f"{bse_date.isoformat()}, NSE {paths.nse.name} is from {nse_date.isoformat()}. "
+            "Use a BSE and an NSE file from the same day."
+        )
+    return bse_date
+
+
+def require_valid_consolidated(consolidated: pd.DataFrame) -> None:
+    """Fail when the rebuilt table, indexed by ISIN, is empty or has empty or duplicate ISINs."""
+    if consolidated.empty:
+        raise ValueError("The rebuilt table has no rows. Check that the bhavcopies list equities.")
+
+    isins = pd.Series(consolidated.index, dtype=object).map(_normalize)
+    empty = consolidated.loc[isins.isna().to_numpy()]
+    if not empty.empty:
+        rows = [_row_label(row) for _, row in empty.iterrows()]
+        raise ValueError(f"The rebuilt table has {_count(len(rows), 'row')} with no ISIN: {_listed(rows)}.")
+
+    duplicated = sorted(set(isins[isins.duplicated()]))
+    if duplicated:
+        raise ValueError(
+            f"The rebuilt table has {_count(len(duplicated), 'ISIN')} on more than one row: {_listed(duplicated)}. "
+            "A bhavcopy lists the same ISIN twice."
+        )
+
+
+def _count(number: int, noun: str) -> str:
+    return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
+
+
+def _row_label(row: pd.Series) -> str:
+    """Name a row by what each exchange lists for it, so it can be found in either bhavcopy."""
+    nse_symbol = _normalize(row.get("nse_symbol"))
+    bse_code = _normalize(row.get("bse_sc_code"))
+    bse_name = _normalize(row.get("bse_symbol")) or _normalize(row.get("bse_sc_name"))
+    parts = []
+    if nse_symbol:
+        parts.append(f"NSE {nse_symbol}")
+    if bse_code or bse_name:
+        parts.append(" ".join(["BSE", *(part for part in (bse_code, bse_name) if part)]))
+    return " / ".join(parts) or "an unnamed row"
+
+
+def older_inputs_warning(trade_date: date, current: BuildProvenance | None) -> str | None:
+    """Describe a rebuild from inputs older than the ones that built the current table, or return None."""
+    if current is None:
+        return None
+    current_dates = [
+        source.trade_date
+        for source in current.sources
+        if source.role in ("bse_bhavcopy", "nse_bhavcopy") and source.trade_date
+    ]
+    if not current_dates or trade_date.isoformat() >= max(current_dates):
+        return None
+    return (
+        f"These bhavcopies are from {trade_date.isoformat()}, older than the {max(current_dates)} bhavcopies "
+        "that built the current table. A rebuild replaces newer listings with older ones."
+    )
+
+
 def preview_sources(paths: BhavcopyPaths) -> SourcePreview:
     """Load the three source files and report how many usable rows each holds."""
     require_existing_files(paths)
@@ -430,6 +521,7 @@ def rebuild_database(
             progress(stage)
 
     require_existing_files(paths)
+    trade_date = require_matching_trade_dates(paths)
 
     report("Loading BSE bhavcopy")
     bse_equities = load_bse_equities(paths.bse, include_sgb=include_sgb)
@@ -445,21 +537,20 @@ def rebuild_database(
         zerodha_instruments=zerodha_instruments,
         include_sgb=include_sgb,
     )
+    # Checked before the comparison, the backup, and the write, so a dry run fails the same way.
+    require_valid_consolidated(stocky)
 
     report("Recording source files")
     built_at = datetime.now(UTC).isoformat()
     sources = [
-        describe_source(
-            paths.bse, role="bse_bhavcopy", rows=len(bse_equities), trade_date=parse_bse_bhavcopy_date(paths.bse)
-        ),
-        describe_source(
-            paths.nse, role="nse_bhavcopy", rows=len(nse_equities), trade_date=parse_nse_bhavcopy_date(paths.nse)
-        ),
+        describe_source(paths.bse, role="bse_bhavcopy", rows=len(bse_equities), trade_date=trade_date),
+        describe_source(paths.nse, role="nse_bhavcopy", rows=len(nse_equities), trade_date=trade_date),
         describe_source(paths.zerodha, role="zerodha_instruments", rows=len(zerodha_instruments)),
     ]
 
     report("Comparing with the current database")
     diff = diff_consolidated(db_path, stocky, sample_size=sample_size)
+    warnings = [warning for warning in (older_inputs_warning(trade_date, diff.current_provenance),) if warning]
 
     def result(*, backup_path: Path | None = None, build_id: int | None = None) -> RebuildResult:
         return RebuildResult(
@@ -474,6 +565,7 @@ def rebuild_database(
             build_id=build_id,
             sources=sources,
             diff=diff,
+            warnings=warnings,
         )
 
     if dry_run:

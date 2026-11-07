@@ -137,9 +137,13 @@ def test_rebuild_database_excludes_sgbs_by_default(sgb_market_paths, tmp_path, e
 def test_rebuild_database_include_sgb_rejects_either_legacy_file(
     sgb_market_paths, market_csv_builder, tmp_path, exchange
 ) -> None:
-    legacy = market_csv_builder(tmp_path / "legacy")
+    # Legacy columns under the same trade date's name, so the pair passes the trade-date check. The NSE
+    # file drops .zip, which the name allows, because it holds plain CSV text.
+    legacy = market_csv_builder(tmp_path / "legacy", trade_date=date(2026, 7, 17))
     paths = sgb_market_paths
     legacy_path = getattr(legacy, exchange)
+    if exchange == "nse":
+        legacy_path = legacy_path.rename(legacy_path.with_suffix(""))
     paths = type(paths)(**{**vars(paths), exchange: legacy_path})
     db_path = tmp_path / "stocky.db"
 
@@ -381,6 +385,120 @@ def test_build_consolidated_dataframe_keeps_exchange_only_isins_without_zerodha_
     assert result.loc["BSE_ONLY", "yq_bo"] == "BSEONLY.BO"
     assert result.loc["NSE_ONLY", "yq_ns"] == "NSEONLY.NS"
     assert pd.isna(result.loc["NSE_ONLY", "yq_bo"])
+
+
+def _rebuild_both_ways(paths, db_path, **options):
+    """Run a dry run and a write with the same inputs, returning the two errors they raise."""
+    errors = []
+    for dry_run in (True, False):
+        with pytest.raises(ValueError) as error:
+            rebuild_database(paths, db_path=db_path, backup=False, dry_run=dry_run, **options)
+        errors.append(str(error.value))
+    return errors
+
+
+def test_rebuild_database_rejects_bhavcopies_from_different_trade_dates(
+    tmp_path, market_csv_builder, seed_consolidated
+) -> None:
+    older = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 5, 3))
+    newer = market_csv_builder(tmp_path / "inputs", trade_date=date(2026, 7, 17))
+    paths = type(older)(bse=newer.bse, nse=older.nse, zerodha=older.zerodha)
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    before = db_path.read_bytes()
+
+    for message in _rebuild_both_ways(paths, db_path):
+        assert "different trade dates" in message
+        assert f"BSE {newer.bse.name} is from 2026-07-17" in message
+        assert f"NSE {older.nse.name} is from 2021-05-03" in message
+    assert db_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("exchange", ["bse", "nse"])
+def test_rebuild_database_rejects_a_bhavcopy_name_without_a_trade_date(tmp_path, market_csv_builder, exchange) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    renamed = getattr(paths, exchange).rename(tmp_path / "inputs" / f"{exchange}-download.csv")
+    paths = type(paths)(**{**vars(paths), exchange: renamed})
+    db_path = tmp_path / "stocky.db"
+
+    for message in _rebuild_both_ways(paths, db_path):
+        assert f"Cannot read the trade date from the name of the {exchange.upper()} bhavcopy {renamed.name}" in message
+        assert "rename each file to its exchange's standard name" in message
+        assert "BhavCopy_BSE_CM_0_0_0_YYYYMMDD_F_0000.CSV" in message
+    assert not db_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("bse_rows", "nse_rows", "expected"),
+    [
+        (
+            "F,INE000F01000,900000,EXCLUDED BOND\n",
+            "EXCLUDED,GB,IN0000000000\n",
+            "The rebuilt table has no rows.",
+        ),
+        (
+            "Q,,500001,BLANKCO\nQ,INE002A01018,500325,RELIANCE\n",
+            "NOISIN,EQ,\nRELIANCE,EQ,INE002A01018\n",
+            "The rebuilt table has 1 row with no ISIN: NSE NOISIN / BSE 500001 BLANKCO.",
+        ),
+        (
+            "Q,INE002A01018,500325,RELIANCE\nQ,INE002A01018,500326,RELIANCE PP\nQ,INE009A01021,500209,INFY\n"
+            "Q,INE009A01021,500210,INFY PP\n",
+            "RELIANCE,EQ,INE002A01018\n",
+            "The rebuilt table has 2 ISINs on more than one row: INE002A01018, INE009A01021.",
+        ),
+    ],
+    ids=["empty", "blank-isin", "duplicate-isins"],
+)
+def test_rebuild_database_rejects_an_invalid_rebuilt_table(
+    tmp_path, market_csv_builder, seed_consolidated, bse_rows, nse_rows, expected
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    paths.bse.write_text("SC_TYPE,ISIN_CODE,SC_CODE,SC_NAME\n" + bse_rows, encoding="utf-8")
+    paths.nse.write_text("SYMBOL,SERIES,ISIN\n" + nse_rows, encoding="utf-8")
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    before = db_path.read_bytes()
+    stages = []
+
+    for message in _rebuild_both_ways(paths, db_path, progress=stages.append):
+        assert expected in message
+    assert db_path.read_bytes() == before
+    assert "Backing up database" not in stages
+    assert "Writing consolidated table" not in stages
+
+
+def test_rebuild_database_warns_when_inputs_are_older_than_the_current_build(tmp_path, market_csv_builder) -> None:
+    db_path = tmp_path / "stocky.db"
+    newer = market_csv_builder(tmp_path / "newer", trade_date=date(2021, 9, 30))
+    older = market_csv_builder(tmp_path / "older", trade_date=date(2021, 5, 3))
+
+    assert rebuild_database(older, db_path=db_path, dry_run=True).warnings == []
+    assert rebuild_database(newer, db_path=db_path, backup=False).warnings == []
+    assert rebuild_database(newer, db_path=db_path, dry_run=True).warnings == []
+
+    planned = rebuild_database(older, db_path=db_path, dry_run=True)
+    written = rebuild_database(older, db_path=db_path, backup=False)
+
+    expected = [
+        "These bhavcopies are from 2021-05-03, older than the 2021-09-30 bhavcopies that built the current table. "
+        "A rebuild replaces newer listings with older ones."
+    ]
+    assert planned.warnings == expected
+    assert written.warnings == expected
+    assert rebuild_database(newer, db_path=db_path, dry_run=True).warnings == []
+
+
+def test_rebuild_database_does_not_warn_without_dated_provenance(
+    tmp_path, market_csv_builder, seed_consolidated
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    result = rebuild_database(market_csv_builder(tmp_path / "inputs"), db_path=db_path, dry_run=True)
+
+    assert result.diff.current_provenance is None
+    assert result.warnings == []
 
 
 def test_rebuild_database_dry_run_does_not_create_database(tmp_path, market_csv_builder) -> None:
