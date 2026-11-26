@@ -20,6 +20,7 @@ from stocky.database import (
     CONSOLIDATED_TABLE,
     SYMBOL_COLUMNS,
     connect,
+    missing_database_message,
     require_consolidated_table,
 )
 
@@ -104,7 +105,7 @@ def read_consolidated(
     required = _resolve_require(require)
 
     if not db_path.exists():
-        raise FileNotFoundError(f"Database not found: {db_path}. Run 'stocky rebuild' first.")
+        raise FileNotFoundError(missing_database_message(db_path, "stocky rebuild"))
 
     query = f"SELECT {', '.join(selected)} FROM {CONSOLIDATED_TABLE}"
     if required:
