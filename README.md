@@ -48,10 +48,13 @@ uv sync
     - Legacy files before 2024-07-08 use the older `NSE-cmDDMONYYYYbhav.csv` filename convention.
     - This project treats exchange bhavcopies as manually downloaded local inputs; do not add automated NSE downloads here.
 3. Zerodha Instruments: Download from `https://api.kite.trade/instruments`
-4. Optional, for mutual funds: Zerodha mutual fund instruments from `https://api.kite.trade/mf/instruments`
+4. Mutual funds: Zerodha mutual fund instruments from `https://api.kite.trade/mf/instruments`
    and AMFI scheme codes from `https://www.amfiindia.com/spages/NAVAll.txt`. Both files are required for `mf import`.
-5. Optional, for BSE debt: download `https://www.bseindia.com/download/BhavCopy/Debt/DEBTBHAVCOPY<DDMMYYYY>.zip`,
+5. BSE debt: download `https://www.bseindia.com/download/BhavCopy/Debt/DEBTBHAVCOPY<DDMMYYYY>.zip`,
    replacing `<DDMMYYYY>` with the trade date, such as `16102026`.
+
+`stocky summary` fails when the `mutual_funds`, `bse_debt`, `indices`, or `broker_symbols` table is empty, so a full
+refresh needs all of these files.
 
 ### Then place these files in the following locations
 1. BSE Bhavcopy: `data/marketData/bhavCopies`

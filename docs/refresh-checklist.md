@@ -6,7 +6,7 @@ inputs, so step 1 stays manual.
 1. Download the inputs into the ignored local folders:
    - the BSE and NSE bhavcopies for one trade date into `data/marketData/bhavCopies`;
    - the Zerodha instruments file from `https://api.kite.trade/instruments` to `data/marketData/zerodha/instruments.csv`.
-   - for mutual fund imports, the Zerodha mutual fund instruments file from `https://api.kite.trade/mf/instruments` to
+   - the Zerodha mutual fund instruments file from `https://api.kite.trade/mf/instruments` to
      `data/marketData/zerodha/mf_instruments.csv`, and AMFI scheme codes from
      `https://www.amfiindia.com/spages/NAVAll.txt` to `data/marketData/amfi/NAVAll.txt`.
    - broker cash-market files:
