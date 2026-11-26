@@ -9,11 +9,13 @@ from typing import Literal
 from stocky.config import DEFAULT_DB_PATH
 from stocky.database import (
     connect,
+    count_orphan_yahoo_responses,
     delete_yahoo_response,
     encode_response_json,
     fetch_consolidated_symbols,
     initialize_database,
     is_usable_yahoo_payload,
+    prune_orphan_yahoo_responses,
     read_available_yahoo_symbols,
     read_yahoo_fetch_times,
     split_yahoo_symbol,
@@ -83,6 +85,8 @@ class YahooUpdateResult:
     written: int
     skipped: int
     dry_run: bool
+    # Cached responses removed because their ticker left consolidated; a dry run counts those it would remove.
+    pruned: int = 0
 
 
 # Each exchange reads the consolidated column that holds its full Yahoo tickers.
@@ -193,7 +197,13 @@ class YahooDataManager:
         )
 
         if dry_run:
-            return YahooUpdateResult(processed=len(tickers), written=0, skipped=0, dry_run=True)
+            return YahooUpdateResult(
+                processed=len(tickers),
+                written=0,
+                skipped=0,
+                dry_run=True,
+                pruned=count_orphan_yahoo_responses(self.db_path),
+            )
 
         import yahooquery as yq
 
@@ -264,4 +274,6 @@ class YahooDataManager:
                 if progress is not None:
                     progress(index, len(tickers), written, skipped)
 
-        return YahooUpdateResult(processed=len(tickers), written=written, skipped=skipped, dry_run=False)
+        # Only a run that finished prunes: an abort or interruption raises out of the loop above first.
+        pruned = prune_orphan_yahoo_responses(self.db_path)
+        return YahooUpdateResult(processed=len(tickers), written=written, skipped=skipped, dry_run=False, pruned=pruned)

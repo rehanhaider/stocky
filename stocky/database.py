@@ -557,6 +557,45 @@ def delete_yahoo_response(con: sqlite3.Connection, yahoo_symbol: str) -> None:
     con.execute(f"DELETE FROM {YAHOO_RESPONSES_TABLE} WHERE yahoo_symbol = ?", (yahoo_symbol,))
 
 
+# A response is orphaned once its ticker is in neither Yahoo column of consolidated. The NULL checks
+# matter: NOT IN against a list holding NULL is never true, so it would match no row at all.
+# An empty consolidated table lists no tickers, so every cached response would look orphaned: prune none then.
+_ORPHAN_YAHOO_RESPONSES = f"""
+    FROM {YAHOO_RESPONSES_TABLE}
+    WHERE EXISTS (SELECT 1 FROM {CONSOLIDATED_TABLE})
+      AND yahoo_symbol NOT IN (SELECT yq_ns FROM {CONSOLIDATED_TABLE} WHERE yq_ns IS NOT NULL)
+      AND yahoo_symbol NOT IN (SELECT yq_bo FROM {CONSOLIDATED_TABLE} WHERE yq_bo IS NOT NULL)
+"""
+
+
+def count_orphan_yahoo_responses(db_path: Path = DEFAULT_DB_PATH) -> int:
+    """Count the cached responses whose ticker no longer appears in consolidated."""
+    if not db_path.exists():
+        return 0
+
+    with connect(db_path) as con:
+        if not table_exists(con, YAHOO_RESPONSES_TABLE):
+            return 0
+        require_consolidated_table(con, db_path, ("yq_ns", "yq_bo"))
+        return con.execute(f"SELECT COUNT(*) {_ORPHAN_YAHOO_RESPONSES}").fetchone()[0]
+
+
+def prune_orphan_yahoo_responses(db_path: Path = DEFAULT_DB_PATH) -> int:
+    """Delete the cached responses whose ticker no longer appears in consolidated, and return how many.
+
+    The deletion is committed first and the file is then vacuumed, on a second connection, to give the
+    freed pages back, because VACUUM cannot run inside a transaction. Nothing is vacuumed when nothing was
+    deleted.
+    """
+    with connect(db_path) as con:
+        require_consolidated_table(con, db_path, ("yq_ns", "yq_bo"))
+        pruned = con.execute(f"DELETE {_ORPHAN_YAHOO_RESPONSES}").rowcount
+    if pruned:
+        with connect(db_path) as con:
+            con.execute("VACUUM")
+    return pruned
+
+
 def upsert_yahoo_response(
     con: sqlite3.Connection,
     *,

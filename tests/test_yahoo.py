@@ -1,3 +1,4 @@
+import os
 import sys
 import types
 from datetime import UTC, datetime, timedelta
@@ -501,6 +502,126 @@ def test_update_persists_rows_written_before_aborting(tmp_path, monkeypatch, see
         YahooDataManager(db_path).update_data(exchange="BSE")
 
     assert read_available_yahoo_symbols(db_path) == {f"{symbol}.BO" for symbol in good}
+
+
+def _use_fake_yahooquery(monkeypatch, ticker=_FakeTicker) -> None:
+    fake_module = types.ModuleType("yahooquery")
+    fake_module.Ticker = ticker
+    monkeypatch.setitem(sys.modules, "yahooquery", fake_module)
+
+
+def _cached_rows(db_path) -> dict[str, tuple[object, ...]]:
+    with connect(db_path) as con:
+        rows = con.execute(
+            "SELECT yahoo_symbol, symbol, exchange, response_json, fetched_at, source FROM yahoo_responses"
+        )
+        return {row[0]: row for row in rows}
+
+
+def _seed_orphans_beside_listed(db_path, seed_consolidated) -> None:
+    """Consolidated lists RELIANCE and INFY on both exchanges; two cached tickers are listed nowhere."""
+    seed_consolidated(
+        db_path, [_ticker_row("INE001", "RELIANCE"), _ticker_row("INE002", "INFY"), _ticker_row("INE003", "")]
+    )
+    for yahoo_symbol in ["INFY.NS", "INFY.BO", "RELIANCE.BO", "DELISTED.NS", "MERGED.BO"]:
+        _seed_cached_response(db_path, yahoo_symbol)
+
+
+def test_update_prunes_responses_whose_ticker_left_consolidated(tmp_path, monkeypatch, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    _seed_orphans_beside_listed(db_path, seed_consolidated)
+    kept_before = {key: row for key, row in _cached_rows(db_path).items() if key not in {"DELISTED.NS", "MERGED.BO"}}
+    _use_fake_yahooquery(monkeypatch)
+
+    result = YahooDataManager(db_path).update_data(exchange="NSE", symbols=["RELIANCE"])
+
+    assert (result.processed, result.written, result.pruned) == (1, 1, 2)
+    after = _cached_rows(db_path)
+    assert set(after) == {"RELIANCE.NS", *kept_before}
+    # Rows of listed tickers that this run did not fetch keep every column, the other exchange's included.
+    assert {key: after[key] for key in kept_before} == kept_before
+
+
+def test_dry_run_counts_orphans_without_deleting(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    _seed_orphans_beside_listed(db_path, seed_consolidated)
+    before = _cached_rows(db_path)
+
+    result = YahooDataManager(db_path).update_data(exchange="BSE", dry_run=True)
+
+    assert (result.processed, result.pruned, result.dry_run) == (2, 2, True)
+    assert _cached_rows(db_path) == before
+
+
+def test_dry_run_counts_no_orphans_without_a_response_table(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    assert YahooDataManager(db_path).update_data(dry_run=True).pruned == 0
+
+
+def test_update_prunes_nothing_when_consolidated_is_empty(tmp_path, monkeypatch, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path, [])
+    for yahoo_symbol in ["INFY.NS", "RELIANCE.BO"]:
+        _seed_cached_response(db_path, yahoo_symbol)
+    before = _cached_rows(db_path)
+    _use_fake_yahooquery(monkeypatch)
+
+    # A limit of 0 is the only update an empty table allows; every other run fails for want of tickers.
+    assert YahooDataManager(db_path).update_data(exchange="NSE", limit=0, dry_run=True).pruned == 0
+    assert YahooDataManager(db_path).update_data(exchange="NSE", limit=0).pruned == 0
+    assert _cached_rows(db_path) == before
+
+
+def test_aborted_update_prunes_nothing(tmp_path, monkeypatch, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    _seed_orphans_beside_listed(db_path, seed_consolidated)
+    before = _cached_rows(db_path)
+
+    class RaisingTicker(_FakeTicker):
+        @property
+        def all_modules(self):
+            raise RuntimeError("offline failure")
+
+    _use_fake_yahooquery(monkeypatch, RaisingTicker)
+    monkeypatch.setattr(yahoo, "CONSECUTIVE_FAILURE_LIMIT", 2)
+
+    with pytest.raises(yahoo.YahooFetchError):
+        YahooDataManager(db_path).update_data(exchange="BSE")
+
+    assert _cached_rows(db_path) == before
+
+
+def test_pruning_vacuums_the_freed_pages_away(tmp_path, monkeypatch, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path, [_ticker_row("INE001", "RELIANCE")])
+    initialize_database(db_path)
+    with connect(db_path) as con:
+        # Random bytes do not compress, so the orphan takes about 2 MB of pages.
+        upsert_yahoo_response(
+            con,
+            yahoo_symbol="DELISTED.NS",
+            symbol="DELISTED",
+            exchange="NSE",
+            response_json=os.urandom(2_000_000),
+            source="test",
+        )
+    size_before = db_path.stat().st_size
+    _use_fake_yahooquery(monkeypatch)
+
+    result = YahooDataManager(db_path).update_data(exchange="NSE", limit=0)
+
+    assert result.pruned == 1
+    assert db_path.stat().st_size < size_before - 1_900_000
+    with connect(db_path) as con:
+        assert con.execute("PRAGMA freelist_count").fetchone() == (0,)
+        assert con.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+    # A second run has nothing to prune and leaves the file as it is.
+    size_after = db_path.stat().st_size
+    assert YahooDataManager(db_path).update_data(exchange="NSE", limit=0).pruned == 0
+    assert db_path.stat().st_size == size_after
 
 
 def test_update_resets_failure_counter_after_a_success(tmp_path, monkeypatch, seed_consolidated) -> None:

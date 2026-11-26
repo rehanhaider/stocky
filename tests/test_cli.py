@@ -789,7 +789,7 @@ def test_yahoo_update_passes_options_and_prints_progress(tmp_path, monkeypatch, 
         def update_data(self, **options):
             calls.append(("update", options.copy()))
             options["progress"](50, 60, 48, 2)
-            return YahooUpdateResult(processed=60, written=58, skipped=2, dry_run=False)
+            return YahooUpdateResult(processed=60, written=58, skipped=2, dry_run=False, pruned=4)
 
     monkeypatch.setattr(cli, "YahooDataManager", FakeManager)
 
@@ -826,7 +826,7 @@ def test_yahoo_update_passes_options_and_prints_progress(tmp_path, monkeypatch, 
     assert callable(calls[1][1]["progress"])
     assert "50/60 processed; 48 written; 2 skipped" in result.stderr
     assert "50/60 processed" not in result.stdout
-    assert "Processed 60; wrote 58; skipped 2; dry_run=False." in result.stdout
+    assert "Processed 60; wrote 58; skipped 2; pruned 4; dry_run=False." in result.stdout
 
 
 def test_yahoo_update_no_longer_accepts_key(tmp_path, runner) -> None:
@@ -871,20 +871,47 @@ def test_yahoo_update_json_emits_progress_events_on_stderr(tmp_path, monkeypatch
         def update_data(self, **options):
             options["progress"](1, 2, 1, 0)
             options["progress"](2, 2, 1, 1)
-            return YahooUpdateResult(processed=2, written=1, skipped=1, dry_run=False)
+            return YahooUpdateResult(processed=2, written=1, skipped=1, dry_run=False, pruned=3)
 
     monkeypatch.setattr(cli, "YahooDataManager", FakeManager)
 
     result = runner.invoke(app, ["yahoo", "update", "--db-path", str(db_path), "--json"])
 
     assert result.exit_code == 0
-    assert json.loads(result.stdout) == {"processed": 2, "written": 1, "skipped": 1, "dry_run": False}
+    assert json.loads(result.stdout) == {"processed": 2, "written": 1, "skipped": 1, "dry_run": False, "pruned": 3}
     events = [json.loads(line) for line in result.stderr.splitlines() if line.strip()]
     assert events == [
         {"event": "progress", "processed": 1, "total": 2, "written": 1, "skipped": 0},
         {"event": "progress", "processed": 2, "total": 2, "written": 1, "skipped": 1},
     ]
     assert "2/2 processed" not in result.stdout
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_yahoo_update_reports_pruned_orphans_in_text_and_json(
+    dry_run, tmp_path, monkeypatch, seed_consolidated, runner
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    _seed_cached_yahoo_responses(db_path, ["INFY", "DELISTED", "MERGED"])
+    _use_fake_yahooquery(monkeypatch)
+    args = ["yahoo", "update", "--exchange", "NSE", "--symbols", "RELIANCE", "--db-path", str(db_path)]
+    if dry_run:
+        args.append("--dry-run")
+
+    text = runner.invoke(app, args)
+
+    assert text.exit_code == 0
+    if dry_run:
+        assert "Processed 1; wrote 0; skipped 0; pruned 2; dry_run=True." in text.stdout
+    else:
+        assert "Processed 1; wrote 1; skipped 0; pruned 2; dry_run=False." in text.stdout
+
+    # A dry run leaves both orphans for the JSON run to count again; a real run has removed them.
+    as_json = runner.invoke(app, [*args, "--json"])
+
+    assert as_json.exit_code == 0
+    assert json.loads(as_json.stdout)["pruned"] == (2 if dry_run else 0)
 
 
 def test_yahoo_update_reports_missing_database(tmp_path, runner) -> None:

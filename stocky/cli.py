@@ -1523,7 +1523,7 @@ def yahoo_update(
     else:
         console.print(
             f"[green]Processed {result.processed}; wrote {result.written}; skipped {result.skipped}; "
-            f"dry_run={result.dry_run}.[/green]"
+            f"pruned {result.pruned}; dry_run={result.dry_run}.[/green]"
         )
 
 
