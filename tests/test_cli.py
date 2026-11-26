@@ -13,6 +13,7 @@ import pytest
 import typer
 
 import stocky.cli as cli
+import stocky.yahoo as yahoo
 from stocky import __version__
 from stocky.cli import app
 from stocky.database import SCHEMA_VERSION, connect, encode_response_json, initialize_database, upsert_yahoo_response
@@ -393,7 +394,9 @@ def test_rebuild_keep_removes_older_backups_and_prints_them(
     # rebuild backs up to the default directory, relative to the working directory.
     monkeypatch.chdir(tmp_path)
     paths = market_csv_builder(tmp_path / "inputs")
-    db_path = tmp_path / "stocky.db"
+    # The database sits beside the default backup folder, as data/output/stocky.db does.
+    db_path = tmp_path / "data" / "output" / "stocky.db"
+    db_path.parent.mkdir(parents=True)
     seed_consolidated(db_path)
     backup_dir = tmp_path / "data" / "output" / "backup"
     old = old_backups(backup_dir, db_path.name, 7)
@@ -415,7 +418,9 @@ def test_rebuild_json_lists_the_removed_backups(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     paths = market_csv_builder(tmp_path / "inputs")
-    db_path = tmp_path / "stocky.db"
+    # The database sits beside the default backup folder, as data/output/stocky.db does.
+    db_path = tmp_path / "data" / "output" / "stocky.db"
+    db_path.parent.mkdir(parents=True)
     seed_consolidated(db_path)
     old = old_backups(tmp_path / "data" / "output" / "backup", db_path.name, 7)
 
@@ -1147,9 +1152,12 @@ def test_interactive_rebuild_keeps_five_backups(
     tmp_path, market_csv_builder, seed_consolidated, old_backups, monkeypatch, runner
 ) -> None:
     paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 5, 3))
-    db_path = tmp_path / "stocky.db"
+    # The database sits beside the default backup folder, as data/output/stocky.db does.
+    db_path = tmp_path / "data" / "output" / "stocky.db"
+    db_path.parent.mkdir(parents=True)
     seed_consolidated(db_path)
     _use_interactive_defaults(monkeypatch, paths, db_path)
+    monkeypatch.chdir(tmp_path)
     backup_dir = tmp_path / "data" / "output" / "backup"
     old = old_backups(backup_dir, db_path.name, 7)
 
@@ -2783,6 +2791,26 @@ def test_refresh_stops_at_the_first_failure_and_names_the_completed_steps(
         assert payload["not_run"] == REFRESH_STEPS[4:]
     else:
         assert "Refresh complete." not in result.stdout
+
+
+def test_refresh_names_the_command_that_resumes_a_failing_yahoo_update(refresh_root, monkeypatch, runner) -> None:
+    class OfflineTicker(_FakeTicker):
+        @property
+        def all_modules(self):
+            raise RuntimeError("offline")
+
+    fake_module = types.ModuleType("yahooquery")
+    fake_module.Ticker = OfflineTicker
+    monkeypatch.setitem(sys.modules, "yahooquery", fake_module)
+    monkeypatch.setattr(yahoo, "CONSECUTIVE_FAILURE_LIMIT", 1)
+
+    result = _refresh(runner)
+
+    assert result.exit_code == 1
+    stderr = " ".join(result.stderr.split())
+    assert "Refresh stopped at step 6 of 8, yahoo update NSE: Yahoo Finance request failed for" in stderr
+    assert "then run 'stocky yahoo update --exchange NSE --missing-only' to resume" in stderr
+    assert "re-run with --missing-only" not in stderr
 
 
 def test_refresh_reports_the_brokers_that_committed_before_one_failed(refresh_root, runner) -> None:

@@ -182,6 +182,32 @@ def test_update_writes_responses_and_skips_unknown_symbols(tmp_path, monkeypatch
         assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
+def test_an_interrupted_update_rolls_the_schema_number_back_with_its_rows(
+    tmp_path, monkeypatch, seed_consolidated
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path, [_ticker_row("INE001", "RELIANCE"), _ticker_row("INE002", "INFY")])
+    initialize_database(db_path)
+    _use_fake_yahooquery(monkeypatch)
+    upsert = yahoo.upsert_yahoo_response
+    calls = []
+
+    def interrupted(*args, **kwargs):
+        calls.append(kwargs["yahoo_symbol"])
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        upsert(*args, **kwargs)
+
+    monkeypatch.setattr(yahoo, "upsert_yahoo_response", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        YahooDataManager(db_path).update_data(exchange="NSE")
+
+    with connect(db_path) as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM yahoo_responses").fetchone()[0] == 0
+
+
 def test_update_fetches_only_the_exchange_column_tickers(tmp_path, monkeypatch, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(
@@ -342,7 +368,8 @@ def test_update_builds_a_new_client_when_the_crumb_lapses(tmp_path, monkeypatch,
 def test_is_auth_failure_matches_crumb_and_cookie_answers() -> None:
     assert yahoo.is_auth_failure("Invalid Crumb")
     assert yahoo.is_auth_failure("Invalid Cookie")
-    assert yahoo.is_auth_failure("{'code': 'Unauthorized', 'description': 'User is unable to access this feature'}")
+    assert yahoo.is_auth_failure("invalid crumb")
+    assert not yahoo.is_auth_failure("User is unable to access this feature")
     assert not yahoo.is_auth_failure("Too Many Requests")
     assert not yahoo.is_auth_failure("HTTP 404 Not Found.  Please try again")
     assert not yahoo.is_auth_failure("RuntimeError('offline failure')")
@@ -577,6 +604,22 @@ def test_update_prunes_nothing_when_consolidated_is_empty(tmp_path, monkeypatch,
     assert YahooDataManager(db_path).update_data(exchange="NSE", limit=0, dry_run=True).pruned == 0
     assert YahooDataManager(db_path).update_data(exchange="NSE", limit=0).pruned == 0
     assert _cached_rows(db_path) == before
+
+
+def test_update_keeps_an_exchanges_responses_when_its_column_lists_no_ticker(
+    tmp_path, monkeypatch, seed_consolidated
+) -> None:
+    # A rebuild from legacy bhavcopies has no BSE trading symbol, so every yq_bo is empty.
+    db_path = tmp_path / "stocky.db"
+    rows = [(*_ticker_row("INE001", "RELIANCE")[:-1], None), (*_ticker_row("INE002", "INFY")[:-1], "")]
+    seed_consolidated(db_path, rows)
+    for yahoo_symbol in ["RELIANCE.NS", "DELISTED.NS", "RELIANCE.BO", "INFY.BO"]:
+        _seed_cached_response(db_path, yahoo_symbol)
+    _use_fake_yahooquery(monkeypatch)
+
+    assert YahooDataManager(db_path).update_data(exchange="NSE", limit=0, dry_run=True).pruned == 1
+    assert YahooDataManager(db_path).update_data(exchange="NSE", limit=0).pruned == 1
+    assert set(_cached_rows(db_path)) == {"RELIANCE.NS", "RELIANCE.BO", "INFY.BO"}
 
 
 def test_aborted_update_prunes_nothing(tmp_path, monkeypatch, seed_consolidated) -> None:

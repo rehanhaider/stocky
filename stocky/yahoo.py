@@ -27,14 +27,28 @@ COMMIT_EVERY = 25
 CONSECUTIVE_FAILURE_LIMIT = 5
 NOT_FOUND_PREFIX = "Quote not found for"
 # Yahoo answers a request whose crumb or cookie it no longer accepts with "Invalid Crumb" (or, in
-# older answers, "Invalid Cookie" or an "Unauthorized" code) in place of the symbol's payload.
-AUTH_FAILURE_MARKERS = ("crumb", "cookie", "unauthorized")
+# older answers, "Invalid Cookie") in place of the symbol's payload. yahooquery passes on only an
+# API error's description, never its code, so the text is all there is to match.
+AUTH_FAILURE_MARKERS = ("crumb", "cookie")
 
 ProgressCallback = Callable[[int, int, int, int], None]
 
 
 class YahooFetchError(RuntimeError):
-    """Raised when Yahoo Finance keeps failing and the run cannot continue."""
+    """Raised when Yahoo Finance keeps failing and the run cannot continue.
+
+    ``reason`` says what failed; the message adds how to resume a `stocky yahoo update`, which a caller that runs
+    the update as one step of something else can replace with its own.
+    """
+
+    RESUME_HINT = (
+        "Check the network connection, or wait if Yahoo is rate limiting, "
+        "then re-run with --missing-only to resume from the symbols already saved."
+    )
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"{reason} {self.RESUME_HINT}")
+        self.reason = reason
 
 
 Outcome = Literal["success", "not_found", "failure"]
@@ -235,7 +249,6 @@ class YahooDataManager:
         # writes after the last COMMIT_EVERY boundary are persisted there. The
         # abort path commits explicitly because that exit rolls back instead.
         with connect(self.db_path) as con:
-            write_schema_version(con)
             for index, yahoo_symbol in enumerate(tickers, start=1):
                 outcome, detail, data, cause = fetch(yahoo_symbol)
                 if outcome == "failure" and is_auth_failure(detail):
@@ -250,9 +263,7 @@ class YahooDataManager:
                         con.commit()
                         raise YahooFetchError(
                             f"Yahoo Finance request failed for {yahoo_symbol} "
-                            f"({consecutive_failures} consecutive failures; last error: {detail}). "
-                            "Check the network connection, or wait if Yahoo is rate limiting, "
-                            "then re-run with --missing-only to resume from the symbols already saved."
+                            f"({consecutive_failures} consecutive failures; last error: {detail})."
                         ) from cause
                 elif outcome == "not_found":
                     consecutive_failures = 0
@@ -269,6 +280,9 @@ class YahooDataManager:
                         response_json=encode_response_json(data),
                         source="yahooquery",
                     )
+                    if not written:
+                        # After the first row, so the number commits or rolls back with this run's rows.
+                        write_schema_version(con)
                     written += 1
                     if written % COMMIT_EVERY == 0:
                         con.commit()
