@@ -174,6 +174,19 @@ def _load_aliceblue(nse_path: Path, bse_path: Path, con: sqlite3.Connection) -> 
     return _finish(pd.concat(frames, ignore_index=True), "aliceblue")
 
 
+def load_aliceblue(nse_path: Path, bse_path: Path, db_path: Path = DEFAULT_DB_PATH) -> pd.DataFrame:
+    """Resolve Alice Blue's cash identifiers against consolidated in one read snapshot, writing nothing.
+
+    stocky refresh --dry-run previews the Alice Blue import with it. The database must exist: connect()
+    would otherwise create an empty file during a dry run.
+    """
+    if not db_path.exists():
+        raise FileNotFoundError(missing_database_message(db_path, "stocky rebuild"))
+    with connect(db_path) as con:
+        con.execute("BEGIN")
+        return _load_aliceblue(nse_path, bse_path, con)
+
+
 def import_broker(
     broker: Broker | str,
     path: Path,

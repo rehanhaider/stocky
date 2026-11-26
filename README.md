@@ -249,6 +249,17 @@ when a check fails, including when a mapping table is empty or has no import rec
 uv run stocky summary --output data/output/refresh-summary.md
 ```
 
+Run the whole quarterly refresh in one command: the rebuild (keeping SGB rows when the current table has them),
+`indices import`, `debt import`, `mf import`, `brokers import`, `yahoo update` for NSE and then BSE, and `summary`, in
+that order, with each command's default input files. `--dry-run` shows every step's preview and writes nothing;
+`--stale-days` applies to both Yahoo updates. It stops at the first step that fails, names that step and the completed
+ones, and exits with status 1:
+
+```bash
+uv run stocky refresh --date 2026-07-17 --stale-days 90 --dry-run
+uv run stocky refresh --date 2026-07-17 --stale-days 90
+```
+
 Look up an instrument by symbol, ISIN, BSE scrip code, or name fragment. When nothing matches directly, `query` shows the closest names:
 
 ```bash
@@ -359,7 +370,7 @@ uv run stocky explore
 uv run stocky status --json
 ```
 
-The `status`, `summary`, `query`, `lookup`, `explore`, `rebuild`, `screen`, `yahoo update`, `yahoo import-cache`, `yahoo fields`, `mf import`, `mf query`, `debt import`, `debt query`, `indices import`, `indices query`, and `brokers query` commands accept `--json` and print JSON on stdout. With `--json`, `yahoo update` also writes its progress and error events to stderr as JSON lines, one per line. Every command prints its errors on stderr, with or without `--json`, so stdout carries only results.
+The `status`, `summary`, `refresh`, `query`, `lookup`, `explore`, `rebuild`, `screen`, `yahoo update`, `yahoo import-cache`, `yahoo fields`, `mf import`, `mf query`, `debt import`, `debt query`, `indices import`, `indices query`, and `brokers query` commands accept `--json` and print JSON on stdout. With `--json`, `yahoo update` also writes its progress and error events to stderr as JSON lines, one per line. Every command prints its errors on stderr, with or without `--json`, so stdout carries only results.
 
 ### Exporting the consolidated table
 
