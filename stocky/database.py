@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import gzip
 import json
 import re
@@ -291,6 +292,16 @@ def backup_database(
     return backup_path
 
 
+def backups_belong_to(db_path: Path, backup_dir: Path) -> bool:
+    """Whether backup_dir sits beside db_path, so the backups named after it in there are its own.
+
+    Backups are named by timestamp and file name only, and the backup directory does not follow --db-path. A
+    database elsewhere with the same file name backs up into the same folder, and its backups cannot be told
+    apart from that folder's own database's, so only a database beside its backup folder prunes it.
+    """
+    return backup_dir.resolve().parent == db_path.resolve().parent
+
+
 def prune_backups(db_path: Path, backup_dir: Path, keep: int) -> list[Path]:
     """Delete all but the newest ``keep`` backups of ``db_path`` and return the removed paths, oldest first.
 
@@ -308,9 +319,12 @@ def prune_backups(db_path: Path, backup_dir: Path, keep: int) -> list[Path]:
         (path for path in backup_dir.iterdir() if pattern.fullmatch(path.name) and path.is_file()),
         key=lambda path: path.name,
     )
-    removed = backups[:-keep]
-    for path in removed:
-        path.unlink()
+    removed = []
+    for path in backups[:-keep]:
+        # Another rebuild may have removed it first; it is gone either way.
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+            removed.append(path)
     return removed
 
 

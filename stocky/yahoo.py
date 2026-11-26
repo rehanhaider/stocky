@@ -26,8 +26,9 @@ COMMIT_EVERY = 25
 CONSECUTIVE_FAILURE_LIMIT = 5
 NOT_FOUND_PREFIX = "Quote not found for"
 # Yahoo answers a request whose crumb or cookie it no longer accepts with "Invalid Crumb" (or, in
-# older answers, "Invalid Cookie" or an "Unauthorized" code) in place of the symbol's payload.
-AUTH_FAILURE_MARKERS = ("crumb", "cookie", "unauthorized")
+# older answers, "Invalid Cookie") in place of the symbol's payload. yahooquery passes on only an
+# API error's description, never its code, so the text is all there is to match.
+AUTH_FAILURE_MARKERS = ("crumb", "cookie")
 
 ProgressCallback = Callable[[int, int, int, int], None]
 
