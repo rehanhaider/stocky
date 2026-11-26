@@ -9,127 +9,17 @@
     3. Zerodha symbols
     4. Yahoo symbols (Both .NS and .BO)
 
-## The consolidated table
+## Database tables
 
-`data/output/stocky.db` holds one `consolidated` row per ISIN. A share keeps the same ISIN on NSE and BSE, but its
-symbol can differ, so every symbol column belongs to one exchange. A column stays empty when that exchange does not list
-the ISIN in the bhavcopy used for the rebuild.
+`data/output/stocky.db` holds the `consolidated` table, one row per ISIN with its BSE, NSE, Zerodha, and Yahoo
+symbols, and the separate `mutual_funds`, `bse_debt`, `indices`, and `broker_symbols` tables. The
+[schema reference](docs/schema.md) lists each table's columns and sources.
 
-`ins_type` is `equity` for shares, `etf` for exchange-traded funds whose ISIN starts with `INF`, and `sgb` for
-sovereign gold bonds. Every rebuild labels ETFs, so filtering ins_type = 'equity' no longer returns ETFs.
-SGBs are included only with `stocky rebuild --include-sgb`. This needs UDiFF bhavcopies and includes NSE series `GB`
-and BSE series `G` symbols starting with `SGB`. Other government securities stay excluded.
-
-| Column | NSE | BSE | Source |
-| --- | --- | --- | --- |
-| `nse_symbol` / `bse_symbol` | yes | yes | `TckrSymb` in each exchange's bhavcopy |
-| `bse_sc_code`, `bse_sc_name` | | yes | BSE bhavcopy |
-| `zd_ns` / `zd_bo` | yes | yes | Zerodha instruments, matched by the exchange's instrument token, such as `AAREYDRUGS-BE`. When an NSE token has changed, the NSE symbol is looked up in Zerodha's NSE list only |
-| `yq_ns` / `yq_bo` | yes | yes | The exchange symbol plus `.NS` or `.BO`, such as `RELIANCE.NS` |
-
-For example, Globe Textiles trades only on NSE, so it has `yq_ns = GLOBE.NS` and an empty `yq_bo`. Yahoo's `GLOBE.BO`
-is a different company, and nothing links it to Globe Textiles. Legacy-format bhavcopies (`NSE-cm*bhav.csv`,
-`EQ_ISINCODE_*.CSV`) carry no BSE trading symbol, so a rebuild from them leaves `bse_symbol` and `yq_bo` empty.
-
-### Release data
+## Release data
 
 Release `v2.0.0` replaces the shared Zerodha and Yahoo symbol columns with exchange-specific columns. See the
 [release notes](docs/releases/v2.0.0.md) for the column changes, source trade date, and database row counts.
 `data/output/stocky.db` is versioned with the repository; pin the release tag to use that database version.
-
-## The mutual_funds table
-
-`mutual_funds` holds one row per mutual fund scheme option from Zerodha's mutual fund instruments file. It is separate
-from `consolidated`, and `stocky rebuild` does not change it.
-
-| Column | Source |
-| --- | --- |
-| `isin` | The scheme option's ISIN, such as `INF179K01KG8`. Each plan (regular or direct) and option (growth, payout, reinvest) has its own ISIN |
-| `zd_mf` | Zerodha's `tradingsymbol`, the identifier Kite's mutual fund orders take. Zerodha uses the ISIN here |
-| `amfi_code` | AMFI scheme code from `NAVAll.txt`, stored as TEXT. NULL when the ISIN is unmatched or has more than one scheme code |
-| `name`, `amc` | Scheme name and Zerodha's AMC label, such as `HDFCMutualFund_MF` |
-| `scheme_type`, `plan`, `dividend_type` | Category (`Debt`, `Equity`, ...), `regular` or `direct`, and `growth`, `payout`, or `reinvest` |
-
-Zerodha's file has no AMFI scheme code. The import joins AMFI's NAV file by ISIN, using both ISIN fields and keeping
-only valid ISINs. Codes shared by multiple ISINs are allowed; an ISIN with multiple codes gets NULL.
-
-## The bse_debt table
-
-`bse_debt` holds identifier mappings from the three CSV members in a BSE debt bhavcopy archive. It is separate
-from `consolidated`, and `stocky rebuild` does not change it. The same ISIN can appear in more than one family.
-
-| Column | Source |
-| --- | --- |
-| `family` | `fgroup`, `icdm`, or `wdm`, from the member filename |
-| `trade_date` | The date in the member filename, stored as `YYYY-MM-DD` |
-| `scrip_code` | `fgroup` `Security_cd` or `wdm` `Scrip Code`; empty for `icdm` |
-| `symbol` | `fgroup` `sc_name` or `wdm` `Security Code`; empty for `icdm` |
-| `isin` | `fgroup` or `icdm` `ISIN No.`; empty for `wdm` |
-| `name` | `icdm` `Issuer Name` or `wdm` `Security Description`; empty for `fgroup` |
-| `coupon_pct` | `fgroup` `COUP0N (%)`, `icdm` `Coupon (%)`, or `wdm` `Coupon Rate (%)` |
-| `maturity_date` | `Maturity Date` or `wdm` `MaturityDate`, stored as `YYYY-MM-DD` |
-| `face_value` | `fgroup` `FACE VALUE` or `icdm` `Face Value`; empty for `wdm` |
-
-Numbers keep the source's trimmed text, and empty cells are SQL NULL. Each family's identifier must be unique:
-`scrip_code` for `fgroup` and `wdm`, and `isin` for `icdm`. Prices, volumes, and turnover are not stored.
-
-## The indices table
-
-`indices` holds market index identifiers from rows whose `segment` is `INDICES` in Zerodha's instruments file.
-It is separate from `consolidated`, and `stocky rebuild` does not change it.
-
-| Column | Source |
-| --- | --- |
-| `exchange` | Zerodha's `exchange`, such as `NSE`, `BSE`, `GLOBAL`, `MCX`, or `NSEIX` |
-| `zd_symbol` | Zerodha's `tradingsymbol`, such as `NIFTY 50` |
-| `name` | Zerodha's index `name` |
-| `zd_instrument_token` | Zerodha's `instrument_token`, the primary key, such as `256265` |
-| `exchange_token` | Zerodha's `exchange_token`, such as `1001` |
-
-All columns are TEXT, values keep the source's trimmed text, and empty cells are SQL NULL. Instrument tokens
-must be present and unique. The symbol has an index. Price fields are not stored. Only the `INDICES` segment
-is imported; NCO commodity spot rows are excluded. The local `instruments.csv` snapshot is dated 2026-07-19.
-Yahoo index tickers are not mapped.
-
-## The broker_symbols table
-
-`broker_symbols` holds cash-market identifiers for Groww, Upstox, and Alice Blue on NSE and BSE. It is separate
-from `consolidated`, and `stocky rebuild` keeps it. Each import replaces only the selected broker's rows in one
-transaction. A failed broker import keeps its previous rows. Imports of earlier brokers remain committed if a
-later broker fails.
-
-| Column | Source |
-| --- | --- |
-| `broker` | `groww`, `upstox`, or `aliceblue` |
-| `exchange` | `NSE` or `BSE`, from the source exchange or Upstox segment |
-| `exchange_token` | Groww/Upstox `exchange_token`; Alice Blue `Token` |
-| `isin` | Groww/Upstox `isin`; Alice Blue lookup in `consolidated` at import time |
-| `symbol` | Groww/Upstox `trading_symbol`; Alice Blue `Trading Symbol` |
-| `broker_key` | Groww `groww_symbol`; Upstox `instrument_key`; Alice Blue `Token` |
-| `name` | Groww/Upstox `name`; Alice Blue `Instrument Name` |
-
-All seven columns are TEXT. Values are trimmed, and empty cells become SQL NULL. The primary key is
-`broker, exchange, exchange_token`; tokens must be present and unique within a broker and exchange. ISIN and
-symbol have indexes. Prices, lot sizes, and tick sizes are not stored.
-
-Only these rows are imported:
-
-- Groww: `exchange` is `NSE` or `BSE`, `segment` is `CASH`, and `instrument_type` is `EQ`. CASH `IDX` rows are excluded.
-- Upstox: `segment` is `NSE_EQ` or `BSE_EQ`, and `instrument_type` is not `INDEX`, `IDX`, `FUT`, `CE`, `PE`, or `W1`.
-  `W1` is a warrant series. All derivative, commodity, currency, and index segments are excluded.
-- Alice Blue: `Exch` is `NSE`, `Exchange Segment` is `nse_cm`, and `Instrument Type` is `0`, `2`, or `4`;
-  or `Exch` is `BSE`, `Exchange Segment` is `bse_cm`, and `Instrument Type` is `E`. Index segments and
-  NSE type `3` warrants are excluded.
-
-Cash rows include shares, funds, and bonds. No futures, options, warrants, or index rows are imported. Indices
-belong in `indices`. Alice Blue has no ISIN column. Its BSE Token matches `consolidated.bse_sc_code`; its NSE
-Symbol matches `consolidated.nse_symbol` only for Group Name `EQ`, `BE`, `BZ`, or `GB`. For example, an NSE
-`RELIANCE-EQ` row uses Symbol `RELIANCE` to obtain `INE002A01018`. An NSE row in series `N0` stays unmatched
-even if its Symbol also exists in `consolidated`. Unmatched ISINs are NULL. Run `stocky rebuild` before importing
-Alice Blue, and reimport it after rebuilding to refresh its ISIN mappings.
-
-The local source files were last modified on 2026-10-17 UTC. They do not provide a whole-file snapshot date;
-that modification date does not prove when the brokers generated their lists.
 
 # Installation
 Clone the repository.
@@ -244,7 +134,8 @@ uv run stocky rebuild --date 2026-07-17 --include-sgb
 A rebuild without `--include-sgb` drops the SGB rows. The interactive menu's "Include sovereign gold bonds" prompt and
 the terminal UI's **Include SGBs** checkbox set the same option. Both default to on when the current `consolidated`
 table has `sgb` rows, so a refresh keeps them. Turn the option off to rebuild from legacy (pre-UDiFF) bhavcopies.
-SGB Yahoo tickers follow the exchange symbol rules above; rebuilding does not fetch Yahoo responses.
+SGB Yahoo tickers follow the exchange symbol rules in the [schema reference](docs/schema.md); rebuilding does not
+fetch Yahoo responses.
 
 Every rebuild records its source files in the database: the BSE and NSE bhavcopy names with their trade dates and the
 Zerodha instruments file, each with its SHA-256 hash, size, modification time, and usable row count, plus the build
@@ -513,34 +404,6 @@ The values are what Yahoo returned when the response was fetched. Check the quot
 uv run stocky snapshot --version 2026-q3
 uv run stocky snapshot --version 2026-q3-csv --formats csv
 ```
-
-For compatibility, `python app.py` still launches the CLI after dependencies are installed.
-
-## UI Options
-There are six options.
-
-**1. Rebuild stocky.db from scratch:**
-Lists the BSE/NSE bhavcopy pairs found in `data/marketData/bhavCopies`, takes a row number or a trade date, previews the
-resolved files with their row counts and how the rebuilt table differs from the current one, and on confirmation backs
-up the existing database and replaces the `consolidated` table. Requires bhavcopies and Zerodha instruments in their respective locations.
-
-**2. Update Yahoo data:**
-Asks for the exchange, optional limit, and whether to fetch only uncached tickers, reports how many tickers it will
-fetch, then downloads Yahoo data using yahooquery and stores responses in `data/output/stocky.db`
-
-**3. Import Yahoo JSON cache:**
-Imports legacy files from `data/marketData/yahoo/apiResponse` into the `yahoo_responses` SQLite table.
-
-**4. Show database status:**
-Prints row counts, per-column coverage, Yahoo cache freshness, and the source files of the latest rebuild for
-`data/output/stocky.db`.
-
-**5. Look up an instrument:**
-Searches the `consolidated` table across every symbol column (NSE, BSE, Zerodha, Yahoo, ISIN, name).
-
-**6. Exit:**
-Exit the program
-
 
 ## License
 

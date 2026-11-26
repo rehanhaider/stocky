@@ -1,3 +1,4 @@
+import contextlib
 import csv
 import gzip
 import json
@@ -13,7 +14,6 @@ from stocky.brokers import (
     GROWW_SOURCE_COLUMNS,
     UPSTOX_SOURCE_COLUMNS,
     import_broker,
-    load_aliceblue,
     load_groww,
     load_upstox,
     search_brokers,
@@ -90,6 +90,11 @@ def _read(db):
         return con.execute("SELECT * FROM broker_symbols ORDER BY broker, exchange, exchange_token").fetchall()
 
 
+def _load_aliceblue(nse_path, bse_path, db_path):
+    with contextlib.closing(sqlite3.connect(db_path)) as con:
+        return brokers._load_aliceblue(nse_path, bse_path, con)
+
+
 def test_load_groww_maps_trimmed_text_and_nulls(tmp_path):
     record = {**GROWW, "name": " ", "exchange_token": " 02885 ", "isin": " "}
     frame = load_groww(_csv(tmp_path / "groww.csv", [record]))
@@ -138,7 +143,7 @@ def test_load_upstox_maps_columns_and_excludes_derivatives_indices_and_warrants(
     assert frame.iloc[1].broker_key == "NSE_EQ|INE002A01018"
 
 
-def test_load_aliceblue_resolves_both_exchanges_and_restricts_nse_series(tmp_path, seed_consolidated, sources):
+def test_aliceblue_loader_resolves_both_exchanges_and_restricts_nse_series(tmp_path, seed_consolidated, sources):
     db = tmp_path / "stocky.db"
     seed_consolidated(db)
     records = [
@@ -162,7 +167,7 @@ def test_load_aliceblue_resolves_both_exchanges_and_restricts_nse_series(tmp_pat
             {**ALICE_BSE, "Exchange Segment": "bse_fo", "Instrument Type": "PE"},
         ],
     )
-    frame = load_aliceblue(sources["aliceblue"], sources["bse"], db)
+    frame = _load_aliceblue(sources["aliceblue"], sources["bse"], db)
     assert list(frame.columns) == list(BROKER_COLUMNS)
     assert len(frame) == 10
     assert (
@@ -196,7 +201,7 @@ def test_missing_columns(tmp_path, seed_consolidated, sources, broker, column):
         _csv(sources[broker], [{"groww": GROWW, "aliceblue": ALICE_NSE, "bse": ALICE_BSE}[broker]], missing=column)
     with pytest.raises(ValueError, match=f"missing required columns: {column}"):
         if broker in ("aliceblue", "bse"):
-            load_aliceblue(sources["aliceblue"], sources["bse"], db)
+            _load_aliceblue(sources["aliceblue"], sources["bse"], db)
         else:
             {"groww": load_groww, "upstox": load_upstox}[broker](sources[broker])
 
