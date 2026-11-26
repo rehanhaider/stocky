@@ -2943,6 +2943,20 @@ def test_refresh_dry_run_previews_every_step_and_writes_nothing(refresh_root, mo
     assert payload["steps"][5]["result"]["pruned"] == 1
 
 
+def test_refresh_dry_run_counts_the_orphans_once_like_the_real_run(refresh_root, runner) -> None:
+    _initial_rebuild(runner)
+    db_path = refresh_root / "data/output/stocky.db"
+    _seed_cached_yahoo_responses(db_path, ["DELISTED"], suffix="NS")
+
+    preview = json.loads(_refresh(runner, "--dry-run", "--json").stdout)
+    real = json.loads(_refresh(runner, "--json").stdout)
+
+    def pruned(payload):
+        return {step["name"]: step["result"]["pruned"] for step in payload["steps"] if step["name"].startswith("yahoo")}
+
+    assert pruned(preview) == pruned(real) == {"yahoo update NSE": 1, "yahoo update BSE": 0}
+
+
 @pytest.mark.parametrize("current_has_sgb", [True, False])
 def test_refresh_keeps_sgb_rows_only_when_the_current_table_has_them(refresh_root, runner, current_has_sgb) -> None:
     _initial_rebuild(runner, *(["--include-sgb"] if current_has_sgb else []))

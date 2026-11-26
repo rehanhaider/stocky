@@ -1256,7 +1256,9 @@ def _refresh_impl(
     def yahoo(exchange: str) -> YahooUpdateResult:
         manager = YahooDataManager(db_path)
         if dry_run:
-            return manager.update_data(exchange=exchange, dry_run=True, stale_days=stale_days)
+            preview = manager.update_data(exchange=exchange, dry_run=True, stale_days=stale_days)
+            # Pruning removes the orphans of both exchanges, so the NSE step prunes them all and the BSE step none.
+            return preview if exchange == "NSE" else dataclasses.replace(preview, pruned=0)
         with yahoo_progress(exchange) as progress:
             try:
                 return manager.update_data(exchange=exchange, stale_days=stale_days, progress=progress)
