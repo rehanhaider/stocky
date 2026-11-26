@@ -1,6 +1,7 @@
 import contextlib
 import csv
 import gzip
+import hashlib
 import json
 import sqlite3
 from contextlib import closing
@@ -18,6 +19,7 @@ from stocky.brokers import (
     load_upstox,
     search_brokers,
 )
+from stocky.database import connect, read_import_provenance, record_import_provenance
 from stocky.pipeline import rebuild_database
 
 GROWW = {
@@ -303,6 +305,50 @@ def test_failed_write_rolls_back_rows_and_schema(tmp_path, sources, monkeypatch,
     with pytest.raises(sqlite3.OperationalError, match="write failed"):
         import_broker("groww", sources["groww"], db)
     assert _read(db) == before
+
+
+def _records(db):
+    with connect(db) as con:
+        return read_import_provenance(con)
+
+
+def test_import_records_each_brokers_files_and_keeps_the_others(tmp_path, seed_consolidated, sources):
+    db = tmp_path / "stocky.db"
+    seed_consolidated(db)
+    for broker in ("groww", "upstox", "aliceblue"):
+        import_broker(broker, sources[broker], db, bse_path=sources["bse"])
+    records = _records(db)
+    assert [(r.table_name, r.role, r.file_name, r.rows) for r in records] == [
+        ("broker_symbols", "aliceblue_bse", "bse.csv", 1),
+        ("broker_symbols", "aliceblue_nse", "nse.csv", 1),
+        ("broker_symbols", "groww", "groww.csv", 1),
+        ("broker_symbols", "upstox", "upstox.json.gz", 1),
+    ]
+    assert records[3].sha256 == hashlib.sha256(sources["upstox"].read_bytes()).hexdigest()
+    others = [r for r in records if r.role != "groww"]
+    _csv(sources["groww"], [GROWW, {**GROWW, "exchange_token": "999"}])
+    import_broker("groww", sources["groww"], db)
+    records = _records(db)
+    assert [r for r in records if r.role != "groww"] == others
+    groww = next(r for r in records if r.role == "groww")
+    assert (groww.rows, groww.sha256) == (2, hashlib.sha256(sources["groww"].read_bytes()).hexdigest())
+
+
+def test_failed_write_rolls_back_the_import_record(tmp_path, sources, monkeypatch):
+    db = tmp_path / "stocky.db"
+    import_broker("upstox", sources["upstox"], db)
+    import_broker("groww", sources["groww"], db)
+    before = (_records(db), _read(db))
+
+    def record_then_fail(*args):
+        record_import_provenance(*args)
+        raise sqlite3.OperationalError("write failed")
+
+    monkeypatch.setattr(brokers, "record_import_provenance", record_then_fail)
+    _csv(sources["groww"], [GROWW, {**GROWW, "exchange_token": "999"}])
+    with pytest.raises(sqlite3.OperationalError, match="write failed"):
+        import_broker("groww", sources["groww"], db)
+    assert (_records(db), _read(db)) == before
 
 
 @pytest.fixture

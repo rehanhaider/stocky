@@ -1,11 +1,15 @@
+import hashlib
 import json
 import sqlite3
 from contextlib import closing
+from datetime import UTC, datetime
 
 import pytest
 
+import stocky.mutual_funds as mutual_funds
+from stocky import __version__
 from stocky.cli import app
-from stocky.database import CONSOLIDATED_TABLE
+from stocky.database import CONSOLIDATED_TABLE, connect, read_import_provenance, record_import_provenance
 from stocky.mutual_funds import (
     MUTUAL_FUND_COLUMNS,
     MUTUAL_FUNDS_TABLE,
@@ -251,6 +255,49 @@ def test_failed_import_keeps_previous_table(tmp_path, amfi_path) -> None:
         import_mutual_funds(_write_mf_csv(tmp_path / "bad.csv", rows=(MF_ROWS[0], MF_ROWS[0])), amfi_path, db_path)
 
     assert len(_read_funds(db_path)) == 3
+
+
+def _read_records(db_path):
+    with connect(db_path) as con:
+        return read_import_provenance(con)
+
+
+def test_import_mutual_funds_records_both_source_files(tmp_path, amfi_path) -> None:
+    db_path = tmp_path / "stocky.db"
+    path = _write_mf_csv(tmp_path / "mf_instruments.csv")
+
+    import_mutual_funds(path, amfi_path, db_path)
+
+    records = _read_records(db_path)
+    assert [(record.table_name, record.role, record.file_name, record.rows) for record in records] == [
+        # The AMFI file gave both HDFC options a scheme code.
+        ("mutual_funds", "amfi_nav", "NAVAll.txt", 2),
+        ("mutual_funds", "zerodha_mf_instruments", "mf_instruments.csv", 3),
+    ]
+    amfi_record, mf_record = records
+    assert mf_record.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert amfi_record.sha256 == hashlib.sha256(amfi_path.read_bytes()).hexdigest()
+    assert mf_record.size_bytes == path.stat().st_size
+    assert mf_record.modified_at == datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
+    assert mf_record.stocky_version == __version__
+    assert mf_record.imported_at == amfi_record.imported_at
+
+
+def test_failed_write_rolls_back_the_import_record(tmp_path, amfi_path, monkeypatch) -> None:
+    db_path = tmp_path / "stocky.db"
+    path = _write_mf_csv(tmp_path / "mf.csv")
+    import_mutual_funds(path, amfi_path, db_path)
+    before = (_read_records(db_path), _read_funds(db_path))
+
+    def record_then_fail(*args):
+        record_import_provenance(*args)
+        raise sqlite3.OperationalError("write failed")
+
+    monkeypatch.setattr(mutual_funds, "record_import_provenance", record_then_fail)
+    with pytest.raises(sqlite3.OperationalError, match="write failed"):
+        import_mutual_funds(_write_mf_csv(path, rows=MF_ROWS[:1]), amfi_path, db_path)
+
+    assert (_read_records(db_path), _read_funds(db_path)) == before
 
 
 def test_search_mutual_funds_matches_fragments_and_exact_identifiers(tmp_path, amfi_path) -> None:

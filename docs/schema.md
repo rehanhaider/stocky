@@ -76,8 +76,8 @@ It is separate from `consolidated`, and `stocky rebuild` does not change it.
 
 All columns are TEXT, values keep the source's trimmed text, and empty cells are SQL NULL. Instrument tokens
 must be present and unique. The symbol has an index. Price fields are not stored. Only the `INDICES` segment
-is imported; NCO commodity spot rows are excluded. The local `instruments.csv` snapshot is dated 2026-07-19.
-Yahoo index tickers are not mapped.
+is imported; NCO commodity spot rows are excluded. `stocky status` and `stocky summary` show the instruments file
+and its modification time recorded by the last import. Yahoo index tickers are not mapped.
 
 ## The broker_symbols table
 
@@ -116,5 +116,5 @@ Symbol matches `consolidated.nse_symbol` only for Group Name `EQ`, `BE`, `BZ`, o
 even if its Symbol also exists in `consolidated`. Unmatched ISINs are NULL. Run `stocky rebuild` before importing
 Alice Blue, and reimport it after rebuilding to refresh its ISIN mappings.
 
-The local source files were last modified on 2026-10-17 UTC. They do not provide a whole-file snapshot date;
-that modification date does not prove when the brokers generated their lists.
+The source files do not provide a whole-file snapshot date. Each import records every file's modification time, which
+`stocky status` and `stocky summary` show; that time does not prove when the brokers generated their lists.

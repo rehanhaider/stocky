@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from stocky.config import DEFAULT_DB_PATH
-from stocky.database import _escape_like, connect, missing_database_message, table_exists
+from stocky.database import _escape_like, connect, missing_database_message, record_import_provenance, table_exists
 from stocky.pipeline import NSE_EQUITY_SERIES
 
 if TYPE_CHECKING:
@@ -195,6 +195,15 @@ def import_broker(
         )
         for column in ("isin", "symbol"):
             con.execute(f"CREATE INDEX IF NOT EXISTS idx_{BROKER_TABLE}_{column} ON {BROKER_TABLE} ({column})")
+        if broker == "aliceblue":
+            counts = cash["exchange"].value_counts()
+            files = [
+                ("aliceblue_nse", path, int(counts.get("NSE", 0))),
+                ("aliceblue_bse", bse_path, int(counts.get("BSE", 0))),
+            ]
+        else:
+            files = [(broker, path, len(cash))]
+        record_import_provenance(con, BROKER_TABLE, files)
         membership = (
             "EXISTS (SELECT 1 FROM consolidated c WHERE c.isin = b.isin)" if table_exists(con, "consolidated") else "0"
         )

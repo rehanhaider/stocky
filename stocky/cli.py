@@ -38,6 +38,7 @@ from stocky.config import (
 from stocky.database import (
     BuildProvenance,
     DatabaseStatus,
+    ImportRecord,
     InstrumentMatch,
     SearchResult,
     SourceRecord,
@@ -61,7 +62,7 @@ from stocky.indices import IndicesSearchResult, import_indices, search_indices
 from stocky.mutual_funds import MutualFundSearchResult, import_mutual_funds, search_mutual_funds
 from stocky.pipeline import DEFAULT_DIFF_SAMPLE_SIZE, RebuildDiff, RebuildResult, SourcePreview, rebuild_database
 from stocky.sources import BhavcopyPaths, list_bhavcopy_pairs, resolve_bhavcopy_paths
-from stocky.summary import DEFAULT_MISSING_SAMPLE_SIZE, build_refresh_summary, render_markdown
+from stocky.summary import DEFAULT_MISSING_SAMPLE_SIZE, SOURCE_LABELS, build_refresh_summary, render_markdown
 from stocky.yahoo import ProgressCallback, YahooDataManager, ticker_column
 
 console = Console()
@@ -229,6 +230,7 @@ def _print_status(status: DatabaseStatus) -> None:
     console.print(yahoo)
 
     _print_provenance(status.provenance)
+    _print_imports(status.imports)
 
 
 _SOURCE_LABELS = {
@@ -269,6 +271,31 @@ def _print_provenance(provenance: BuildProvenance | None) -> None:
         f"({provenance.consolidated_rows} rows)",
         provenance.sources,
     )
+
+
+def _print_imports(imports: list[ImportRecord]) -> None:
+    if not imports:
+        console.print("[yellow]No import provenance recorded. Run each table's import command to record it.[/yellow]")
+        return
+    table = Table(title="Imported tables")
+    table.add_column("Table")
+    table.add_column("Source")
+    table.add_column("File")
+    table.add_column("Rows", justify="right")
+    table.add_column("Modified (UTC)")
+    table.add_column("Imported (UTC)")
+    table.add_column("SHA-256")
+    for record in imports:
+        table.add_row(
+            record.table_name,
+            SOURCE_LABELS.get(record.role, record.role),
+            escape(record.file_name),
+            str(record.rows),
+            _format_timestamp(record.modified_at),
+            _format_timestamp(record.imported_at),
+            record.sha256[:12],
+        )
+    console.print(table)
 
 
 def _print_search_result(term: str, result: SearchResult, *, numbered: bool = False) -> None:

@@ -233,6 +233,35 @@ def test_status_says_when_no_provenance_is_recorded(tmp_path, seed_consolidated,
     result = runner.invoke(app, ["status", "--db-path", str(db_path)])
 
     assert "No source provenance recorded" in result.stdout
+    assert "No import provenance recorded" in result.stdout
+
+
+def test_status_shows_the_source_file_of_each_imported_table(
+    tmp_path, seed_consolidated, import_mapping_tables, runner
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    import_mapping_tables(tmp_path / "mapping", db_path)
+
+    result = runner.invoke(app, ["status", "--db-path", str(db_path)], env={"COLUMNS": "200"})
+    payload = json.loads(runner.invoke(app, ["status", "--db-path", str(db_path), "--json"]).stdout)
+
+    lines = [" ".join(line.replace("│", " ").split()) for line in result.stdout.splitlines()]
+    record = next(entry for entry in payload["imports"] if entry["table_name"] == "bse_debt")
+    assert result.exit_code == 0
+    assert "Imported tables" in result.stdout
+    assert (
+        f"bse_debt BSE debt bhavcopy DEBTBHAVCOPY16102026.zip 3 {record['modified_at'][:19].replace('T', ' ')} "
+        f"{record['imported_at'][:19].replace('T', ' ')} {record['sha256'][:12]}"
+    ) in lines
+    assert [(entry["table_name"], entry["role"], entry["rows"]) for entry in payload["imports"]] == [
+        ("broker_symbols", "groww", 1),
+        ("bse_debt", "bse_debt_bhavcopy", 3),
+        ("indices", "zerodha_instruments", 1),
+        ("mutual_funds", "amfi_nav", 1),
+        ("mutual_funds", "zerodha_mf_instruments", 1),
+    ]
+    assert record["stocky_version"] == __version__
 
 
 def test_rebuild_with_explicit_paths_writes_database_without_backup(

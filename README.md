@@ -143,6 +143,12 @@ time and Stocky version. The `provenance_builds` and `provenance_sources` tables
 shows the latest one. Only file names are stored, not local paths.
 The `--include-sgb` flag is not recorded in provenance.
 
+The `mf import`, `debt import`, `indices import`, and `brokers import` commands record their source files the same way
+in the `provenance_imports` table: one row per table and source file with the file name, SHA-256 hash, size,
+modification time, row count, import time, and Stocky version. Each import replaces its own records in the same
+transaction as its rows, so a failed import keeps the previous records. A broker import replaces only that broker's
+records. For the AMFI file of `mf import`, the row count is the number of schemes it gave a code.
+
 Before it writes, a rebuild copies the current database into `data/output/backup/`. After a successful write it keeps
 the newest 5 backups of that database and prints each older one it removes; `--keep N` keeps N instead. A dry run, a
 failed rebuild, or `--no-backup` removes nothing, and files in that folder that are not this database's backups are
@@ -188,15 +194,17 @@ uv run stocky yahoo update --exchange NSE --symbols RELIANCE,INFY.NS
 uv run stocky yahoo update --exchange BSE --stale-days 90 --limit 500
 ```
 
-Show database statistics, per-column coverage, Yahoo cache freshness, and the source files of the latest rebuild:
+Show database statistics, per-column coverage, Yahoo cache freshness, the source files of the latest rebuild, and the
+source files of each imported table:
 
 ```bash
 uv run stocky status
 ```
 
-Validate the database and write the refresh summary. It lists the source files, every table's row count, column
-coverage, Yahoo cache dates, and the tickers without a Yahoo response, and exits with status 1 when a check fails. See
-the [quarterly refresh checklist](docs/refresh-checklist.md) for the full refresh steps:
+Validate the database and write the refresh summary. It lists the rebuild's and the imports' source files, every
+table's row count, column coverage, Yahoo cache dates, and the tickers without a Yahoo response, and exits with status 1
+when a check fails, including when a mapping table is empty or has no import record. See the
+[quarterly refresh checklist](docs/refresh-checklist.md) for the full refresh steps:
 
 ```bash
 uv run stocky summary --output data/output/refresh-summary.md

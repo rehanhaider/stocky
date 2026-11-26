@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -17,6 +16,7 @@ from stocky.database import (
     SourceRecord,
     backup_database,
     connect,
+    file_sha256,
     initialize_database,
     prune_backups,
     read_latest_provenance,
@@ -282,14 +282,6 @@ def build_consolidated_dataframe(
     return equities[[column for column in CONSOLIDATED_COLUMNS if column != "isin"]]
 
 
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def describe_source(path: Path, *, role: str, rows: int, trade_date: date | None = None) -> SourceRecord:
     """Identify one input file by name, trade date, and content hash.
 
@@ -302,7 +294,7 @@ def describe_source(path: Path, *, role: str, rows: int, trade_date: date | None
         role=role,
         file_name=path.name,
         trade_date=trade_date.isoformat() if trade_date is not None else None,
-        sha256=_file_sha256(path),
+        sha256=file_sha256(path),
         size_bytes=stat.st_size,
         modified_at=datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
         rows=rows,

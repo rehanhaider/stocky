@@ -6,7 +6,9 @@ inputs, so step 1 stays manual.
 1. Download the inputs into the ignored local folders:
    - the BSE and NSE bhavcopies for one trade date into `data/marketData/bhavCopies`;
    - the Zerodha instruments file from `https://api.kite.trade/instruments` to `data/marketData/zerodha/instruments.csv`.
-   - for mutual fund imports, AMFI scheme codes from `https://www.amfiindia.com/spages/NAVAll.txt` to `data/marketData/amfi/NAVAll.txt`.
+   - for mutual fund imports, the Zerodha mutual fund instruments file from `https://api.kite.trade/mf/instruments` to
+     `data/marketData/zerodha/mf_instruments.csv`, and AMFI scheme codes from
+     `https://www.amfiindia.com/spages/NAVAll.txt` to `data/marketData/amfi/NAVAll.txt`.
    - broker cash-market files:
      - `https://growwapi-assets.groww.in/instruments/instrument.csv` to `data/marketData/brokers/groww/instrument.csv`;
      - `https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz` to `data/marketData/brokers/upstox/complete.json.gz`;
@@ -37,6 +39,8 @@ inputs, so step 1 stays manual.
    uv run stocky yahoo update --exchange BSE --stale-days 90
    ```
 
+   For mutual funds, run `uv run stocky mf import` using the Zerodha mutual fund instruments and AMFI files from step 1.
+
    For market indices, run `uv run stocky indices import` using the Zerodha instruments file from step 1.
 
    For BSE debt, download the archive into `data/marketData/bhavCopies/bseDebt` and run `uv run stocky debt import`.
@@ -44,6 +48,8 @@ inputs, so step 1 stays manual.
    For broker cash instruments, run `uv run stocky brokers import` after the rebuild. This imports all three
    brokers, excludes derivatives and indices, and refreshes Alice Blue's ISIN lookups against `consolidated`.
    Each broker replaces its own rows in one transaction; a later failure does not undo earlier brokers.
+
+   Each of these imports records its source files in `provenance_imports`, which `stocky status` shows.
 
 5. Validate the database and write the summary. The command exits with status 1 when a check fails:
 
@@ -64,6 +70,7 @@ inputs, so step 1 stays manual.
 | Yahoo tickers follow exchange symbols | `yq_ns` or `yq_bo` is not the exchange symbol plus `.NS` or `.BO` |
 | Source provenance | No rebuild is recorded, or the recorded row count differs from the table |
 | Bhavcopy trade dates agree | The BSE and NSE bhavcopies have different or unknown trade dates |
+| `mutual_funds` import, `bse_debt` import, `indices` import, `broker_symbols` import | The table is empty or missing, or no import recorded its source files |
 
-The summary also lists the source files with their SHA-256 hashes, the row count of every table, column coverage,
-Yahoo cache dates, and the tickers that have no Yahoo response.
+The summary also lists the rebuild's and the imports' source files with their SHA-256 hashes, the row count of every
+table, column coverage, Yahoo cache dates, and the tickers that have no Yahoo response.
