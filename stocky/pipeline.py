@@ -16,6 +16,7 @@ from stocky.database import (
     BuildProvenance,
     SourceRecord,
     backup_database,
+    backups_belong_to,
     connect,
     initialize_database,
     prune_backups,
@@ -626,7 +627,11 @@ def rebuild_database(
 
     # Only after the write succeeds, so a failed rebuild never costs a backup.
     removed_backups = []
-    if backup:
-        removed_backups = prune_backups(db_path, backup_dir, keep_backups)
+    if backup and backups_belong_to(db_path, backup_dir):
+        try:
+            removed_backups = prune_backups(db_path, backup_dir, keep_backups)
+        except OSError as exc:
+            # The table is already written, so a backup that cannot be removed must not report the rebuild as failed.
+            warnings.append(f"The rebuild was written, but removing old backups in {backup_dir} failed: {exc}")
 
     return result(backup_path=backup_path, build_id=build_id, removed_backups=removed_backups)
