@@ -8,7 +8,6 @@ import pytest
 
 import stocky.yahoo as yahoo
 from stocky.database import (
-    SCHEMA_VERSION,
     OrphanVacuumError,
     connect,
     decode_response_json,
@@ -16,7 +15,6 @@ from stocky.database import (
     initialize_database,
     read_available_yahoo_symbols,
     upsert_yahoo_response,
-    write_schema_version,
 )
 from stocky.yahoo import YahooDataManager, ticker_column
 
@@ -145,13 +143,14 @@ def test_limit_applies_after_the_missing_only_selection(tmp_path, seed_consolida
     )
 
 
-def test_dry_run_missing_only_excludes_cached_symbols(tmp_path, seed_consolidated) -> None:
+def test_dry_run_missing_only_excludes_cached_symbols(tmp_path, seed_consolidated, numbered_one_behind) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(
         db_path,
         [_ticker_row(f"INE{index:03d}", symbol) for index, symbol in enumerate(["RELIANCE", "INFY", "NEWIPO"])],
     )
     _seed_cached_response(db_path, "RELIANCE.BO")
+    current = numbered_one_behind(db_path)
 
     manager = YahooDataManager(db_path)
 
@@ -161,18 +160,20 @@ def test_dry_run_missing_only_excludes_cached_symbols(tmp_path, seed_consolidate
     assert manager.update_data(exchange="NSE", dry_run=True, missing_only=True).processed == 3
     assert manager.update_data(exchange="BSE", dry_run=True, limit=1).processed == 1
     with connect(db_path) as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 0
+        # A dry run records nothing, so the number stays one behind.
+        assert con.execute("PRAGMA user_version").fetchone()[0] == current - 1
 
 
-def test_update_writes_responses_and_skips_unknown_symbols(tmp_path, monkeypatch, seed_consolidated) -> None:
+def test_update_writes_responses_and_skips_unknown_symbols(
+    numbered_one_behind, tmp_path, monkeypatch, seed_consolidated
+) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(
         db_path,
         [_ticker_row(f"INE{index:03d}", symbol) for index, symbol in enumerate(["RELIANCE", "BADSYMBOL"])],
     )
-    # Numbered as a rebuild numbers it: only a rebuild can vouch for consolidated.
-    with sqlite3.connect(db_path) as con:
-        write_schema_version(con, replaces_consolidated=True)
+    # Numbered as a rebuild numbers it, one version behind, so the write below must record the number.
+    current = numbered_one_behind(db_path)
 
     fake_module = types.ModuleType("yahooquery")
     fake_module.Ticker = _FakeTicker
@@ -185,15 +186,16 @@ def test_update_writes_responses_and_skips_unknown_symbols(tmp_path, monkeypatch
     assert result.skipped == 1
     assert read_available_yahoo_symbols(db_path) == {"RELIANCE.BO"}
     with connect(db_path) as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert con.execute("PRAGMA user_version").fetchone()[0] == current
 
 
 def test_an_interrupted_update_rolls_the_schema_number_back_with_its_rows(
-    tmp_path, monkeypatch, seed_consolidated
+    tmp_path, monkeypatch, seed_consolidated, numbered_one_behind
 ) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path, [_ticker_row("INE001", "RELIANCE"), _ticker_row("INE002", "INFY")])
     initialize_database(db_path)
+    current = numbered_one_behind(db_path)
     _use_fake_yahooquery(monkeypatch)
     upsert = yahoo.upsert_yahoo_response
     calls = []
@@ -210,7 +212,8 @@ def test_an_interrupted_update_rolls_the_schema_number_back_with_its_rows(
         YahooDataManager(db_path).update_data(exchange="NSE")
 
     with connect(db_path) as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 0
+        # The number written with the first row rolled back with it.
+        assert con.execute("PRAGMA user_version").fetchone()[0] == current - 1
         assert con.execute("SELECT COUNT(*) FROM yahoo_responses").fetchone()[0] == 0
 
 
