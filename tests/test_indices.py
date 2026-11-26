@@ -9,12 +9,10 @@ import stocky.indices as indices
 from stocky.database import (
     CONSOLIDATED_TABLE,
     PROVENANCE_IMPORTS_TABLE,
-    SCHEMA_VERSION,
     connect,
     read_import_provenance,
     record_import_provenance,
     table_exists,
-    write_schema_version,
 )
 from stocky.indices import (
     INDICES_COLUMNS,
@@ -129,12 +127,11 @@ def test_load_indices_reports_missing_file(tmp_path) -> None:
         load_indices(tmp_path / "absent.csv")
 
 
-def test_import_indices_leaves_consolidated_untouched(tmp_path, seed_consolidated) -> None:
+def test_import_indices_leaves_consolidated_untouched(numbered_one_behind, tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path)
-    # Numbered as a rebuild numbers it: only a rebuild can vouch for consolidated.
-    with sqlite3.connect(db_path) as con:
-        write_schema_version(con, replaces_consolidated=True)
+    # Numbered as a rebuild numbers it, one version behind, so the write below must record the number.
+    current = numbered_one_behind(db_path)
     with sqlite3.connect(db_path) as con:
         before = con.execute(f"SELECT * FROM {CONSOLIDATED_TABLE} ORDER BY isin").fetchall()
 
@@ -144,7 +141,7 @@ def test_import_indices_leaves_consolidated_untouched(tmp_path, seed_consolidate
     assert len(_read_indices(db_path)) == 3
     with sqlite3.connect(db_path) as con:
         assert con.execute(f"SELECT * FROM {CONSOLIDATED_TABLE} ORDER BY isin").fetchall() == before
-        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert con.execute("PRAGMA user_version").fetchone()[0] == current
         assert [(row[1], row[2], row[5]) for row in con.execute(f"PRAGMA table_info({INDICES_TABLE})")] == [
             (column, "TEXT", int(column == "zd_instrument_token")) for column in INDICES_COLUMNS
         ]

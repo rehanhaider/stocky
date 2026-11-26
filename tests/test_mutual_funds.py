@@ -11,11 +11,9 @@ from stocky import __version__
 from stocky.cli import app
 from stocky.database import (
     CONSOLIDATED_TABLE,
-    SCHEMA_VERSION,
     connect,
     read_import_provenance,
     record_import_provenance,
-    write_schema_version,
 )
 from stocky.mutual_funds import (
     MUTUAL_FUND_COLUMNS,
@@ -227,12 +225,13 @@ def test_search_mutual_funds_matches_amfi_codes_exactly(tmp_path, amfi_path) -> 
         assert search_mutual_funds("10000", db_path, exact=exact).total == 0
 
 
-def test_import_mutual_funds_leaves_consolidated_untouched(tmp_path, seed_consolidated, amfi_path) -> None:
+def test_import_mutual_funds_leaves_consolidated_untouched(
+    numbered_one_behind, tmp_path, seed_consolidated, amfi_path
+) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path)
-    # Numbered as a rebuild numbers it: only a rebuild can vouch for consolidated.
-    with sqlite3.connect(db_path) as con:
-        write_schema_version(con, replaces_consolidated=True)
+    # Numbered as a rebuild numbers it, one version behind, so the write below must record the number.
+    current = numbered_one_behind(db_path)
     with sqlite3.connect(db_path) as con:
         before = con.execute(f"SELECT * FROM {CONSOLIDATED_TABLE} ORDER BY isin").fetchall()
 
@@ -244,7 +243,7 @@ def test_import_mutual_funds_leaves_consolidated_untouched(tmp_path, seed_consol
     assert [row[0] for row in _read_funds(db_path)] == ["INF179K01KG8", "INF179K01WT6", "INF209K01YN0"]
     with sqlite3.connect(db_path) as con:
         assert con.execute(f"SELECT * FROM {CONSOLIDATED_TABLE} ORDER BY isin").fetchall() == before
-        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert con.execute("PRAGMA user_version").fetchone()[0] == current
         primary_key = [row[1] for row in con.execute(f"PRAGMA table_info({MUTUAL_FUNDS_TABLE})") if row[5]]
     assert primary_key == ["isin"]
 
