@@ -236,7 +236,6 @@ class YahooDataManager:
         # writes after the last COMMIT_EVERY boundary are persisted there. The
         # abort path commits explicitly because that exit rolls back instead.
         with connect(self.db_path) as con:
-            write_schema_version(con)
             for index, yahoo_symbol in enumerate(tickers, start=1):
                 outcome, detail, data, cause = fetch(yahoo_symbol)
                 if outcome == "failure" and is_auth_failure(detail):
@@ -270,6 +269,9 @@ class YahooDataManager:
                         response_json=encode_response_json(data),
                         source="yahooquery",
                     )
+                    if not written:
+                        # After the first row, so the number commits or rolls back with this run's rows.
+                        write_schema_version(con)
                     written += 1
                     if written % COMMIT_EVERY == 0:
                         con.commit()

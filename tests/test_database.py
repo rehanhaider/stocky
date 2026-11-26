@@ -678,3 +678,42 @@ def test_prune_backups_skips_a_backup_another_rebuild_already_removed(tmp_path, 
 
     assert prune_backups(tmp_path / "stocky.db", backup_dir, keep=1) == [backups[1]]
     assert sorted(backup_dir.iterdir()) == [backups[2]]
+
+
+def test_a_failed_cache_import_rolls_the_schema_number_back_with_its_rows(tmp_path, monkeypatch) -> None:
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    for symbol in ("INFY.BO", "RELIANCE.NS"):
+        (cache_dir / f"{symbol}.json").write_text(
+            json.dumps({symbol: {"quoteType": {"quoteType": "EQUITY", "shortName": symbol}}}),
+            encoding="utf-8",
+        )
+    db_path = tmp_path / "stocky.db"
+    upsert = database.upsert_yahoo_response
+    calls = []
+
+    def failing(*args, **kwargs):
+        calls.append(kwargs["yahoo_symbol"])
+        if len(calls) == 2:
+            raise RuntimeError("disk full")
+        upsert(*args, **kwargs)
+
+    monkeypatch.setattr(database, "upsert_yahoo_response", failing)
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        import_yahoo_json_cache(cache_dir, db_path)
+
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM yahoo_responses").fetchone()[0] == 0
+
+
+def test_an_empty_cache_import_records_no_schema_number(tmp_path) -> None:
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    db_path = tmp_path / "stocky.db"
+
+    assert import_yahoo_json_cache(cache_dir, db_path).imported == 0
+
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 0

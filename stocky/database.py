@@ -822,7 +822,6 @@ def import_yahoo_json_cache(
     imported = 0
     skipped = 0
     with connect(db_path) as con:
-        write_schema_version(con)
         for file_path in sorted(cache_dir.glob("*.json")):
             yahoo_symbol = file_path.stem
             symbol, exchange = split_yahoo_symbol(yahoo_symbol)
@@ -848,6 +847,9 @@ def import_yahoo_json_cache(
                 fetched_at=fetched_at,
                 source=str(file_path),
             )
+            if not imported:
+                # After the first row, so the number commits or rolls back with the imported rows.
+                write_schema_version(con)
             imported += 1
 
     return JsonImportResult(imported=imported, skipped=skipped)

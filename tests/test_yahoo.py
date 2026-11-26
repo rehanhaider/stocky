@@ -182,6 +182,32 @@ def test_update_writes_responses_and_skips_unknown_symbols(tmp_path, monkeypatch
         assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
+def test_an_interrupted_update_rolls_the_schema_number_back_with_its_rows(
+    tmp_path, monkeypatch, seed_consolidated
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path, [_ticker_row("INE001", "RELIANCE"), _ticker_row("INE002", "INFY")])
+    initialize_database(db_path)
+    _use_fake_yahooquery(monkeypatch)
+    upsert = yahoo.upsert_yahoo_response
+    calls = []
+
+    def interrupted(*args, **kwargs):
+        calls.append(kwargs["yahoo_symbol"])
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        upsert(*args, **kwargs)
+
+    monkeypatch.setattr(yahoo, "upsert_yahoo_response", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        YahooDataManager(db_path).update_data(exchange="NSE")
+
+    with connect(db_path) as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM yahoo_responses").fetchone()[0] == 0
+
+
 def test_update_fetches_only_the_exchange_column_tickers(tmp_path, monkeypatch, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(

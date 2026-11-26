@@ -64,7 +64,7 @@ inputs, so step 1 stays manual.
 
 | Check | Fails when |
 | --- | --- |
-| Consolidated table layout | A column of the current layout is missing |
+| Consolidated table layout | The schema number is older than the current `consolidated` layout, or, in a file with no schema number, a column of that layout is missing |
 | Consolidated rows | The table is empty |
 | ISINs present and unique | An ISIN is empty or appears twice |
 | Yahoo tickers follow exchange symbols | `yq_ns` or `yq_bo` is not the exchange symbol plus `.NS` or `.BO` |
