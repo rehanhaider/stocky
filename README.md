@@ -231,12 +231,12 @@ uv run stocky mf query 119091 --exact
 ```
 
 Load the newest BSE debt archive by the date in its filename into the `bse_debt` table. Each run replaces that table
-in one transaction and leaves the others as they are; `--file` reads a different archive and `--db` selects a database.
+in one transaction and leaves the others as they are; `--file` reads a different archive and `--db-path` selects a database.
 The 2021 `BSE-DE-*.csv` files are not used:
 
 ```bash
 uv run stocky debt import
-uv run stocky debt import --file data/marketData/bhavCopies/bseDebt/DEBTBHAVCOPY16102026.zip --db data/output/stocky.db
+uv run stocky debt import --file data/marketData/bhavCopies/bseDebt/DEBTBHAVCOPY16102026.zip --db-path data/output/stocky.db
 ```
 
 Look up BSE debt by ISIN, scrip code, symbol, or name fragment. `--exact` matches the ISIN, scrip code, or symbol only.
@@ -249,11 +249,11 @@ uv run stocky debt query INE0K0Y08060 --exact
 
 Load market indices from `data/marketData/zerodha/instruments.csv` into the `indices` table. Each run replaces
 that table in one transaction and leaves the others as they are. A failed import keeps the previous table.
-`--file` reads a different instruments file and `--db` selects a database:
+`--file` reads a different instruments file and `--db-path` selects a database:
 
 ```bash
 uv run stocky indices import
-uv run stocky indices import --file data/marketData/zerodha/instruments.csv --db data/output/stocky.db
+uv run stocky indices import --file data/marketData/zerodha/instruments.csv --db-path data/output/stocky.db
 ```
 
 Look up an index by exact symbol, instrument token, or exchange token, or by symbol or name fragment.
@@ -276,13 +276,13 @@ Download the broker files manually into the ignored folders:
 | https://v2api.aliceblueonline.com/restpy/static/contract_master/BSE.csv | `data/marketData/brokers/aliceblue/BSE.csv` |
 
 Import all three brokers, or repeat `--broker` to select brokers. File options override the default paths;
-`--db` selects the database. The output lists rows, rows with an ISIN, and rows whose ISIN is in `consolidated`
+`--db-path` selects the database. The output lists rows, rows with an ISIN, and rows whose ISIN is in `consolidated`
 for each imported broker and exchange:
 
 ```bash
 uv run stocky brokers import
 uv run stocky brokers import --broker groww --broker upstox
-uv run stocky brokers import --broker aliceblue --aliceblue-nse data/marketData/brokers/aliceblue/NSE.csv --aliceblue-bse data/marketData/brokers/aliceblue/BSE.csv --db data/output/stocky.db
+uv run stocky brokers import --broker aliceblue --aliceblue-nse data/marketData/brokers/aliceblue/NSE.csv --aliceblue-bse data/marketData/brokers/aliceblue/BSE.csv --db-path data/output/stocky.db
 ```
 
 Query by exact ISIN, symbol, exchange token, or broker key, or by symbol/name fragment. `--exact` disables
