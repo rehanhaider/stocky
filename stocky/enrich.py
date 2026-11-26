@@ -8,8 +8,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, fields
 from io import BytesIO
 from pathlib import Path
-
-import pandas as pd
+from typing import TYPE_CHECKING
 
 from stocky.config import DEFAULT_DB_PATH
 from stocky.database import (
@@ -24,6 +23,9 @@ from stocky.database import (
 )
 from stocky.export import _render_csv, _render_json, _require_pyarrow, _resolve_format, _write
 from stocky.yahoo import TICKER_COLUMNS, ticker_column
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 # Market cap bounds on the command line are in crore, the unit Indian market caps are quoted in.
 CRORE = 10_000_000
@@ -331,6 +333,8 @@ def screen_instruments(
 
 
 def _enriched_frame(rows: Sequence[EnrichedRow]) -> pd.DataFrame:
+    import pandas as pd
+
     return pd.DataFrame([row.as_record() for row in rows], columns=list(ENRICHED_COLUMNS))
 
 

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-
-import pandas as pd
+from typing import TYPE_CHECKING
 
 from stocky.config import DEFAULT_DB_PATH
 from stocky.database import _escape_like, connect, table_exists
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 INDICES_TABLE = "indices"
 INDICES_COLUMNS = ("exchange", "zd_symbol", "name", "zd_instrument_token", "exchange_token")
@@ -45,6 +47,8 @@ class IndicesSearchResult:
 
 def load_indices(path: Path) -> pd.DataFrame:
     """Read only INDICES rows from Zerodha's instruments file."""
+    import pandas as pd
+
     if not path.is_file():
         raise FileNotFoundError(f"Zerodha instruments not found: {path}")
 

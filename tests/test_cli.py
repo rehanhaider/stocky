@@ -2,6 +2,7 @@ import csv
 import gzip
 import json
 import sqlite3
+import subprocess
 import sys
 import types
 from datetime import date
@@ -1436,6 +1437,18 @@ def test_version_commands_print_package_version(arguments, runner) -> None:
 
     assert result.exit_code == 0
     assert result.stdout.strip() == __version__
+
+
+def test_importing_cli_does_not_import_pandas() -> None:
+    # A fresh interpreter, so modules other tests imported cannot hide a module-level pandas import.
+    result = subprocess.run(
+        [sys.executable, "-c", "import sys, stocky.cli; print('pandas' in sys.modules)"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.strip() == "False"
 
 
 def test_main_calls_app(monkeypatch) -> None:

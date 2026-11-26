@@ -4,12 +4,14 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from zipfile import ZipFile
-
-import pandas as pd
 
 from stocky.config import DEFAULT_BSE_DEBT_DIR, DEFAULT_DB_PATH
 from stocky.database import _escape_like, connect, table_exists
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 BSE_DEBT_TABLE = "bse_debt"
 BSE_DEBT_COLUMNS = (
@@ -97,6 +99,8 @@ def newest_bse_debt_archive(input_dir: Path = DEFAULT_BSE_DEBT_DIR) -> Path:
 
 def load_bse_debt(path: Path) -> pd.DataFrame:
     """Read the three debt families directly from a BSE bhavcopy zip."""
+    import pandas as pd
+
     if not path.is_file():
         raise FileNotFoundError(f"BSE debt bhavcopy not found: {path}")
 
