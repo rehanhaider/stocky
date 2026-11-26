@@ -1500,7 +1500,12 @@ def _seed_yahoo_payloads(db_path, payloads) -> None:
         for ticker, (name, market_cap, sector) in payloads.items():
             payload = {
                 "quoteType": {"quoteType": "EQUITY", "longName": name},
-                "price": {"currency": "INR", "marketCap": market_cap, "regularMarketPrice": 100.0},
+                "price": {
+                    "currency": "INR",
+                    "marketCap": market_cap,
+                    "regularMarketPrice": 100.0,
+                    "regularMarketTime": "2026-10-21 15:30:00",
+                },
                 "assetProfile": {"sector": sector, "industry": "Testing"},
             }
             upsert_yahoo_response(
@@ -1541,6 +1546,62 @@ def test_screen_prints_listings_largest_market_cap_first(tmp_path, seed_consolid
     assert "1,348,695" in result.stdout
     assert "RELIANCE.BO" not in result.stdout
     assert "Showing 1 of 2 matches" in result.stdout
+
+
+@pytest.mark.parametrize("columns", ["80", "99"])
+def test_screen_keeps_key_fields_whole_below_100_columns(
+    tmp_path, seed_consolidated, runner, monkeypatch, columns
+) -> None:
+    monkeypatch.setenv("COLUMNS", columns)
+    db_path = _seed_enrichable_db(tmp_path, seed_consolidated)
+
+    result = runner.invoke(app, ["screen", "--db-path", str(db_path)])
+
+    assert result.exit_code == 0
+    assert "…" not in result.stdout
+    assert result.stdout.splitlines() == [
+        "                    Screen results",
+        "Ticker       ISIN          Market cap (Cr)  Quote date",
+        "RELIANCE.NS  INE002A01018        1,348,695  2026-10-21",
+        "  Reliance Industries Limited · Price 100 · P/E - · Sector Energy",
+        "RELIANCE.BO  INE002A01018        1,182,543  2026-10-21",
+        "  Reliance Industries Limited · Price 100 · P/E - · Sector Energy",
+        "INFY.NS      INE009A01021          574,958  2026-10-21",
+        "  Infosys Limited · Price 100 · P/E - · Sector Technology",
+    ]
+
+
+def test_screen_continuation_lines_break_between_fields() -> None:
+    fields = ("Bharti Airtel Limited", "Price 1,891.70", "P/E 39.54", "Sector Communication Services")
+    long_name = "Nippon Life India Asset Management Ltd. - Nippon India Mutual Fund - Nippon India Nifty Pharma ETF"
+
+    assert cli._pack_fields(fields, 78) == [
+        "Bharti Airtel Limited · Price 1,891.70 · P/E 39.54",
+        "Sector Communication Services",
+    ]
+    assert cli._pack_fields((long_name, "Price 26.16"), 78) == [
+        "Nippon Life India Asset Management Ltd. - Nippon India Mutual Fund - Nippon",
+        "India Nifty Pharma ETF · Price 26.16",
+    ]
+
+
+def test_screen_keeps_the_wide_table_at_200_columns(tmp_path, seed_consolidated, runner, monkeypatch) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    db_path = _seed_enrichable_db(tmp_path, seed_consolidated)
+
+    result = runner.invoke(app, ["screen", "--db-path", str(db_path)])
+
+    assert result.exit_code == 0
+    assert [line.rstrip() for line in result.stdout.splitlines()] == [
+        "                                                    Screen results",
+        "┏━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━┳━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┓",
+        "┃ Ticker      ┃ ISIN         ┃ Name                        ┃ Market cap (Cr) ┃ Price ┃ P/E ┃ Sector     ┃ Quote date ┃",
+        "┡━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━╇━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━┩",
+        "│ RELIANCE.NS │ INE002A01018 │ Reliance Industries Limited │       1,348,695 │   100 │   - │ Energy     │ 2026-10-21 │",
+        "│ RELIANCE.BO │ INE002A01018 │ Reliance Industries Limited │       1,182,543 │   100 │   - │ Energy     │ 2026-10-21 │",
+        "│ INFY.NS     │ INE009A01021 │ Infosys Limited             │         574,958 │   100 │   - │ Technology │ 2026-10-21 │",
+        "└─────────────┴──────────────┴─────────────────────────────┴─────────────────┴───────┴─────┴────────────┴────────────┘",
+    ]
 
 
 def test_screen_json_prints_total_and_records(tmp_path, seed_consolidated, runner) -> None:
