@@ -270,3 +270,15 @@ def test_summary_command_reports_a_missing_database(tmp_path, runner) -> None:
 
     assert result.exit_code == 1
     assert "Database not found" in result.stderr
+
+
+def test_summary_says_when_the_consolidated_table_is_missing(tmp_path) -> None:
+    db_path = tmp_path / "stocky.db"
+    with sqlite3.connect(db_path) as con:
+        con.execute("CREATE TABLE unrelated (x TEXT)")
+
+    summary = build_refresh_summary(db_path)
+
+    layout = {check.name: check for check in summary.checks}["Consolidated table layout"]
+    assert not layout.passed
+    assert layout.detail == "No consolidated table. Run 'stocky rebuild' to create it."

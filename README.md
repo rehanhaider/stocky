@@ -87,7 +87,7 @@ uv sync
    replacing `<DDMMYYYY>` with the trade date, such as `16102026`.
 
 `stocky summary` fails when the `mutual_funds`, `bse_debt`, `indices`, or `broker_symbols` table is empty, so a full
-refresh needs all of these files.
+refresh needs all of these files and the broker files listed under the `brokers import` command below.
 
 ### Then place these files in the following locations
 1. BSE Bhavcopy: `data/marketData/bhavCopies`
@@ -188,9 +188,10 @@ records. For the AMFI file of `mf import`, the row count is the number of scheme
 Before it writes, a rebuild copies the current database into `data/output/backup/`. After a successful write it keeps
 the newest 5 backups of that database and prints each older one it removes; `--keep N` keeps N instead. A dry run, a
 failed rebuild, or `--no-backup` removes nothing, and files in that folder that are not this database's backups are
-never touched. The menu and TUI rebuilds keep 5. The backup folder does not follow `--db-path`, so a database outside
-`data/output` still backs up there, and its rebuilds remove no backups: they could not tell its backups from
-`data/output/stocky.db`'s. If removing an old backup fails, the rebuild is still written and prints a warning.
+never touched. The backup this rebuild just took always stays. The menu and TUI rebuilds keep 5. The backup folder does
+not follow `--db-path`, so a database outside `data/output` still backs up there, under names that add a hash of its
+path, and its rebuilds remove no backups; neither database's pruning touches the other's backups. If removing an old
+backup fails, the rebuild is still written and prints a warning that names the backups it could not remove.
 
 Rebuild for a specific source date:
 
