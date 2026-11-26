@@ -543,8 +543,9 @@ def _print_yahoo_fields(row: EnrichedRow) -> None:
         console.print(f"[yellow]{_YAHOO_STATUS_NOTES[row.yahoo_status]}[/yellow]")
 
 
-# Below this width the eight-column table truncates identifiers, so the screen switches to the compact layout.
-_COMPACT_SCREEN_WIDTH = 100
+# Below this width the eight-column table truncates identifiers, names or sectors, so the screen switches to the
+# compact layout. At 100 columns the table still cut names and sectors short.
+_COMPACT_SCREEN_WIDTH = 120
 
 
 def _print_screen_result(result: ScreenResult) -> None:

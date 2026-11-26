@@ -1759,8 +1759,8 @@ def test_screen_prints_listings_largest_market_cap_first(tmp_path, seed_consolid
     assert "Showing 1 of 2 matches" in result.stdout
 
 
-@pytest.mark.parametrize("columns", ["80", "99"])
-def test_screen_keeps_key_fields_whole_below_100_columns(
+@pytest.mark.parametrize("columns", ["80", "119"])
+def test_screen_keeps_key_fields_whole_below_120_columns(
     tmp_path, seed_consolidated, runner, monkeypatch, columns
 ) -> None:
     monkeypatch.setenv("COLUMNS", columns)
@@ -1794,6 +1794,17 @@ def test_screen_continuation_lines_break_between_fields() -> None:
         "Nippon Life India Asset Management Ltd. - Nippon India Mutual Fund - Nippon",
         "India Nifty Pharma ETF · Price 26.16",
     ]
+
+
+def test_screen_switches_to_the_wide_table_at_120_columns(tmp_path, seed_consolidated, runner, monkeypatch) -> None:
+    monkeypatch.setenv("COLUMNS", "120")
+    db_path = _seed_enrichable_db(tmp_path, seed_consolidated)
+
+    result = runner.invoke(app, ["screen", "--db-path", str(db_path)])
+
+    assert result.exit_code == 0
+    assert "┃ Name" in result.stdout and "┃ Sector" in result.stdout
+    assert "…" not in result.stdout
 
 
 def test_screen_keeps_the_wide_table_at_200_columns(tmp_path, seed_consolidated, runner, monkeypatch) -> None:
