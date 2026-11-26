@@ -3015,3 +3015,143 @@ def test_refresh_fails_at_the_summary_when_a_check_fails_and_still_prints_it(ref
     assert "Refresh stopped at step 8 of 8, summary: Validation failed: Consolidated table layout." in stderr
     assert "Completed: rebuild, indices import, debt import, mf import, brokers import, yahoo update NSE, " in stderr
     assert "Not run: none." in stderr
+
+
+# End to end: a real refresh from source files, then every read command against the database it wrote.
+
+
+def _refreshed_database(refresh_root, runner):
+    result = _refresh(runner)
+    assert result.exit_code == 0, result.output
+    return (refresh_root / "data/output/stocky.db").resolve()
+
+
+def test_refresh_records_every_source_and_the_schema_number(refresh_root, runner) -> None:
+    db_path = _refreshed_database(refresh_root, runner)
+
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert con.execute("SELECT COUNT(*) FROM provenance_builds").fetchone()[0] == 1
+        imports = set(con.execute("SELECT table_name, role FROM provenance_imports").fetchall())
+        counts = {
+            table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("consolidated", "indices", "bse_debt", "mutual_funds", "broker_symbols")
+        }
+    assert {table for table, _ in imports} == {"indices", "bse_debt", "mutual_funds", "broker_symbols"}
+    assert {role for table, role in imports if table == "broker_symbols"} == {
+        "groww",
+        "upstox",
+        "aliceblue_nse",
+        "aliceblue_bse",
+    }
+    assert {role for table, role in imports if table == "mutual_funds"} == {"zerodha_mf_instruments", "amfi_nav"}
+    assert all(counts.values()), counts
+
+
+def test_refreshed_database_serves_every_read_command_from_another_directory(
+    refresh_root, runner, tmp_path_factory, monkeypatch
+) -> None:
+    db_path = _refreshed_database(refresh_root, runner)
+    with sqlite3.connect(db_path) as con:
+        fund_isin = con.execute("SELECT isin FROM mutual_funds ORDER BY isin LIMIT 1").fetchone()[0]
+        broker_isin = con.execute("SELECT isin FROM broker_symbols WHERE isin IS NOT NULL LIMIT 1").fetchone()[0]
+    elsewhere = tmp_path_factory.mktemp("elsewhere")
+    monkeypatch.chdir(elsewhere)
+    before = db_path.read_bytes()
+
+    def run(*args: str):
+        result = runner.invoke(app, [*args, "--db-path", str(db_path)])
+        assert result.exit_code == 0, (args, result.output)
+        return result
+
+    status = json.loads(run("status", "--json").stdout)
+    assert status["schema_version"] == SCHEMA_VERSION
+    assert {record["table_name"] for record in status["imports"]} == {
+        "indices",
+        "bse_debt",
+        "mutual_funds",
+        "broker_symbols",
+    }
+    assert json.loads(run("summary", "--json").stdout)["passed"] is True
+    assert json.loads(run("query", "GOLDBEES", "--json").stdout)["total"] >= 1
+    run("lookup", "INF204KB14I2", "--json")
+    run("screen", "--exchange", "NSE", "--json")
+    for columns in ("80", "200"):
+        monkeypatch.setenv("COLUMNS", columns)
+        run("screen", "--exchange", "NSE")
+    run("yahoo", "fields", "GOLDBEES", "--json")
+    assert run("yahoo", "enriched", "--format", "csv").stdout.strip()
+    assert json.loads(run("export", "--format", "json").stdout)
+    assert "GOLDBEES.NS" in run("export", "--tickers", "yq_ns").stdout.split()
+    assert json.loads(run("mf", "query", fund_isin, "--exact", "--json").stdout)["total"] == 1
+    assert json.loads(run("debt", "query", "INE0K0Y08060", "--exact", "--json").stdout)["total"] == 2
+    assert json.loads(run("indices", "query", "NIFTY 50", "--exact", "--json").stdout)["total"] == 1
+    assert json.loads(run("brokers", "query", broker_isin, "--exact", "--json").stdout)["total"] >= 1
+    run("snapshot", "--output-dir", str(elsewhere / "snapshots"), "--formats", "csv", "--json")
+
+    # Reads never write: the refreshed file is byte-for-byte the same, and nothing appeared in this directory but
+    # the snapshot asked for.
+    assert db_path.read_bytes() == before
+    assert sorted(path.name for path in elsewhere.iterdir()) == ["snapshots"]
+
+
+def test_a_second_refresh_reproduces_the_first_row_for_row_and_keeps_the_newest_backups(refresh_root, runner) -> None:
+    db_path = _refreshed_database(refresh_root, runner)
+    backups = refresh_root / "data/output/backup"
+    backups.mkdir(parents=True, exist_ok=True)
+    for day in range(1, 8):
+        (backups / f"202510{day:02d}-120000-stocky.db").write_bytes(b"old")
+    (backups / "notes.txt").write_text("keep me", encoding="utf-8")
+
+    def contents() -> dict[str, object]:
+        # Every row of the tables built from the source files; Yahoo responses only by ticker, because a refetch
+        # moves fetched_at.
+        with sqlite3.connect(db_path) as con:
+            tables = {
+                table: sorted(con.execute(f"SELECT * FROM {table}").fetchall(), key=repr)
+                for table in ("consolidated", "indices", "bse_debt", "mutual_funds", "broker_symbols")
+            }
+            tables["yahoo_responses"] = sorted(
+                row[0] for row in con.execute("SELECT yahoo_symbol FROM yahoo_responses")
+            )
+        return tables
+
+    first = contents()
+    assert all(first.values()), first
+    assert _refresh(runner).exit_code == 0
+
+    assert contents() == first
+    kept = sorted(path.name for path in backups.iterdir() if path.name.endswith("-stocky.db"))
+    assert len(kept) == 5
+    assert kept[:4] == [f"202510{day:02d}-120000-stocky.db" for day in range(4, 8)]
+    assert (backups / "notes.txt").read_text(encoding="utf-8") == "keep me"
+
+
+def _leaf_commands():
+    def walk(command, path):
+        if hasattr(command, "commands"):
+            for name, sub in command.commands.items():
+                yield from walk(sub, [*path, name])
+        else:
+            yield path, command
+
+    return list(walk(typer.main.get_command(app), []))
+
+
+@pytest.mark.parametrize("path", [path for path, _ in _leaf_commands()], ids=" ".join)
+def test_every_command_prints_its_help(runner, path) -> None:
+    result = runner.invoke(app, [*path, "--help"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    assert "Usage:" in result.stdout
+
+
+def test_every_command_that_opens_the_database_takes_db_path() -> None:
+    without = {" ".join(path) for path, command in _leaf_commands() if "--db-path" not in _option_names(command)}
+
+    # version opens nothing; the interactive menu always uses the default database.
+    assert without == {"version", "interactive"}
+
+
+def _option_names(command) -> set[str]:
+    return {name for parameter in command.params for name in getattr(parameter, "opts", [])}
