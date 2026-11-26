@@ -14,7 +14,7 @@ import typer
 import stocky.cli as cli
 from stocky import __version__
 from stocky.cli import app
-from stocky.database import connect, encode_response_json, initialize_database, upsert_yahoo_response
+from stocky.database import SCHEMA_VERSION, connect, encode_response_json, initialize_database, upsert_yahoo_response
 from stocky.sources import bse_filename_for_date, nse_filename_for_date
 from stocky.yahoo import YahooUpdateResult
 
@@ -219,9 +219,12 @@ def test_status_shows_the_sources_of_the_latest_rebuild(tmp_path, market_csv_bui
     result = runner.invoke(app, ["status", "--db-path", str(db_path)], env={"COLUMNS": "200"})
     payload = json.loads(runner.invoke(app, ["status", "--db-path", str(db_path), "--json"]).stdout)
 
+    lines = {" ".join(line.replace("│", " ").split()) for line in result.stdout.splitlines()}
     assert result.exit_code == 0
+    assert f"Schema {SCHEMA_VERSION}" in lines
     assert "by Stocky" in result.stdout
     assert "NSE-cm03MAY2021bhav.csv" in result.stdout
+    assert payload["schema_version"] == SCHEMA_VERSION
     assert payload["provenance"]["consolidated_rows"] == 1
     assert {source["trade_date"] for source in payload["provenance"]["sources"]} == {"2021-05-03", None}
 
@@ -467,9 +470,11 @@ def test_status_prints_seeded_database(tmp_path, seed_consolidated, runner) -> N
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path)
 
-    result = runner.invoke(app, ["status", "--db-path", str(db_path)])
+    result = runner.invoke(app, ["status", "--db-path", str(db_path)], env={"COLUMNS": "200"})
 
+    lines = {" ".join(line.replace("│", " ").split()) for line in result.stdout.splitlines()}
     assert result.exit_code == 0
+    assert "Schema 0 (written before Stocky recorded a schema number)" in lines
     assert "Database overview" in result.stdout
     assert "Consolidated coverage" in result.stdout
     assert "Yahoo cache" in result.stdout
@@ -493,6 +498,7 @@ def test_status_json_prints_database_status(tmp_path, seed_consolidated, runner)
     assert payload["coverage"][0] == {"column": "isin", "populated": 4}
     assert payload["yahoo_cached_ns"] == 0
     assert payload["yahoo_cached_bo"] == 0
+    assert payload["schema_version"] == 0
     assert "yahoo_cached_yq_symbols" not in payload
 
 

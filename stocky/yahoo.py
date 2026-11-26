@@ -20,6 +20,7 @@ from stocky.database import (
     read_yahoo_fetch_times,
     split_yahoo_symbol,
     upsert_yahoo_response,
+    write_schema_version,
 )
 
 COMMIT_EVERY = 25
@@ -234,6 +235,7 @@ class YahooDataManager:
         # writes after the last COMMIT_EVERY boundary are persisted there. The
         # abort path commits explicitly because that exit rolls back instead.
         with connect(self.db_path) as con:
+            write_schema_version(con)
             for index, yahoo_symbol in enumerate(tickers, start=1):
                 outcome, detail, data, cause = fetch(yahoo_symbol)
                 if outcome == "failure" and is_auth_failure(detail):

@@ -7,6 +7,7 @@ import pytest
 
 import stocky.yahoo as yahoo
 from stocky.database import (
+    SCHEMA_VERSION,
     connect,
     decode_response_json,
     encode_response_json,
@@ -156,6 +157,8 @@ def test_dry_run_missing_only_excludes_cached_symbols(tmp_path, seed_consolidate
     # The cached response is for .BO, so an NSE run still needs all three.
     assert manager.update_data(exchange="NSE", dry_run=True, missing_only=True).processed == 3
     assert manager.update_data(exchange="BSE", dry_run=True, limit=1).processed == 1
+    with connect(db_path) as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 0
 
 
 def test_update_writes_responses_and_skips_unknown_symbols(tmp_path, monkeypatch, seed_consolidated) -> None:
@@ -175,6 +178,8 @@ def test_update_writes_responses_and_skips_unknown_symbols(tmp_path, monkeypatch
     assert result.written == 1
     assert result.skipped == 1
     assert read_available_yahoo_symbols(db_path) == {"RELIANCE.BO"}
+    with connect(db_path) as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_update_fetches_only_the_exchange_column_tickers(tmp_path, monkeypatch, seed_consolidated) -> None:

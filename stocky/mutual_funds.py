@@ -6,7 +6,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from stocky.config import DEFAULT_DB_PATH
-from stocky.database import _escape_like, connect, missing_database_message, record_import_provenance, table_exists
+from stocky.database import (
+    _escape_like,
+    connect,
+    missing_database_message,
+    record_import_provenance,
+    table_exists,
+    write_schema_version,
+)
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -127,6 +134,7 @@ def import_mutual_funds(path: Path, amfi_path: Path, db_path: Path = DEFAULT_DB_
         record_import_provenance(
             con, MUTUAL_FUNDS_TABLE, [("zerodha_mf_instruments", path, len(funds)), ("amfi_nav", amfi_path, coded_rows)]
         )
+        write_schema_version(con)
 
     return MutualFundImportResult(
         rows=len(funds),

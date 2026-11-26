@@ -16,9 +16,12 @@ from stocky.database import (
     DatabaseStatus,
     ImportRecord,
     connect,
+    describe_schema_version,
     missing_database_message,
+    older_layout,
     read_import_provenance,
     read_latest_provenance,
+    read_schema_version,
     read_status,
     table_exists,
 )
@@ -75,6 +78,7 @@ class RefreshSummary:
     db_path: Path
     generated_at: str
     stocky_version: str
+    schema_version: int
     passed: bool
     checks: list[Check]
     provenance: BuildProvenance | None
@@ -110,23 +114,19 @@ def build_refresh_summary(
         }
         provenance = read_latest_provenance(con)
         imports = read_import_provenance(con)
+        schema_version = read_schema_version(con)
 
-        present = (
-            {row[1] for row in con.execute(f"PRAGMA table_info({CONSOLIDATED_TABLE})")}
-            if table_exists(con, CONSOLIDATED_TABLE)
-            else set()
+        problem = (
+            older_layout(con) if table_exists(con, CONSOLIDATED_TABLE) else f"without {', '.join(CONSOLIDATED_COLUMNS)}"
         )
-        missing_columns = [column for column in CONSOLIDATED_COLUMNS if column not in present]
-        layout_ok = not missing_columns
-        checks.append(
-            Check(
-                "Consolidated table layout",
-                layout_ok,
-                "All columns present."
-                if layout_ok
-                else f"Missing {', '.join(missing_columns)}. Run 'stocky rebuild' to recreate the table.",
-            )
-        )
+        layout_ok = problem is None
+        if not layout_ok:
+            layout_detail = f"Older layout {problem}. Run 'stocky rebuild' to recreate the table."
+        elif schema_version:
+            layout_detail = f"Schema {schema_version}."
+        else:
+            layout_detail = "All columns present."
+        checks.append(Check("Consolidated table layout", layout_ok, layout_detail))
 
         rows = table_counts.get(CONSOLIDATED_TABLE, 0)
         checks.append(Check("Consolidated rows", rows > 0, f"{rows} rows."))
@@ -239,6 +239,7 @@ def build_refresh_summary(
         db_path=db_path,
         generated_at=datetime.now(UTC).isoformat(),
         stocky_version=__version__,
+        schema_version=schema_version,
         passed=all(check.passed for check in checks),
         checks=checks,
         provenance=provenance,
@@ -263,6 +264,8 @@ def render_markdown(summary: RefreshSummary) -> str:
         "",
         f"Generated {_timestamp(summary.generated_at)} by Stocky {summary.stocky_version} "
         f"from `{summary.db_path.as_posix()}`.",
+        "",
+        f"Database schema: {describe_schema_version(summary.schema_version)}.",
         "",
         f"**Validation: {'passed' if summary.passed else 'FAILED'}**",
         "",

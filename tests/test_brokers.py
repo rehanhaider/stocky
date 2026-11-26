@@ -19,7 +19,7 @@ from stocky.brokers import (
     load_upstox,
     search_brokers,
 )
-from stocky.database import connect, read_import_provenance, record_import_provenance
+from stocky.database import SCHEMA_VERSION, connect, read_import_provenance, record_import_provenance
 from stocky.pipeline import rebuild_database
 
 GROWW = {
@@ -268,6 +268,7 @@ def test_import_schema_coverage_and_per_broker_replace(tmp_path, seed_consolidat
     assert [row[2] for row in _read(db) if row[0] == "groww"] == ["999"]
     with sqlite3.connect(db) as con:
         assert con.execute("SELECT * FROM consolidated").fetchall() == before
+        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert [(r[1], r[2], r[5]) for r in con.execute("PRAGMA table_info(broker_symbols)")] == [
             (col, "TEXT", {"broker": 1, "exchange": 2, "exchange_token": 3}.get(col, 0)) for col in BROKER_COLUMNS
         ]

@@ -21,6 +21,39 @@ Release `v2.0.0` replaces the shared Zerodha and Yahoo symbol columns with excha
 [release notes](docs/releases/v2.0.0.md) for the column changes, source trade date, and database row counts.
 `data/output/stocky.db` is versioned with the repository; pin the release tag to use that database version.
 
+### Quick start for consumers
+
+Download the database at a release tag and check its hash:
+
+```bash
+curl -fLo stocky.db https://raw.githubusercontent.com/rehanhaider/stocky/v3.0.0/data/output/stocky.db
+shasum -a 256 stocky.db
+```
+
+SHA-256 for `v3.0.0`: to be filled in when the release is tagged.
+
+Look up an instrument's identifiers on both exchanges:
+
+```bash
+sqlite3 -header -column stocky.db \
+  "SELECT isin, ins_type, nse_symbol, bse_sc_code, zd_ns, yq_ns, yq_bo FROM consolidated WHERE nse_symbol = 'RELIANCE';"
+```
+
+```text
+isin          ins_type  nse_symbol  bse_sc_code  zd_ns     yq_ns        yq_bo
+------------  --------  ----------  -----------  --------  -----------  -----------
+INE002A01018  equity    RELIANCE    500325       RELIANCE  RELIANCE.NS  RELIANCE.BO
+```
+
+The file records its table layout as a schema number in `PRAGMA user_version`, and `stocky status` and `stocky summary`
+show it. Every rebuild writes the number. The imports and Yahoo commands write it too, except into a file whose
+`consolidated` table has an older layout, which keeps its number until a rebuild. A file written before Stocky recorded
+the number reads 0.
+
+```bash
+sqlite3 stocky.db 'PRAGMA user_version'
+```
+
 # Installation
 Clone the repository.
 

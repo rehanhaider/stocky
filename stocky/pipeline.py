@@ -22,6 +22,7 @@ from stocky.database import (
     read_latest_provenance,
     record_build_provenance,
     table_exists,
+    write_schema_version,
 )
 from stocky.sources import BhavcopyPaths, parse_bse_bhavcopy_date, parse_nse_bhavcopy_date, require_existing_files
 
@@ -608,6 +609,7 @@ def rebuild_database(
     with connect(db_path) as con:
         con.execute("BEGIN")
         write_consolidated_table(con, stocky)
+        write_schema_version(con, replaces_consolidated=True)
         build_id = record_build_provenance(
             con,
             built_at=built_at,

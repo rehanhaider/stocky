@@ -9,6 +9,7 @@ import stocky.indices as indices
 from stocky.database import (
     CONSOLIDATED_TABLE,
     PROVENANCE_IMPORTS_TABLE,
+    SCHEMA_VERSION,
     connect,
     read_import_provenance,
     record_import_provenance,
@@ -139,6 +140,7 @@ def test_import_indices_leaves_consolidated_untouched(tmp_path, seed_consolidate
     assert len(_read_indices(db_path)) == 3
     with sqlite3.connect(db_path) as con:
         assert con.execute(f"SELECT * FROM {CONSOLIDATED_TABLE} ORDER BY isin").fetchall() == before
+        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert [(row[1], row[2], row[5]) for row in con.execute(f"PRAGMA table_info({INDICES_TABLE})")] == [
             (column, "TEXT", int(column == "zd_instrument_token")) for column in INDICES_COLUMNS
         ]

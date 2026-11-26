@@ -9,7 +9,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from stocky.config import DEFAULT_DB_PATH
-from stocky.database import _escape_like, connect, missing_database_message, record_import_provenance, table_exists
+from stocky.database import (
+    _escape_like,
+    connect,
+    missing_database_message,
+    record_import_provenance,
+    table_exists,
+    write_schema_version,
+)
 from stocky.pipeline import NSE_EQUITY_SERIES
 
 if TYPE_CHECKING:
@@ -204,6 +211,7 @@ def import_broker(
         else:
             files = [(broker, path, len(cash))]
         record_import_provenance(con, BROKER_TABLE, files)
+        write_schema_version(con)
         membership = (
             "EXISTS (SELECT 1 FROM consolidated c WHERE c.isin = b.isin)" if table_exists(con, "consolidated") else "0"
         )

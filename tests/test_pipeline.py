@@ -6,8 +6,15 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pandas as pd
 import pytest
 
+import stocky.pipeline as pipeline
 from stocky import __version__
-from stocky.database import CONSOLIDATED_COLUMNS, CONSOLIDATED_TABLE, PROVENANCE_BUILDS_TABLE, read_latest_provenance
+from stocky.database import (
+    CONSOLIDATED_COLUMNS,
+    CONSOLIDATED_TABLE,
+    PROVENANCE_BUILDS_TABLE,
+    SCHEMA_VERSION,
+    read_latest_provenance,
+)
 from stocky.pipeline import (
     RowChange,
     SourcePreview,
@@ -545,6 +552,40 @@ def test_rebuild_database_replaces_consolidated_table_without_backup(
     assert rows == [("INE002A01018", "RELIANCE", "RELIANCE", "RELIANCE.NS", None)]
     assert result.backup_path is None
     assert not backup_dir.exists()
+
+
+def test_rebuild_database_records_the_schema_number_with_the_table(
+    tmp_path, market_csv_builder, seed_consolidated
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    rebuild_database(paths, db_path=db_path, backup=False)
+
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+
+def test_failed_rebuild_write_leaves_the_schema_number_unset(
+    tmp_path, market_csv_builder, seed_consolidated, monkeypatch
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    with sqlite3.connect(db_path) as con:
+        before = con.execute(f"SELECT * FROM {CONSOLIDATED_TABLE} ORDER BY isin").fetchall()
+
+    def fail(*args, **kwargs):
+        raise sqlite3.OperationalError("write failed")
+
+    monkeypatch.setattr(pipeline, "record_build_provenance", fail)
+    with pytest.raises(sqlite3.OperationalError, match="write failed"):
+        rebuild_database(paths, db_path=db_path, backup=False)
+
+    with sqlite3.connect(db_path) as con:
+        assert con.execute(f"SELECT * FROM {CONSOLIDATED_TABLE} ORDER BY isin").fetchall() == before
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize("backup_dir_blocked", [False, True])

@@ -9,7 +9,13 @@ import pytest
 import stocky.mutual_funds as mutual_funds
 from stocky import __version__
 from stocky.cli import app
-from stocky.database import CONSOLIDATED_TABLE, connect, read_import_provenance, record_import_provenance
+from stocky.database import (
+    CONSOLIDATED_TABLE,
+    SCHEMA_VERSION,
+    connect,
+    read_import_provenance,
+    record_import_provenance,
+)
 from stocky.mutual_funds import (
     MUTUAL_FUND_COLUMNS,
     MUTUAL_FUNDS_TABLE,
@@ -234,6 +240,7 @@ def test_import_mutual_funds_leaves_consolidated_untouched(tmp_path, seed_consol
     assert [row[0] for row in _read_funds(db_path)] == ["INF179K01KG8", "INF179K01WT6", "INF209K01YN0"]
     with sqlite3.connect(db_path) as con:
         assert con.execute(f"SELECT * FROM {CONSOLIDATED_TABLE} ORDER BY isin").fetchall() == before
+        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         primary_key = [row[1] for row in con.execute(f"PRAGMA table_info({MUTUAL_FUNDS_TABLE})") if row[5]]
     assert primary_key == ["isin"]
 

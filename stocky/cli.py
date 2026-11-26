@@ -42,6 +42,7 @@ from stocky.database import (
     InstrumentMatch,
     SearchResult,
     SourceRecord,
+    describe_schema_version,
     has_sgb_rows,
     import_yahoo_json_cache,
     missing_database_message,
@@ -198,6 +199,7 @@ def _print_status(status: DatabaseStatus) -> None:
     overview.add_column("Value")
     overview.add_row("Database", str(status.db_path))
     overview.add_row("Size", _format_size(status.db_size_bytes))
+    overview.add_row("Schema", describe_schema_version(status.schema_version))
     overview.add_row("Consolidated rows", str(status.consolidated_rows))
     for ins_type, count in status.ins_type_counts.items():
         overview.add_row(f"  {ins_type}", str(count))

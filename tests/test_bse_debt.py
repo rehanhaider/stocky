@@ -16,7 +16,13 @@ from stocky.bse_debt import (
     newest_bse_debt_archive,
     search_bse_debt,
 )
-from stocky.database import CONSOLIDATED_TABLE, connect, read_import_provenance, record_import_provenance
+from stocky.database import (
+    CONSOLIDATED_TABLE,
+    SCHEMA_VERSION,
+    connect,
+    read_import_provenance,
+    record_import_provenance,
+)
 from stocky.pipeline import rebuild_database
 
 DEBT_HEADERS = {
@@ -201,6 +207,7 @@ def test_import_bse_debt_leaves_consolidated_untouched(tmp_path, seed_consolidat
     assert len(_read_debt(db_path)) == 3
     with sqlite3.connect(db_path) as con:
         assert con.execute(f"SELECT * FROM {CONSOLIDATED_TABLE} ORDER BY isin").fetchall() == before
+        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert [(row[1], row[2]) for row in con.execute(f"PRAGMA table_info({BSE_DEBT_TABLE})")] == [
             (column, "TEXT") for column in BSE_DEBT_COLUMNS
         ]
