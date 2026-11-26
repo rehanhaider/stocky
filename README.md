@@ -195,7 +195,7 @@ uv sync --extra tui
 uv run stocky tui
 ```
 
-The TUI needs the optional Textual extra; install it with `uv sync --extra tui` or `pip install "stocky[tui]"`. It has four tabs
+The TUI needs the optional Textual extra; install it with `uv sync --extra tui` or `pip install -e ".[tui]"` from the repository root. It has four tabs
 over the same code as the commands:
 
 - **Rebuild** resolves the bhavcopies from the latest pair, a discovered trade date, or files you pick in the file tree,
@@ -440,7 +440,7 @@ Export every row and column to Parquet:
 uv run stocky export -o data/output/consolidated.parquet
 ```
 
-Parquet needs the optional extra; install it with `uv sync --extra parquet` or `pip install "stocky[parquet]"`.
+Parquet needs the optional extra; install it with `uv sync --extra parquet` or `pip install -e ".[parquet]"` from the repository root.
 
 Stream CSV to stdout so it can be piped into another command:
 

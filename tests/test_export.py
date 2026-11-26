@@ -330,8 +330,13 @@ def test_missing_pyarrow_fails_before_database_read_or_output_creation(tmp_path,
     monkeypatch.setitem(sys.modules, "pyarrow", None)
     monkeypatch.setitem(sys.modules, "pyarrow.parquet", None)
 
-    with pytest.raises(RuntimeError, match="uv sync --extra parquet"):
+    with pytest.raises(RuntimeError) as error:
         export_consolidated(db_path, output=output, format="parquet")
+
+    assert str(error.value) == (
+        "Parquet export needs pyarrow. Install it with 'uv sync --extra parquet' or "
+        "'pip install -e \".[parquet]\"' from the repository root."
+    )
 
     assert not db_path.exists()
     assert not output.exists()

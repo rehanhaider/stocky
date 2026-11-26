@@ -143,7 +143,7 @@ def _require_pyarrow() -> None:
     except ImportError as exc:
         raise RuntimeError(
             "Parquet export needs pyarrow. Install it with 'uv sync --extra parquet' or "
-            "'pip install \"stocky[parquet]\"'."
+            "'pip install -e \".[parquet]\"' from the repository root."
         ) from exc
 
 
