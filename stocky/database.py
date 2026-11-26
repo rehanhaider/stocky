@@ -110,9 +110,19 @@ class SearchResult:
     fuzzy: bool = False
 
 
+class ClosingConnection(sqlite3.Connection):
+    """A connection whose ``with`` block commits or rolls back as usual, then closes it."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def connect(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    return sqlite3.connect(db_path)
+    return sqlite3.connect(db_path, factory=ClosingConnection)
 
 
 def initialize_database(db_path: Path = DEFAULT_DB_PATH) -> None:

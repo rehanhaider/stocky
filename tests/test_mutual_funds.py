@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -52,7 +53,7 @@ def amfi_path(tmp_path):
 
 
 def _read_funds(db_path):
-    with sqlite3.connect(db_path) as con:
+    with closing(sqlite3.connect(db_path)) as con:
         return con.execute(
             f"SELECT {', '.join(MUTUAL_FUND_COLUMNS)} FROM {MUTUAL_FUNDS_TABLE} ORDER BY isin"
         ).fetchall()
