@@ -13,9 +13,6 @@ from stocky.database import _escape_like, connect, missing_database_message, tab
 if TYPE_CHECKING:
     import pandas as pd
 
-if TYPE_CHECKING:
-    import pandas as pd
-
 BSE_DEBT_TABLE = "bse_debt"
 BSE_DEBT_COLUMNS = (
     "family",

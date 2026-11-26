@@ -10,9 +10,6 @@ from stocky.database import _escape_like, connect, missing_database_message, tab
 if TYPE_CHECKING:
     import pandas as pd
 
-if TYPE_CHECKING:
-    import pandas as pd
-
 INDICES_TABLE = "indices"
 INDICES_COLUMNS = ("exchange", "zd_symbol", "name", "zd_instrument_token", "exchange_token")
 INDICES_SOURCE_COLUMNS = {

@@ -11,9 +11,6 @@ from stocky.database import _escape_like, connect, missing_database_message, tab
 if TYPE_CHECKING:
     import pandas as pd
 
-if TYPE_CHECKING:
-    import pandas as pd
-
 MUTUAL_FUNDS_TABLE = "mutual_funds"
 
 # Zerodha's mf_instruments.csv names each scheme option by its ISIN in `tradingsymbol`, the key Kite's

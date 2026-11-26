@@ -5,6 +5,7 @@ import dataclasses
 import json
 import shlex
 import sys
+import textwrap
 from collections.abc import Callable, Iterator
 from datetime import date
 from pathlib import Path
@@ -483,11 +484,71 @@ def _print_yahoo_fields(row: EnrichedRow) -> None:
         console.print(f"[yellow]{_YAHOO_STATUS_NOTES[row.yahoo_status]}[/yellow]")
 
 
+# Below this width the eight-column table truncates identifiers, so the screen switches to the compact layout.
+_COMPACT_SCREEN_WIDTH = 100
+
+
 def _print_screen_result(result: ScreenResult) -> None:
     if result.total == 0:
         console.print("[yellow]No listings match the screen.[/yellow]")
         return
 
+    if console.width < _COMPACT_SCREEN_WIDTH:
+        _print_compact_screen_rows(result.rows)
+    else:
+        _print_wide_screen_rows(result.rows)
+
+    if result.total > len(result.rows):
+        console.print(f"[dim]Showing {len(result.rows)} of {result.total} matches. Raise --limit to see more.[/dim]")
+
+
+def _print_compact_screen_rows(rows: list[EnrichedRow]) -> None:
+    """Print each listing's ticker, ISIN, market cap and quote date in full, with the other fields on a second line."""
+    keys = [
+        (row.yahoo_ticker, row.isin, _format_crore(row.fields.market_cap), (row.fields.market_time or "-")[:10])
+        for row in rows
+    ]
+    headers = ("Ticker", "ISIN", "Market cap (Cr)", "Quote date")
+    widths = [max(len(header), *(len(key[index]) for key in keys)) for index, header in enumerate(headers)]
+
+    def key_line(cells: tuple[str, str, str, str], style: str = "") -> Text:
+        ticker, isin, market_cap, quote_date = cells
+        return Text(
+            f"{ticker:<{widths[0]}}  {isin:<{widths[1]}}  {market_cap:>{widths[2]}}  {quote_date:<{widths[3]}}",
+            style=style,
+            no_wrap=True,
+            overflow="fold",
+        )
+
+    title = "Screen results"
+    indent = max(0, (min(console.width, sum(widths) + 6) - len(title)) // 2)
+    console.print(Text(f"{' ' * indent}{title}", style="table.title"))
+    console.print(key_line(headers, style="bold"))
+    for row, key in zip(rows, keys, strict=True):
+        console.print(key_line(key))
+        details = (
+            row.fields.name or row.bse_sc_name or "-",
+            f"Price {_format_value(row.fields.price)}",
+            f"P/E {_format_value(row.fields.trailing_pe)}",
+            f"Sector {row.fields.sector or '-'}",
+        )
+        for line in _pack_fields(details, console.width - 2):
+            console.print(Text(f"  {line}", style="dim", overflow="fold"))
+
+
+def _pack_fields(fields: tuple[str, ...], width: int) -> list[str]:
+    """Join fields with ' · ' into lines of at most width, breaking inside a field only when it is longer than width."""
+    lines: list[str] = []
+    for field in fields:
+        joined = f"{lines[-1]} · {field}" if lines else field
+        if lines and len(joined) <= width:
+            lines[-1] = joined
+        else:
+            lines.extend(textwrap.wrap(field, max(width, 1)) or [field])
+    return lines
+
+
+def _print_wide_screen_rows(rows: list[EnrichedRow]) -> None:
     table = Table(title="Screen results")
     # Identifiers and numbers stay whole so they can be copied and compared; names and sectors wrap instead.
     for header, justify, no_wrap in (
@@ -501,7 +562,7 @@ def _print_screen_result(result: ScreenResult) -> None:
         ("Quote date", "left", True),
     ):
         table.add_column(header, justify=justify, no_wrap=no_wrap)
-    for row in result.rows:
+    for row in rows:
         table.add_row(
             escape(row.yahoo_ticker),
             row.isin,
@@ -513,9 +574,6 @@ def _print_screen_result(result: ScreenResult) -> None:
             (row.fields.market_time or "-")[:10],
         )
     console.print(table)
-
-    if result.total > len(result.rows):
-        console.print(f"[dim]Showing {len(result.rows)} of {result.total} matches. Raise --limit to see more.[/dim]")
 
 
 def _sample_label(row: dict[str, str | None]) -> str:
