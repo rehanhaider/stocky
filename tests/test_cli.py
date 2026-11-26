@@ -12,6 +12,7 @@ import pytest
 import typer
 
 import stocky.cli as cli
+import stocky.pipeline as pipeline
 from stocky import __version__
 from stocky.cli import app
 from stocky.database import SCHEMA_VERSION, connect, encode_response_json, initialize_database, upsert_yahoo_response
@@ -917,7 +918,14 @@ def test_yahoo_update_json_emits_progress_events_on_stderr(tmp_path, monkeypatch
     result = runner.invoke(app, ["yahoo", "update", "--db-path", str(db_path), "--json"])
 
     assert result.exit_code == 0
-    assert json.loads(result.stdout) == {"processed": 2, "written": 1, "skipped": 1, "dry_run": False, "pruned": 3}
+    assert json.loads(result.stdout) == {
+        "processed": 2,
+        "written": 1,
+        "skipped": 1,
+        "dry_run": False,
+        "pruned": 3,
+        "warnings": [],
+    }
     events = [json.loads(line) for line in result.stderr.splitlines() if line.strip()]
     assert events == [
         {"event": "progress", "processed": 1, "total": 2, "written": 1, "skipped": 0},
@@ -951,6 +959,29 @@ def test_yahoo_update_reports_pruned_orphans_in_text_and_json(
 
     assert as_json.exit_code == 0
     assert json.loads(as_json.stdout)["pruned"] == (2 if dry_run else 0)
+
+
+def test_yahoo_update_prints_a_failed_prune_as_a_warning_and_succeeds(
+    tmp_path, monkeypatch, seed_consolidated, runner
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    _use_fake_yahooquery(monkeypatch)
+
+    def locked(db_path):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("stocky.yahoo.prune_orphan_yahoo_responses", locked)
+    args = ["yahoo", "update", "--exchange", "NSE", "--symbols", "RELIANCE", "--db-path", str(db_path)]
+
+    text = runner.invoke(app, args)
+    as_json = runner.invoke(app, [*args, "--json"])
+
+    assert text.exit_code == 0 and as_json.exit_code == 0
+    assert "Processed 1; wrote 1; skipped 0; pruned 0; dry_run=False." in text.stdout
+    warning = "removing the responses of tickers no longer in consolidated failed: database is locked"
+    assert warning in " ".join(text.stderr.split())
+    assert warning in json.loads(as_json.stdout)["warnings"][0]
 
 
 def test_yahoo_update_reports_missing_database(tmp_path, runner) -> None:
@@ -1144,6 +1175,30 @@ def test_interactive_rebuild_previews_and_writes_database(tmp_path, market_csv_b
     with sqlite3.connect(db_path) as con:
         assert con.execute("SELECT COUNT(*) FROM consolidated").fetchone()[0] == 1
     assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_rebuild_prints_a_warning_raised_during_the_write(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups, monkeypatch, runner
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 5, 3))
+    db_path = tmp_path / "data" / "output" / "stocky.db"
+    db_path.parent.mkdir(parents=True)
+    seed_consolidated(db_path)
+    _use_interactive_defaults(monkeypatch, paths, db_path)
+    monkeypatch.chdir(tmp_path)
+    old_backups(tmp_path / "data" / "output" / "backup", db_path.name, 7)
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("backup folder is read-only")
+
+    monkeypatch.setattr(pipeline, "prune_backups", refuse)
+
+    result = runner.invoke(app, ["interactive"], input="1\n1\n\ny\n6\n")
+
+    assert result.exit_code == 0
+    message = " ".join(result.stdout.split())
+    assert "Rebuild failed" not in message
+    assert "Warning: The rebuild was written, but removing old backups in data/output/backup failed:" in message
 
 
 def test_interactive_rebuild_keeps_five_backups(

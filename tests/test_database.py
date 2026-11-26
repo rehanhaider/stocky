@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 
 import pytest
@@ -7,6 +8,7 @@ import stocky.database as database
 from stocky.database import (
     CONSOLIDATED_TABLE,
     SCHEMA_VERSION,
+    BackupPruneError,
     backup_database,
     connect,
     decode_response_json,
@@ -717,3 +719,78 @@ def test_an_empty_cache_import_records_no_schema_number(tmp_path) -> None:
 
     with sqlite3.connect(db_path) as con:
         assert con.execute("PRAGMA user_version").fetchone()[0] == 0
+
+
+def test_prune_backups_keeps_the_current_backup_when_older_names_sort_after_it(tmp_path, old_backups) -> None:
+    # After the clock goes back, the backup just taken can carry an earlier time than ones already there.
+    backup_dir = tmp_path / "backups"
+    current = old_backups(backup_dir, "stocky.db", 1)[0]
+    later = [backup_dir / f"2099010{day}-120000-stocky.db" for day in (1, 2)]
+    for path in later:
+        path.write_bytes(b"from before the clock went back")
+
+    removed = prune_backups(tmp_path / "stocky.db", backup_dir, keep=2, current=current)
+
+    assert removed == [later[0]]
+    assert sorted(backup_dir.iterdir()) == [current, later[1]]
+
+
+def test_prune_backups_reports_what_it_removed_before_a_failure(tmp_path, old_backups, monkeypatch) -> None:
+    backup_dir = tmp_path / "backups"
+    backups = old_backups(backup_dir, "stocky.db", 4)
+    unlink = type(backups[0]).unlink
+
+    def locked(path, *args, **kwargs):
+        if path == backups[1]:
+            raise PermissionError(13, "Permission denied")
+        unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(backups[0]), "unlink", locked)
+
+    with pytest.raises(BackupPruneError, match="Permission denied") as error:
+        prune_backups(tmp_path / "stocky.db", backup_dir, keep=1)
+
+    assert error.value.removed == [backups[0], backups[2]]
+    assert sorted(backup_dir.iterdir()) == [backups[1], backups[3]]
+
+
+def test_a_database_away_from_the_backup_folder_marks_its_backups_with_its_path(tmp_path, old_backups) -> None:
+    backup_dir = tmp_path / "project" / "data" / "output" / "backup"
+    owner = backup_dir.parent / "stocky.db"
+    owner.parent.mkdir(parents=True)
+    owner.write_bytes(b"the folder's own database")
+    elsewhere = tmp_path / "elsewhere" / "stocky.db"
+    elsewhere.parent.mkdir()
+    elsewhere.write_bytes(b"another database")
+
+    foreign = backup_database(elsewhere, backup_dir)
+    own = old_backups(backup_dir, "stocky.db", 3)
+
+    assert re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{8}-stocky\.db", foreign.name)
+    assert prune_backups(owner, backup_dir, keep=1) == own[:2]
+    assert sorted(backup_dir.iterdir()) == sorted([foreign, own[2]])
+
+
+def test_prune_orphans_reports_the_committed_count_when_vacuum_fails(tmp_path, seed_consolidated, monkeypatch) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    initialize_database(db_path)
+    with connect(db_path) as con:
+        upsert_yahoo_response(
+            con, yahoo_symbol="DELISTED.NS", symbol="DELISTED", exchange="NSE", response_json=b"{}", source="test"
+        )
+
+    class NoVacuum(database.ClosingConnection):
+        def execute(self, sql, *args):
+            if sql == "VACUUM":
+                raise sqlite3.OperationalError("database or disk is full")
+            return super().execute(sql, *args)
+
+    monkeypatch.setattr(database, "connect", lambda path: sqlite3.connect(path, factory=NoVacuum))
+
+    with pytest.raises(database.OrphanVacuumError, match="disk is full") as error:
+        database.prune_orphan_yahoo_responses(db_path)
+
+    assert error.value.pruned == 1
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("SELECT COUNT(*) FROM yahoo_responses").fetchone()[0] == 0
