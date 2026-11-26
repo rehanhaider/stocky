@@ -15,6 +15,7 @@ from stocky.brokers import (
     GROWW_SOURCE_COLUMNS,
     UPSTOX_SOURCE_COLUMNS,
     import_broker,
+    load_aliceblue,
     load_groww,
     load_upstox,
     search_brokers,
@@ -180,6 +181,27 @@ def test_aliceblue_loader_resolves_both_exchanges_and_restricts_nse_series(tmp_p
     assert frame.loc[frame.exchange.eq("BSE"), "isin"].tolist() == ["INE002A01018", None]
     assert frame["exchange_token"].equals(frame["broker_key"])
     assert frame.loc[frame.exchange_token.eq("0"), "symbol"].item() == "RELIANCE-EQ"
+
+
+def test_public_aliceblue_loader_reads_without_writing(tmp_path, seed_consolidated, sources):
+    db = tmp_path / "stocky.db"
+    seed_consolidated(db)
+    before = hashlib.sha256(db.read_bytes()).hexdigest()
+
+    frame = load_aliceblue(sources["aliceblue"], sources["bse"], db)
+
+    assert frame.equals(_load_aliceblue(sources["aliceblue"], sources["bse"], db))
+    assert set(frame["isin"]) == {"INE002A01018"}
+    assert hashlib.sha256(db.read_bytes()).hexdigest() == before
+
+
+def test_public_aliceblue_loader_refuses_a_missing_database_without_creating_it(tmp_path, sources):
+    db = tmp_path / "missing.db"
+
+    with pytest.raises(FileNotFoundError, match=f"Database not found: {db.resolve()}"):
+        load_aliceblue(sources["aliceblue"], sources["bse"], db)
+
+    assert not db.exists()
 
 
 @pytest.mark.parametrize(

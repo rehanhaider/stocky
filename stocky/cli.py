@@ -19,8 +19,24 @@ from rich.table import Table
 from rich.text import Text
 
 from stocky import __version__
-from stocky.brokers import Broker, BrokerSearchResult, import_broker, search_brokers
-from stocky.bse_debt import BseDebtSearchResult, import_bse_debt, newest_bse_debt_archive, search_bse_debt
+from stocky.brokers import (
+    Broker,
+    BrokerImportResult,
+    BrokerSearchResult,
+    import_broker,
+    load_aliceblue,
+    load_groww,
+    load_upstox,
+    search_brokers,
+)
+from stocky.bse_debt import (
+    BseDebtImportResult,
+    BseDebtSearchResult,
+    import_bse_debt,
+    load_bse_debt,
+    newest_bse_debt_archive,
+    search_bse_debt,
+)
 from stocky.config import (
     DEFAULT_ALICEBLUE_BSE,
     DEFAULT_ALICEBLUE_NSE,
@@ -59,12 +75,25 @@ from stocky.enrich import (
     screen_instruments,
 )
 from stocky.export import SNAPSHOT_FORMATS, create_snapshot, export_consolidated, export_tickers
-from stocky.indices import IndicesSearchResult, import_indices, search_indices
-from stocky.mutual_funds import MutualFundSearchResult, import_mutual_funds, search_mutual_funds
+from stocky.indices import IndicesImportResult, IndicesSearchResult, import_indices, load_indices, search_indices
+from stocky.mutual_funds import (
+    MutualFundImportResult,
+    MutualFundSearchResult,
+    import_mutual_funds,
+    load_amfi_codes,
+    load_mf_instruments,
+    search_mutual_funds,
+)
 from stocky.pipeline import DEFAULT_DIFF_SAMPLE_SIZE, RebuildDiff, RebuildResult, SourcePreview, rebuild_database
 from stocky.sources import BhavcopyPaths, list_bhavcopy_pairs, resolve_bhavcopy_paths
-from stocky.summary import DEFAULT_MISSING_SAMPLE_SIZE, SOURCE_LABELS, build_refresh_summary, render_markdown
-from stocky.yahoo import ProgressCallback, YahooDataManager, ticker_column
+from stocky.summary import (
+    DEFAULT_MISSING_SAMPLE_SIZE,
+    SOURCE_LABELS,
+    RefreshSummary,
+    build_refresh_summary,
+    render_markdown,
+)
+from stocky.yahoo import ProgressCallback, YahooDataManager, YahooUpdateResult, ticker_column
 
 console = Console()
 error_console = Console(stderr=True)
@@ -681,6 +710,49 @@ def _print_rebuild_result(result: RebuildResult) -> None:
         console.print(f"Removed old backup {escape(str(path))}")
 
 
+def _print_indices_import_result(result: IndicesImportResult) -> None:
+    console.print(
+        f"[green]Imported {result.rows} indices from {escape(str(result.file))} "
+        f"into {escape(str(result.db_path))}.[/green]"
+    )
+
+
+def _print_debt_import_result(result: BseDebtImportResult) -> None:
+    console.print(
+        f"[green]Imported {result.rows} BSE debt rows from {escape(str(result.file))} "
+        f"into {escape(str(result.db_path))}.[/green]"
+    )
+
+
+def _print_mf_import_result(result: MutualFundImportResult) -> None:
+    console.print(
+        f"[green]Imported {result.rows} mutual funds from {escape(str(result.mf_instruments))} "
+        f"into {escape(str(result.db_path))}.[/green]"
+    )
+    console.print(f"Rows with an AMFI code: {result.coded_rows}")
+    console.print(f"Ambiguous ISINs: {len(result.ambiguous_isins)}")
+    if result.ambiguous_isins:
+        console.print(", ".join(result.ambiguous_isins[:10]))
+
+
+def _print_broker_import_results(results: list[BrokerImportResult]) -> None:
+    table = Table(title="Broker cash instruments", padding=(0, 0), show_edge=False)
+    for label in ("Broker", "Exchange", "Rows", "With ISIN", "In consolidated"):
+        table.add_column(label, no_wrap=True)
+    for result in results:
+        table.add_row(
+            result.broker, result.exchange, str(result.rows), str(result.with_isin), str(result.in_consolidated)
+        )
+    console.print(table)
+
+
+def _print_yahoo_update_result(result: YahooUpdateResult) -> None:
+    console.print(
+        f"[green]Processed {result.processed}; wrote {result.written}; skipped {result.skipped}; "
+        f"pruned {result.pruned}; dry_run={result.dry_run}.[/green]"
+    )
+
+
 def _print_bhavcopy_pairs(pairs: list) -> int:
     """Print the newest bhavcopy pairs and return how many rows are selectable."""
     listed = pairs[:MAX_LISTED_BHAVCOPY_PAIRS]
@@ -1041,6 +1113,279 @@ def _rebuild_impl(
         sample_size=sample_size,
         progress=progress,
     )
+
+
+@dataclasses.dataclass(frozen=True)
+class ImportPreview:
+    """What an import step would read in a dry run, and how many rows it would write."""
+
+    source: str
+    files: list[Path]
+    rows: int
+
+
+@dataclasses.dataclass(frozen=True)
+class RefreshStep:
+    name: str
+    # The step's own result, as its command returns it; in a dry run, its preview. None when it has nothing to preview.
+    result: object
+
+
+@dataclasses.dataclass(frozen=True)
+class RefreshFailure:
+    step: str
+    error: str
+    # What the step finished before it failed: the brokers that committed, or a summary whose checks failed.
+    result: object = None
+
+
+@dataclasses.dataclass(frozen=True)
+class RefreshResult:
+    dry_run: bool
+    # The steps that finished, in the order they ran.
+    steps: list[RefreshStep]
+    failure: RefreshFailure | None = None
+    not_run: list[str] = dataclasses.field(default_factory=list)
+
+
+class _RefreshStepError(Exception):
+    """A step's failure, carrying what the step finished before it."""
+
+    def __init__(self, message: str, result: object) -> None:
+        super().__init__(message)
+        self.result = result
+
+
+def _no_yahoo_progress(exchange: str) -> contextlib.AbstractContextManager[ProgressCallback | None]:
+    return contextlib.nullcontext(None)
+
+
+def _refresh_impl(
+    *,
+    trade_date: str,
+    db_path: Path = DEFAULT_DB_PATH,
+    dry_run: bool = False,
+    stale_days: float | None = None,
+    on_start: Callable[[int, int, str], None] | None = None,
+    on_done: Callable[[RefreshStep], None] | None = None,
+    yahoo_progress: Callable[[str], contextlib.AbstractContextManager[ProgressCallback | None]] = _no_yahoo_progress,
+) -> RefreshResult:
+    """Run the quarterly refresh in its fixed order and stop at the first step that fails.
+
+    Each step calls the library function its own command calls, with that command's default input
+    files, and commits on its own: a failure keeps what the earlier steps wrote. The rebuild runs first
+    because Alice Blue's ISINs are looked up in the rebuilt consolidated table, and the Yahoo updates
+    run after it so they fetch the rebuilt tickers and prune the responses of tickers it dropped.
+
+    A dry run runs each step's preview against the current database and writes nothing: the rebuild's
+    own dry run, the import loaders, and the Yahoo update's count of tickers and orphaned responses.
+    """
+
+    def rebuild() -> RebuildResult:
+        # Keep the SGB rows of an --include-sgb build, as the menu and TUI rebuilds do by default.
+        return _rebuild_impl(trade_date=trade_date, db_path=db_path, dry_run=dry_run, include_sgb=has_sgb_rows(db_path))
+
+    def indices() -> IndicesImportResult | ImportPreview:
+        if dry_run:
+            rows = len(load_indices(DEFAULT_ZERODHA_INSTRUMENTS))
+            return ImportPreview("indices", [DEFAULT_ZERODHA_INSTRUMENTS], rows)
+        return import_indices(DEFAULT_ZERODHA_INSTRUMENTS, db_path)
+
+    def debt() -> BseDebtImportResult | ImportPreview:
+        archive = newest_bse_debt_archive()
+        if dry_run:
+            return ImportPreview("BSE debt", [archive], len(load_bse_debt(archive)))
+        return import_bse_debt(archive, db_path)
+
+    def mutual_funds() -> MutualFundImportResult | ImportPreview:
+        if dry_run:
+            rows = len(load_mf_instruments(DEFAULT_ZERODHA_MF_INSTRUMENTS))
+            load_amfi_codes(DEFAULT_AMFI_NAV)
+            return ImportPreview("mutual funds", [DEFAULT_ZERODHA_MF_INSTRUMENTS, DEFAULT_AMFI_NAV], rows)
+        return import_mutual_funds(DEFAULT_ZERODHA_MF_INSTRUMENTS, DEFAULT_AMFI_NAV, db_path)
+
+    def preview_broker(broker: Broker) -> ImportPreview:
+        if broker is Broker.groww:
+            return ImportPreview(broker.value, [DEFAULT_GROWW_INSTRUMENTS], len(load_groww(DEFAULT_GROWW_INSTRUMENTS)))
+        if broker is Broker.upstox:
+            rows = len(load_upstox(DEFAULT_UPSTOX_INSTRUMENTS))
+            return ImportPreview(broker.value, [DEFAULT_UPSTOX_INSTRUMENTS], rows)
+        rows = len(load_aliceblue(DEFAULT_ALICEBLUE_NSE, DEFAULT_ALICEBLUE_BSE, db_path))
+        return ImportPreview(broker.value, [DEFAULT_ALICEBLUE_NSE, DEFAULT_ALICEBLUE_BSE], rows)
+
+    def brokers() -> list[BrokerImportResult] | list[ImportPreview]:
+        paths = {
+            Broker.groww: DEFAULT_GROWW_INSTRUMENTS,
+            Broker.upstox: DEFAULT_UPSTOX_INSTRUMENTS,
+            Broker.aliceblue: DEFAULT_ALICEBLUE_NSE,
+        }
+        results: list = []
+        for broker in Broker:
+            try:
+                if dry_run:
+                    results.append(preview_broker(broker))
+                else:
+                    results.extend(import_broker(broker, paths[broker], db_path, bse_path=DEFAULT_ALICEBLUE_BSE))
+            except Exception as exc:
+                # Each broker commits on its own, so the ones before the failure stay imported.
+                raise _RefreshStepError(str(exc), results) from exc
+        return results
+
+    def yahoo(exchange: str) -> YahooUpdateResult:
+        manager = YahooDataManager(db_path)
+        if dry_run:
+            return manager.update_data(exchange=exchange, dry_run=True, stale_days=stale_days)
+        with yahoo_progress(exchange) as progress:
+            return manager.update_data(exchange=exchange, stale_days=stale_days, progress=progress)
+
+    def summary() -> RefreshSummary | None:
+        # Validating the current database would say nothing about the refreshed one.
+        if dry_run:
+            return None
+        result = build_refresh_summary(db_path)
+        if not result.passed:
+            failed = ", ".join(check.name for check in result.checks if not check.passed)
+            raise _RefreshStepError(f"Validation failed: {failed}.", result)
+        return result
+
+    steps: list[tuple[str, Callable[[], object]]] = [
+        ("rebuild", rebuild),
+        ("indices import", indices),
+        ("debt import", debt),
+        ("mf import", mutual_funds),
+        ("brokers import", brokers),
+        ("yahoo update NSE", lambda: yahoo("NSE")),
+        ("yahoo update BSE", lambda: yahoo("BSE")),
+        ("summary", summary),
+    ]
+    completed: list[RefreshStep] = []
+    for index, (name, run) in enumerate(steps, start=1):
+        if on_start is not None:
+            on_start(index, len(steps), name)
+        try:
+            result = run()
+        except Exception as exc:
+            return RefreshResult(
+                dry_run=dry_run,
+                steps=completed,
+                failure=RefreshFailure(
+                    step=name, error=str(exc), result=exc.result if isinstance(exc, _RefreshStepError) else None
+                ),
+                not_run=[later for later, _ in steps[index:]],
+            )
+        step = RefreshStep(name=name, result=result)
+        completed.append(step)
+        if on_done is not None:
+            on_done(step)
+    return RefreshResult(dry_run=dry_run, steps=completed)
+
+
+def _print_refresh_step(name: str, result: object, *, dry_run: bool) -> None:
+    """Print one refresh step's result the way its own command prints it, or its preview in a dry run."""
+    if isinstance(result, RebuildResult):
+        _print_rebuild_result(result)
+        for warning in result.warnings:
+            error_console.print(f"[yellow]Warning: {escape(warning)}[/yellow]")
+    elif isinstance(result, ImportPreview):
+        _print_import_previews([result])
+    elif isinstance(result, IndicesImportResult):
+        _print_indices_import_result(result)
+    elif isinstance(result, BseDebtImportResult):
+        _print_debt_import_result(result)
+    elif isinstance(result, MutualFundImportResult):
+        _print_mf_import_result(result)
+    elif isinstance(result, YahooUpdateResult):
+        _print_yahoo_update_result(result)
+        if dry_run:
+            console.print("[dim]Counted against the current database, before the rebuild.[/dim]")
+    elif isinstance(result, RefreshSummary):
+        sys.stdout.write(render_markdown(result))
+    elif isinstance(result, list) and result:
+        if isinstance(result[0], ImportPreview):
+            _print_import_previews(result)
+        else:
+            _print_broker_import_results(result)
+    elif name == "summary" and dry_run:
+        console.print("[dim]Validates the database once the steps above have written it; nothing to preview.[/dim]")
+
+
+def _print_import_previews(previews: list[ImportPreview]) -> None:
+    for preview in previews:
+        files = ", ".join(str(file) for file in preview.files)
+        console.print(f"Would import {preview.rows} {escape(preview.source)} rows from {escape(files)}.")
+
+
+@app.command()
+def refresh(
+    trade_date: Annotated[
+        str, typer.Option("--date", help="Trade date of the bhavcopies to rebuild from, YYYY-MM-DD.")
+    ],
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show every step's preview in one run without writing anything.")
+    ] = False,
+    stale_days: Annotated[
+        float | None,
+        typer.Option(
+            "--stale-days",
+            min=0,
+            help="Only fetch Yahoo tickers with no cached response or one fetched more than this many days ago.",
+        ),
+    ] = None,
+    db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Print the result as JSON on stdout and step and progress events on stderr."),
+    ] = False,
+) -> None:
+    """Run the quarterly refresh in order: rebuild, indices, debt, mutual funds, brokers, Yahoo NSE and BSE, summary.
+
+    The rebuild keeps SGB rows when the current table has them. Each step reads its command's default input files.
+
+    Each step commits on its own. The refresh stops at the first step that fails and exits with status 1.
+    """
+    _parse_date(trade_date)
+
+    def on_start(index: int, total: int, name: str) -> None:
+        if json_output:
+            sys.stderr.write(json.dumps({"event": "step", "index": index, "total": total, "step": name}) + "\n")
+            sys.stderr.flush()
+        else:
+            console.rule(f"Step {index}/{total}: {name}")
+
+    def on_done(step: RefreshStep) -> None:
+        if not json_output:
+            _print_refresh_step(step.name, step.result, dry_run=dry_run)
+
+    result = _refresh_impl(
+        trade_date=trade_date,
+        db_path=db_path,
+        dry_run=dry_run,
+        stale_days=stale_days,
+        on_start=on_start,
+        on_done=on_done,
+        yahoo_progress=lambda exchange: _yahoo_progress(exchange, json_output),
+    )
+
+    if json_output:
+        _emit_json(result)
+
+    failure = result.failure
+    if failure is not None:
+        if not json_output and failure.result is not None:
+            _print_refresh_step(failure.step, failure.result, dry_run=dry_run)
+        completed = ", ".join(step.name for step in result.steps) or "none"
+        failed_at = len(result.steps) + 1
+        total = failed_at + len(result.not_run)
+        _print_error(
+            f"Refresh stopped at step {failed_at} of {total}, {failure.step}: {failure.error}\n"
+            f"Completed: {completed}.\n"
+            f"Not run: {', '.join(result.not_run) or 'none'}."
+        )
+        raise typer.Exit(1)
+
+    if not json_output:
+        message = "Dry run complete; nothing was written." if dry_run else "Refresh complete."
+        console.print(f"[green]{message}[/green]")
 
 
 @app.command()
@@ -1550,10 +1895,7 @@ def yahoo_update(
     if json_output:
         _emit_json(result)
     else:
-        console.print(
-            f"[green]Processed {result.processed}; wrote {result.written}; skipped {result.skipped}; "
-            f"pruned {result.pruned}; dry_run={result.dry_run}.[/green]"
-        )
+        _print_yahoo_update_result(result)
 
 
 @yahoo_app.command("import-cache")
@@ -1652,14 +1994,7 @@ def mf_import(
     if json_output:
         _emit_json(result)
     else:
-        console.print(
-            f"[green]Imported {result.rows} mutual funds from {escape(str(result.mf_instruments))} "
-            f"into {escape(str(result.db_path))}.[/green]"
-        )
-        console.print(f"Rows with an AMFI code: {result.coded_rows}")
-        console.print(f"Ambiguous ISINs: {len(result.ambiguous_isins)}")
-        if result.ambiguous_isins:
-            console.print(", ".join(result.ambiguous_isins[:10]))
+        _print_mf_import_result(result)
 
 
 @mf_app.command("query")
@@ -1704,10 +2039,7 @@ def debt_import(
     if json_output:
         _emit_json(result)
     else:
-        console.print(
-            f"[green]Imported {result.rows} BSE debt rows from {escape(str(result.file))} "
-            f"into {escape(str(result.db_path))}.[/green]"
-        )
+        _print_debt_import_result(result)
 
 
 @debt_app.command("query")
@@ -1753,10 +2085,7 @@ def indices_import(
     if json_output:
         _emit_json(result)
     else:
-        console.print(
-            f"[green]Imported {result.rows} indices from {escape(str(result.file))} "
-            f"into {escape(str(result.db_path))}.[/green]"
-        )
+        _print_indices_import_result(result)
 
 
 @indices_app.command("query")
@@ -1806,23 +2135,17 @@ def brokers_import(
     """Replace each selected broker's cash-market mappings in its own transaction."""
     db_path = _db_path_or_alias(ctx, db_path, db_alias)
     paths = {Broker.groww: groww, Broker.upstox: upstox, Broker.aliceblue: aliceblue_nse}
-    table = Table(title="Broker cash instruments", padding=(0, 0), show_edge=False)
-    for label in ("Broker", "Exchange", "Rows", "With ISIN", "In consolidated"):
-        table.add_column(label, no_wrap=True)
+    results: list[BrokerImportResult] = []
     for selected in dict.fromkeys(broker or list(Broker)):
         try:
-            results = import_broker(selected, paths[selected], db_path, bse_path=aliceblue_bse)
+            results.extend(import_broker(selected, paths[selected], db_path, bse_path=aliceblue_bse))
         except Exception as exc:
             # Earlier brokers have committed independently. Show their counts before the error.
-            if table.row_count:
-                console.print(table)
+            if results:
+                _print_broker_import_results(results)
             _print_error(str(exc))
             raise typer.Exit(1) from exc
-        for result in results:
-            table.add_row(
-                result.broker, result.exchange, str(result.rows), str(result.with_isin), str(result.in_consolidated)
-            )
-    console.print(table)
+    _print_broker_import_results(results)
 
 
 @brokers_app.command("query")

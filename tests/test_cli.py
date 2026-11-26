@@ -1,4 +1,5 @@
 import csv
+import dataclasses
 import gzip
 import json
 import sqlite3
@@ -2599,3 +2600,303 @@ def test_missing_database_message_names_the_absolute_path(tmp_path, monkeypatch,
         f"Database not found: {absolute}. Run '{first_step}' first. "
         "To use an existing database, pass --db-path or run from the repository root."
     )
+
+
+REFRESH_DATE = date(2026, 7, 17)
+REFRESH_STEPS = [
+    "rebuild",
+    "indices import",
+    "debt import",
+    "mf import",
+    "brokers import",
+    "yahoo update NSE",
+    "yahoo update BSE",
+    "summary",
+]
+
+
+def _write_refresh_sources(root) -> None:
+    """Lay out every refresh input at its default path under ``root``, the working directory of the test."""
+    market = root / "data/marketData"
+    bhavcopies = market / "bhavCopies"
+    bhavcopies.mkdir(parents=True)
+    (bhavcopies / bse_filename_for_date(REFRESH_DATE)).write_text(
+        "SctySrs,ISIN,FinInstrmId,TckrSymb,FinInstrmNm\n"
+        "E,INF204KB14I2,590103,GOLDBEES,GOLD ETF\n"
+        "G,IN0020200286,800001,SGBN28VIII,SOVEREIGN GOLD BOND\n",
+        encoding="utf-8",
+    )
+    nse_path = bhavcopies / nse_filename_for_date(REFRESH_DATE)
+    with ZipFile(nse_path, "w") as archive:
+        archive.writestr(
+            nse_path.stem,
+            "SctySrs,ISIN,FinInstrmId,TckrSymb\nEQ,INF204KB14I2,14428,GOLDBEES\nGB,IN0020200286,1342,SGBN28VIII\n",
+        )
+    zerodha = market / "zerodha"
+    zerodha.mkdir(parents=True)
+    # One instruments file serves the rebuild (NSE and BSE rows) and the indices import (INDICES rows).
+    (zerodha / "instruments.csv").write_text(
+        "instrument_token,exchange_token,tradingsymbol,name,segment,exchange\n"
+        "1,1342,SGBN28VIII-GB,SGB,NSE,NSE\n"
+        "2,800001,SGBN28VIII,SGB,BSE,BSE\n"
+        "256265,1001,NIFTY 50,NIFTY 50,INDICES,NSE\n"
+        "265,1,SENSEX,SENSEX,INDICES,BSE\n",
+        encoding="utf-8",
+    )
+    mf_path, amfi_path = _write_cli_mf_files(root)
+    mf_path.rename(zerodha / "mf_instruments.csv")
+    (market / "amfi").mkdir()
+    amfi_path.rename(market / "amfi/NAVAll.txt")
+    (bhavcopies / "bseDebt").mkdir()
+    _write_cli_debt_zip(bhavcopies / "bseDebt/DEBTBHAVCOPY16102026.zip")
+    _write_cli_broker_sources(market / "brokers")
+
+
+@pytest.fixture
+def refresh_root(tmp_path, monkeypatch):
+    _write_refresh_sources(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("COLUMNS", "200")
+    _use_fake_yahooquery(monkeypatch)
+    return tmp_path
+
+
+def _initial_rebuild(runner, *extra: str) -> None:
+    result = runner.invoke(app, ["rebuild", "--date", REFRESH_DATE.isoformat(), "--no-backup", *extra])
+    assert result.exit_code == 0, result.output
+
+
+def _refresh(runner, *extra: str):
+    return runner.invoke(app, ["refresh", "--date", REFRESH_DATE.isoformat(), *extra])
+
+
+def _tables(db_path) -> set[str]:
+    with sqlite3.connect(db_path) as con:
+        return {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+
+
+def test_refresh_runs_every_step_in_order_through_the_library_functions(refresh_root, monkeypatch, runner) -> None:
+    calls = []
+
+    def recording(label, function):
+        def wrapper(*args, **kwargs):
+            calls.append(label(*args, **kwargs) if callable(label) else label)
+            return function(*args, **kwargs)
+
+        return wrapper
+
+    monkeypatch.setattr(cli, "_rebuild_impl", recording("rebuild", cli._rebuild_impl))
+    monkeypatch.setattr(cli, "import_indices", recording("indices", cli.import_indices))
+    monkeypatch.setattr(cli, "import_bse_debt", recording("debt", cli.import_bse_debt))
+    monkeypatch.setattr(cli, "import_mutual_funds", recording("mf", cli.import_mutual_funds))
+    monkeypatch.setattr(cli, "import_broker", recording(lambda broker, *a, **k: f"broker {broker}", cli.import_broker))
+    monkeypatch.setattr(cli, "build_refresh_summary", recording("summary", cli.build_refresh_summary))
+
+    class RecordingManager(cli.YahooDataManager):
+        def update_data(self, **kwargs):
+            calls.append(f"yahoo {kwargs['exchange']} stale_days={kwargs['stale_days']}")
+            return super().update_data(**kwargs)
+
+    monkeypatch.setattr(cli, "YahooDataManager", RecordingManager)
+
+    result = _refresh(runner, "--stale-days", "90", "--json")
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        "rebuild",
+        "indices",
+        "debt",
+        "mf",
+        "broker groww",
+        "broker upstox",
+        "broker aliceblue",
+        "yahoo NSE stale_days=90.0",
+        "yahoo BSE stale_days=90.0",
+        "summary",
+    ]
+    payload = json.loads(result.stdout)
+    assert [step["name"] for step in payload["steps"]] == REFRESH_STEPS
+    assert payload["failure"] is None and payload["not_run"] == [] and payload["dry_run"] is False
+    assert payload["steps"][-1]["result"]["passed"] is True
+    events = [json.loads(line) for line in result.stderr.splitlines() if line.startswith("{")]
+    assert [event["step"] for event in events if event["event"] == "step"] == REFRESH_STEPS
+    db_path = refresh_root / "data/output/stocky.db"
+    assert {"consolidated", "indices", "bse_debt", "mutual_funds", "broker_symbols", "yahoo_responses"} <= _tables(
+        db_path
+    )
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("SELECT COUNT(*) FROM yahoo_responses").fetchone()[0] == 2
+
+
+def test_refresh_prints_each_step_and_the_pruned_orphan_count(refresh_root, runner) -> None:
+    _initial_rebuild(runner)
+    db_path = refresh_root / "data/output/stocky.db"
+    _seed_cached_yahoo_responses(db_path, ["DELISTED"], suffix="NS")
+
+    result = _refresh(runner)
+
+    assert result.exit_code == 0, result.output
+    stdout = " ".join(result.stdout.split())
+    for index, name in enumerate(REFRESH_STEPS, start=1):
+        assert f"Step {index}/8: {name}" in stdout
+    assert stdout.index("Step 1/8: rebuild") < stdout.index("Rebuild summary") < stdout.index("Step 2/8")
+    assert "Imported 2 indices" in stdout and "Imported 3 BSE debt rows" in stdout
+    assert "Imported 3 mutual funds" in stdout and "Broker cash instruments" in stdout
+    # The NSE update prunes the orphan; the BSE update finds none left.
+    assert "Processed 1; wrote 1; skipped 0; pruned 1; dry_run=False." in stdout
+    assert "Processed 1; wrote 1; skipped 0; pruned 0; dry_run=False." in stdout
+    assert "# Stocky refresh summary" in result.stdout
+    assert stdout.endswith("Refresh complete.")
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("SELECT yahoo_symbol FROM yahoo_responses ORDER BY 1").fetchall() == [
+            ("GOLDBEES.BO",),
+            ("GOLDBEES.NS",),
+        ]
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_refresh_stops_at_the_first_failure_and_names_the_completed_steps(
+    refresh_root, monkeypatch, runner, json_output
+) -> None:
+    (refresh_root / "data/marketData/zerodha/mf_instruments.csv").unlink()
+    fetched = []
+    monkeypatch.setattr(cli, "YahooDataManager", lambda db_path: fetched.append(db_path))
+
+    result = _refresh(runner, *(["--json"] if json_output else []))
+
+    assert result.exit_code == 1
+    stderr = " ".join(result.stderr.split())
+    assert (
+        "Refresh stopped at step 4 of 8, mf import: Zerodha mutual fund instruments not found: "
+        "data/marketData/zerodha/mf_instruments.csv"
+    ) in stderr
+    assert "Completed: rebuild, indices import, debt import." in stderr
+    assert "Not run: brokers import, yahoo update NSE, yahoo update BSE, summary." in stderr
+    assert fetched == []
+    tables = _tables(refresh_root / "data/output/stocky.db")
+    assert {"consolidated", "indices", "bse_debt"} <= tables
+    assert not {"mutual_funds", "broker_symbols"} & tables
+    if json_output:
+        payload = json.loads(result.stdout)
+        assert [step["name"] for step in payload["steps"]] == ["rebuild", "indices import", "debt import"]
+        assert payload["failure"]["step"] == "mf import"
+        assert payload["not_run"] == REFRESH_STEPS[4:]
+    else:
+        assert "Refresh complete." not in result.stdout
+
+
+def test_refresh_reports_the_brokers_that_committed_before_one_failed(refresh_root, runner) -> None:
+    (refresh_root / "data/marketData/brokers/aliceblue/BSE.csv").unlink()
+
+    result = _refresh(runner, "--json")
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["failure"]["step"] == "brokers import"
+    assert "Alice Blue instruments not found" in payload["failure"]["error"]
+    assert [row["broker"] for row in payload["failure"]["result"]] == ["groww", "upstox"]
+    with sqlite3.connect(refresh_root / "data/output/stocky.db") as con:
+        assert con.execute("SELECT DISTINCT broker FROM broker_symbols ORDER BY 1").fetchall() == [
+            ("groww",),
+            ("upstox",),
+        ]
+
+
+def test_refresh_dry_run_previews_every_step_and_writes_nothing(refresh_root, monkeypatch, runner) -> None:
+    _initial_rebuild(runner)
+    db_path = refresh_root / "data/output/stocky.db"
+    _seed_cached_yahoo_responses(db_path, ["DELISTED"], suffix="NS")
+    before = db_path.read_bytes()
+    output_files = sorted((refresh_root / "data/output").rglob("*"))
+
+    class NoFetch:
+        def __init__(self, *args, **kwargs) -> None:
+            raise AssertionError("A dry run must not call Yahoo Finance.")
+
+    monkeypatch.setattr(sys.modules["yahooquery"], "Ticker", NoFetch)
+
+    text = _refresh(runner, "--dry-run")
+    as_json = _refresh(runner, "--dry-run", "--json")
+
+    assert text.exit_code == 0, text.output
+    assert as_json.exit_code == 0, as_json.output
+    assert db_path.read_bytes() == before
+    assert sorted((refresh_root / "data/output").rglob("*")) == output_files
+    stdout = " ".join(text.stdout.split())
+    assert "Row changes" in stdout and "│ Dry run │ True │" in stdout
+    assert "Would import 2 indices rows from data/marketData/zerodha/instruments.csv." in stdout
+    assert "Would import 3 BSE debt rows from data/marketData/bhavCopies/bseDebt/DEBTBHAVCOPY16102026.zip." in stdout
+    assert (
+        "Would import 3 mutual funds rows from data/marketData/zerodha/mf_instruments.csv, "
+        "data/marketData/amfi/NAVAll.txt."
+    ) in stdout
+    for rows, broker in ((1, "groww"), (1, "upstox"), (2, "aliceblue")):
+        assert f"Would import {rows} {broker} rows from" in stdout
+    assert "Processed 1; wrote 0; skipped 0; pruned 1; dry_run=True." in stdout
+    assert "Counted against the current database, before the rebuild." in stdout
+    assert "nothing to preview" in stdout
+    assert stdout.endswith("Dry run complete; nothing was written.")
+    payload = json.loads(as_json.stdout)
+    assert payload["dry_run"] is True
+    assert [step["name"] for step in payload["steps"]] == REFRESH_STEPS
+    assert payload["steps"][5]["result"]["pruned"] == 1
+
+
+@pytest.mark.parametrize("current_has_sgb", [True, False])
+def test_refresh_keeps_sgb_rows_only_when_the_current_table_has_them(refresh_root, runner, current_has_sgb) -> None:
+    _initial_rebuild(runner, *(["--include-sgb"] if current_has_sgb else []))
+
+    result = _refresh(runner)
+
+    assert result.exit_code == 0, result.output
+    with sqlite3.connect(refresh_root / "data/output/stocky.db") as con:
+        rows = con.execute("SELECT isin, ins_type FROM consolidated ORDER BY isin").fetchall()
+    expected = [("INF204KB14I2", "etf")]
+    if current_has_sgb:
+        expected.insert(0, ("IN0020200286", "sgb"))
+    assert rows == expected
+
+
+def test_refresh_dry_run_names_the_missing_input_files(tmp_path, monkeypatch, runner) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("COLUMNS", "200")
+
+    result = _refresh(runner, "--dry-run")
+
+    assert result.exit_code == 1
+    assert result.stdout.count("Step ") == 1
+    assert "Refresh stopped at step 1 of 8, rebuild: Required input files are missing:" in result.stderr
+    assert f"- data/marketData/bhavCopies/{bse_filename_for_date(REFRESH_DATE)}" in result.stderr
+    assert "- data/marketData/zerodha/instruments.csv" in result.stderr
+    assert "Completed: none." in result.stderr
+    assert not (tmp_path / "data").exists()
+
+
+def test_refresh_requires_an_iso_date(tmp_path, monkeypatch, runner) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    missing = runner.invoke(app, ["refresh"])
+    invalid = runner.invoke(app, ["refresh", "--date", "17-07-2026"])
+
+    assert missing.exit_code == 2 and "--date" in missing.stderr
+    assert invalid.exit_code == 2 and "YYYY-MM-DD" in invalid.stderr
+
+
+def test_refresh_fails_at_the_summary_when_a_check_fails_and_still_prints_it(refresh_root, monkeypatch, runner) -> None:
+    real_summary = cli.build_refresh_summary
+
+    def failing_summary(*args, **kwargs):
+        summary = real_summary(*args, **kwargs)
+        checks = [dataclasses.replace(summary.checks[0], passed=False), *summary.checks[1:]]
+        return dataclasses.replace(summary, passed=False, checks=checks)
+
+    monkeypatch.setattr(cli, "build_refresh_summary", failing_summary)
+
+    result = _refresh(runner)
+
+    assert result.exit_code == 1
+    assert "**Validation: FAILED**" in result.stdout
+    stderr = " ".join(result.stderr.split())
+    assert "Refresh stopped at step 8 of 8, summary: Validation failed: Consolidated table layout." in stderr
+    assert "Completed: rebuild, indices import, debt import, mf import, brokers import, yahoo update NSE, " in stderr
+    assert "Not run: none." in stderr

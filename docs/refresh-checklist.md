@@ -14,6 +14,17 @@ inputs, so step 1 stays manual.
      - `https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz` to `data/marketData/brokers/upstox/complete.json.gz`;
      - `https://v2api.aliceblueonline.com/restpy/static/contract_master/NSE.csv` to `data/marketData/brokers/aliceblue/NSE.csv`;
      - `https://v2api.aliceblueonline.com/restpy/static/contract_master/BSE.csv` to `data/marketData/brokers/aliceblue/BSE.csv`.
+   Steps 2 to 5 can also run as one command. `stocky refresh` runs the rebuild, `indices import`, `debt import`,
+   `mf import`, `brokers import`, `yahoo update` for NSE and then BSE, and `summary`, in that order, with each command's
+   default input files. The rebuild keeps the SGB rows when the current table has them. `--dry-run` shows every step's
+   preview and writes nothing. The refresh stops at the first step that fails and names it and the steps that
+   completed. It prints the summary on stdout, so run step 5 afterwards to write `data/output/refresh-summary.md`:
+
+   ```bash
+   uv run stocky refresh --date YYYY-MM-DD --stale-days 90 --dry-run
+   uv run stocky refresh --date YYYY-MM-DD --stale-days 90
+   ```
+
 2. Preview the rebuild. Nothing is written:
 
    ```bash
