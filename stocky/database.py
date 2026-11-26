@@ -23,6 +23,14 @@ PROVENANCE_SOURCES_TABLE = "provenance_sources"
 # Each import replaces its own rows of a mapping table, so the latest record per table and source describes them.
 PROVENANCE_IMPORTS_TABLE = "provenance_imports"
 
+# The layout of every table Stocky writes, provenance_imports included, stored in the file's PRAGMA user_version by
+# each write that creates or replaces a table. Raise it when a table or its columns change. A file written before
+# Stocky recorded the number reads 0.
+SCHEMA_VERSION = 1
+# The schema number in which the consolidated table took its current layout. Reads of consolidated check the file
+# against this, not SCHEMA_VERSION, so raising SCHEMA_VERSION for another table does not ask for a rebuild.
+CONSOLIDATED_LAYOUT_VERSION = 1
+
 # Yahoo quote types that describe a listed security. Yahoo labels some thinly traded Indian
 # shares MUTUALFUND and liquid ETFs BOND; an INDEX answer carries index levels, not the share's.
 LISTED_QUOTE_TYPES = frozenset({"EQUITY", "ETF", "MUTUALFUND", "BOND"})
@@ -114,6 +122,7 @@ class DatabaseStatus:
     yahoo_newest_fetch: str | None
     yahoo_cached_ns: int
     yahoo_cached_bo: int
+    schema_version: int
     provenance: BuildProvenance | None = None
     imports: list[ImportRecord] = field(default_factory=list)
 
@@ -344,6 +353,33 @@ def read_import_provenance(con: sqlite3.Connection) -> list[ImportRecord]:
     ]
 
 
+def read_schema_version(con: sqlite3.Connection) -> int:
+    """Return the file's schema number: SCHEMA_VERSION or an earlier one, or 0 if written before Stocky recorded it."""
+    return con.execute("PRAGMA user_version").fetchone()[0]
+
+
+def describe_schema_version(schema_version: int) -> str:
+    if schema_version == 0:
+        return "0 (written before Stocky recorded a schema number)"
+    return str(schema_version)
+
+
+def write_schema_version(con: sqlite3.Connection, *, replaces_consolidated: bool = False) -> None:
+    """Record SCHEMA_VERSION inside the caller's write transaction, so it commits or rolls back with the tables.
+
+    Only a rebuild can vouch for consolidated, so a write that leaves that table alone never numbers a file whose
+    consolidated has no number yet or an older one. A v2.0.0 file, for one, has every current column but labels ETFs
+    as equity; stamping it would make the layout check trust a table only a rebuild can bring up to date.
+    """
+    if (
+        not replaces_consolidated
+        and table_exists(con, CONSOLIDATED_TABLE)
+        and (read_schema_version(con) == 0 or older_layout(con) is not None)
+    ):
+        return
+    con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
 def table_exists(con: sqlite3.Connection, table_name: str) -> bool:
     row = con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table_name,)).fetchone()
     return row is not None
@@ -357,15 +393,30 @@ def require_consolidated_table(
     require_consolidated_columns(con, db_path, columns)
 
 
+def older_layout(con: sqlite3.Connection, columns: Sequence[str] = CONSOLIDATED_COLUMNS) -> str | None:
+    """Describe how the consolidated table's layout is older than this Stocky's, or return None when it is not.
+
+    The schema number decides when the file records one. A file written before Stocky recorded it (0) is judged by
+    whether the table has the columns a read needs.
+    """
+    schema_version = read_schema_version(con)
+    if schema_version:
+        if schema_version < CONSOLIDATED_LAYOUT_VERSION:
+            return f"(schema {schema_version}; this Stocky reads schema {CONSOLIDATED_LAYOUT_VERSION} or later)"
+        return None
+    present = {row[1] for row in con.execute(f"PRAGMA table_info({CONSOLIDATED_TABLE})")}
+    missing = [column for column in columns if column not in present]
+    return f"without {', '.join(missing)}" if missing else None
+
+
 def require_consolidated_columns(
     con: sqlite3.Connection, db_path: Path, columns: Sequence[str] = CONSOLIDATED_COLUMNS
 ) -> None:
-    """Fail with a rebuild hint when a table built before the per-exchange columns lacks ones a read needs."""
-    present = {row[1] for row in con.execute(f"PRAGMA table_info({CONSOLIDATED_TABLE})")}
-    missing = [column for column in columns if column not in present]
-    if missing:
+    """Fail with a rebuild hint when the consolidated table has an older layout than a read needs."""
+    problem = older_layout(con, columns)
+    if problem:
         raise RuntimeError(
-            f"The '{CONSOLIDATED_TABLE}' table in {db_path} has an older layout without {', '.join(missing)}. "
+            f"The '{CONSOLIDATED_TABLE}' table in {db_path} has an older layout {problem}. "
             "Run 'stocky rebuild' to recreate it."
         )
 
@@ -545,6 +596,7 @@ def read_status(db_path: Path = DEFAULT_DB_PATH) -> DatabaseStatus:
         yahoo_cached_bo = 0
         provenance = read_latest_provenance(con)
         imports = read_import_provenance(con)
+        schema_version = read_schema_version(con)
         if table_exists(con, YAHOO_RESPONSES_TABLE):
             yahoo_rows, yahoo_oldest_fetch, yahoo_newest_fetch = con.execute(
                 f"SELECT COUNT(*), MIN(fetched_at), MAX(fetched_at) FROM {YAHOO_RESPONSES_TABLE}"
@@ -580,6 +632,7 @@ def read_status(db_path: Path = DEFAULT_DB_PATH) -> DatabaseStatus:
         yahoo_newest_fetch=yahoo_newest_fetch,
         yahoo_cached_ns=yahoo_cached_ns,
         yahoo_cached_bo=yahoo_cached_bo,
+        schema_version=schema_version,
         provenance=provenance,
         imports=imports,
     )
@@ -833,6 +886,9 @@ def import_yahoo_json_cache(
                 fetched_at=fetched_at,
                 source=str(file_path),
             )
+            if not imported:
+                # After the first row, so the number commits or rolls back with the imported rows.
+                write_schema_version(con)
             imported += 1
 
     return JsonImportResult(imported=imported, skipped=skipped)

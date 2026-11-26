@@ -19,7 +19,11 @@ from stocky.brokers import (
     load_upstox,
     search_brokers,
 )
-from stocky.database import connect, read_import_provenance, record_import_provenance
+from stocky.database import (
+    connect,
+    read_import_provenance,
+    record_import_provenance,
+)
 from stocky.pipeline import rebuild_database
 
 GROWW = {
@@ -252,9 +256,11 @@ def test_aliceblue_requires_consolidated(tmp_path, sources):
         import_broker("aliceblue", sources["aliceblue"], db)
 
 
-def test_import_schema_coverage_and_per_broker_replace(tmp_path, seed_consolidated, sources):
+def test_import_schema_coverage_and_per_broker_replace(numbered_one_behind, tmp_path, seed_consolidated, sources):
     db = tmp_path / "stocky.db"
     seed_consolidated(db)
+    # Numbered as a rebuild numbers it, one version behind, so the write below must record the number.
+    current = numbered_one_behind(db)
     with sqlite3.connect(db) as con:
         before = con.execute("SELECT * FROM consolidated").fetchall()
     for broker in ("groww", "upstox", "aliceblue"):
@@ -268,6 +274,7 @@ def test_import_schema_coverage_and_per_broker_replace(tmp_path, seed_consolidat
     assert [row[2] for row in _read(db) if row[0] == "groww"] == ["999"]
     with sqlite3.connect(db) as con:
         assert con.execute("SELECT * FROM consolidated").fetchall() == before
+        assert con.execute("PRAGMA user_version").fetchone()[0] == current
         assert [(r[1], r[2], r[5]) for r in con.execute("PRAGMA table_info(broker_symbols)")] == [
             (col, "TEXT", {"broker": 1, "exchange": 2, "exchange_token": 3}.get(col, 0)) for col in BROKER_COLUMNS
         ]

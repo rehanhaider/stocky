@@ -3,8 +3,9 @@ import sqlite3
 
 import pytest
 
+import stocky.database as database
 from stocky.cli import app
-from stocky.database import connect, encode_response_json, initialize_database, upsert_yahoo_response
+from stocky.database import SCHEMA_VERSION, connect, encode_response_json, initialize_database, upsert_yahoo_response
 from stocky.pipeline import rebuild_database
 from stocky.summary import build_refresh_summary, render_markdown
 
@@ -70,8 +71,10 @@ def test_summary_of_a_refreshed_database_passes_and_lists_sources_counts_and_gap
         # The legacy fixture bhavcopy has no BSE trading symbol, so no BSE ticker is listed.
         ("BSE", 0, 0),
     ]
+    assert summary.schema_version == SCHEMA_VERSION
     markdown = render_markdown(summary)
     assert "**Validation: passed**" in markdown
+    assert f"Database schema: {SCHEMA_VERSION}." in markdown
     assert "| BSE bhavcopy | `BSE-EQ_ISINCODE_030521.CSV` | 2021-05-03 | 1 |" in markdown
     assert "| `yahoo_responses` | 1 |" in markdown
     assert "| `yq_ns` | 1 | 0 | 100.0% |" in markdown
@@ -187,6 +190,33 @@ def test_summary_reports_an_older_layout_without_failing_to_run(tmp_path) -> Non
     assert "**Validation: FAILED**" in render_markdown(summary)
 
 
+def test_summary_reports_a_file_written_before_the_schema_number_and_checks_its_columns(
+    tmp_path, seed_consolidated
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    summary = build_refresh_summary(db_path)
+
+    assert summary.schema_version == 0
+    assert _checks(summary)["Consolidated table layout"] is True
+    assert "Database schema: 0 (written before Stocky recorded a schema number)." in render_markdown(summary)
+
+
+def test_summary_reports_an_older_schema_number_without_failing_to_run(
+    tmp_path, market_csv_builder, monkeypatch
+) -> None:
+    db_path = _rebuilt_database(tmp_path, market_csv_builder)
+    monkeypatch.setattr(database, "CONSOLIDATED_LAYOUT_VERSION", SCHEMA_VERSION + 1)
+
+    summary = build_refresh_summary(db_path)
+
+    (layout,) = [check for check in summary.checks if check.name == "Consolidated table layout"]
+    assert layout.passed is False
+    assert f"schema {SCHEMA_VERSION}; this Stocky reads schema {SCHEMA_VERSION + 1} or later" in layout.detail
+    assert summary.status is None
+
+
 def test_summary_rejects_a_missing_database(tmp_path) -> None:
     with pytest.raises(FileNotFoundError, match="Database not found"):
         build_refresh_summary(tmp_path / "missing.db")
@@ -232,6 +262,7 @@ def test_summary_command_writes_the_summary_and_then_fails_on_a_failed_check(
     )
     assert payload["passed"] is False
     assert payload["table_counts"] == {"consolidated": 4}
+    assert payload["schema_version"] == 0
 
 
 def test_summary_command_reports_a_missing_database(tmp_path, runner) -> None:
@@ -239,3 +270,15 @@ def test_summary_command_reports_a_missing_database(tmp_path, runner) -> None:
 
     assert result.exit_code == 1
     assert "Database not found" in result.stderr
+
+
+def test_summary_says_when_the_consolidated_table_is_missing(tmp_path) -> None:
+    db_path = tmp_path / "stocky.db"
+    with sqlite3.connect(db_path) as con:
+        con.execute("CREATE TABLE unrelated (x TEXT)")
+
+    summary = build_refresh_summary(db_path)
+
+    layout = {check.name: check for check in summary.checks}["Consolidated table layout"]
+    assert not layout.passed
+    assert layout.detail == "No consolidated table. Run 'stocky rebuild' to create it."

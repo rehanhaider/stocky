@@ -22,6 +22,7 @@ from stocky.database import (
     read_yahoo_fetch_times,
     split_yahoo_symbol,
     upsert_yahoo_response,
+    write_schema_version,
 )
 
 COMMIT_EVERY = 25
@@ -272,6 +273,9 @@ class YahooDataManager:
                         response_json=encode_response_json(data),
                         source="yahooquery",
                     )
+                    if not written:
+                        # After the first row, so the number commits or rolls back with this run's rows.
+                        write_schema_version(con)
                     written += 1
                     if written % COMMIT_EVERY == 0:
                         con.commit()

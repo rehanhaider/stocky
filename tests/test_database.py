@@ -7,6 +7,7 @@ import pytest
 import stocky.database as database
 from stocky.database import (
     CONSOLIDATED_TABLE,
+    SCHEMA_VERSION,
     BackupPruneError,
     backup_database,
     connect,
@@ -16,12 +17,14 @@ from stocky.database import (
     has_sgb_rows,
     import_yahoo_json_cache,
     initialize_database,
+    older_layout,
     prune_backups,
     read_available_yahoo_symbols,
     read_status,
     search_instruments,
     split_yahoo_symbol,
     upsert_yahoo_response,
+    write_schema_version,
 )
 
 
@@ -59,6 +62,7 @@ def test_import_yahoo_json_cache_to_sqlite(tmp_path) -> None:
         stored_payload = con.execute(
             "SELECT response_json FROM yahoo_responses WHERE yahoo_symbol = 'RELIANCE.NS'"
         ).fetchone()[0]
+        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert decode_response_json(stored_payload) == reliance
 
 
@@ -128,6 +132,79 @@ def test_older_consolidated_layout_asks_for_a_rebuild(tmp_path) -> None:
     ):
         with pytest.raises(RuntimeError, match="older layout without .*Run 'stocky rebuild'"):
             read()
+
+
+def test_read_status_reports_the_schema_number_and_zero_for_a_file_written_before_it(
+    tmp_path, seed_consolidated
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    assert read_status(db_path).schema_version == 0
+
+    with connect(db_path) as con:
+        write_schema_version(con, replaces_consolidated=True)
+    assert read_status(db_path).schema_version == SCHEMA_VERSION
+
+
+def test_layout_check_uses_the_schema_number_when_the_file_records_one(
+    tmp_path, seed_consolidated, monkeypatch
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    with connect(db_path) as con:
+        write_schema_version(con, replaces_consolidated=True)
+    monkeypatch.setattr(database, "CONSOLIDATED_LAYOUT_VERSION", SCHEMA_VERSION + 1)
+
+    for read in (
+        lambda: read_status(db_path),
+        lambda: search_instruments("RELIANCE", db_path),
+        lambda: fetch_consolidated_symbols(db_path, key="yq_bo"),
+    ):
+        with pytest.raises(
+            RuntimeError,
+            match=rf"older layout \(schema {SCHEMA_VERSION}; this Stocky reads schema {SCHEMA_VERSION + 1} or later\)",
+        ):
+            read()
+
+
+def test_layout_check_trusts_a_current_schema_number_over_the_columns(tmp_path) -> None:
+    db_path = tmp_path / "stocky.db"
+    with connect(db_path) as con:
+        con.execute(f"CREATE TABLE {CONSOLIDATED_TABLE} (isin TEXT, zd_symbol TEXT)")
+        assert older_layout(con) == "without ins_type, nse_symbol, bse_symbol, bse_sc_code, bse_sc_name, " + (
+            "zd_ns, zd_bo, yq_ns, yq_bo"
+        )
+        write_schema_version(con, replaces_consolidated=True)
+        assert older_layout(con) is None
+
+
+def test_a_schema_bump_for_another_table_keeps_consolidated_readable(tmp_path, seed_consolidated, monkeypatch) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    with connect(db_path) as con:
+        write_schema_version(con, replaces_consolidated=True)
+    monkeypatch.setattr(database, "SCHEMA_VERSION", SCHEMA_VERSION + 1)
+
+    assert read_status(db_path).schema_version == SCHEMA_VERSION
+    assert search_instruments("RELIANCE", db_path).matches
+
+
+def test_a_write_beside_an_older_consolidated_layout_keeps_the_file_unnumbered(tmp_path) -> None:
+    db_path = tmp_path / "stocky.db"
+    with connect(db_path) as con:
+        con.execute(f"CREATE TABLE {CONSOLIDATED_TABLE} (isin TEXT, zd_symbol TEXT)")
+        write_schema_version(con)
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 0
+    with pytest.raises(RuntimeError, match="older layout without ins_type"):
+        search_instruments("RELIANCE", db_path)
+
+
+def test_a_write_without_a_consolidated_table_records_the_schema_number(tmp_path) -> None:
+    db_path = tmp_path / "stocky.db"
+    with connect(db_path) as con:
+        write_schema_version(con)
+        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_read_status_reports_counts_and_coverage(tmp_path, seed_consolidated) -> None:
@@ -605,6 +682,45 @@ def test_prune_backups_skips_a_backup_another_rebuild_already_removed(tmp_path, 
     assert sorted(backup_dir.iterdir()) == [backups[2]]
 
 
+def test_a_failed_cache_import_rolls_the_schema_number_back_with_its_rows(tmp_path, monkeypatch) -> None:
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    for symbol in ("INFY.BO", "RELIANCE.NS"):
+        (cache_dir / f"{symbol}.json").write_text(
+            json.dumps({symbol: {"quoteType": {"quoteType": "EQUITY", "shortName": symbol}}}),
+            encoding="utf-8",
+        )
+    db_path = tmp_path / "stocky.db"
+    upsert = database.upsert_yahoo_response
+    calls = []
+
+    def failing(*args, **kwargs):
+        calls.append(kwargs["yahoo_symbol"])
+        if len(calls) == 2:
+            raise RuntimeError("disk full")
+        upsert(*args, **kwargs)
+
+    monkeypatch.setattr(database, "upsert_yahoo_response", failing)
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        import_yahoo_json_cache(cache_dir, db_path)
+
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM yahoo_responses").fetchone()[0] == 0
+
+
+def test_an_empty_cache_import_records_no_schema_number(tmp_path) -> None:
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    db_path = tmp_path / "stocky.db"
+
+    assert import_yahoo_json_cache(cache_dir, db_path).imported == 0
+
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 0
+
+
 def test_prune_backups_keeps_the_current_backup_when_older_names_sort_after_it(tmp_path, old_backups) -> None:
     # After the clock goes back, the backup just taken can carry an earlier time than ones already there.
     backup_dir = tmp_path / "backups"
@@ -678,3 +794,18 @@ def test_prune_orphans_reports_the_committed_count_when_vacuum_fails(tmp_path, s
     assert error.value.pruned == 1
     with sqlite3.connect(db_path) as con:
         assert con.execute("SELECT COUNT(*) FROM yahoo_responses").fetchone()[0] == 0
+
+
+def test_only_a_rebuild_numbers_a_file_whose_consolidated_has_no_number(tmp_path, seed_consolidated) -> None:
+    # A v2.0.0 file has every current column but older ins_type values, so the columns cannot vouch for it.
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    with connect(db_path) as con:
+        write_schema_version(con)
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 0
+        write_schema_version(con, replaces_consolidated=True)
+        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        # Once numbered, other writes keep recording the number.
+        write_schema_version(con)
+        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION

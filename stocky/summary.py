@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,16 +10,18 @@ from stocky.brokers import BROKER_TABLE
 from stocky.bse_debt import BSE_DEBT_TABLE
 from stocky.config import DEFAULT_DB_PATH
 from stocky.database import (
-    CONSOLIDATED_COLUMNS,
     CONSOLIDATED_TABLE,
     YAHOO_RESPONSES_TABLE,
     BuildProvenance,
     DatabaseStatus,
     ImportRecord,
     connect,
+    describe_schema_version,
     missing_database_message,
+    older_layout,
     read_import_provenance,
     read_latest_provenance,
+    read_schema_version,
     read_status,
     table_exists,
 )
@@ -75,6 +78,7 @@ class RefreshSummary:
     db_path: Path
     generated_at: str
     stocky_version: str
+    schema_version: int
     passed: bool
     checks: list[Check]
     provenance: BuildProvenance | None
@@ -88,144 +92,50 @@ def _populated(column: str) -> str:
     return f"({column} IS NOT NULL AND TRIM({column}) != '')"
 
 
-def build_refresh_summary(
-    db_path: Path = DEFAULT_DB_PATH,
-    *,
-    sample_size: int = DEFAULT_MISSING_SAMPLE_SIZE,
-) -> RefreshSummary:
-    """Validate a rebuilt database and collect what a refresh review needs: sources, counts, and gaps."""
-    if not db_path.exists():
-        raise FileNotFoundError(missing_database_message(db_path, "stocky rebuild"))
-    if sample_size < 0:
-        raise ValueError("Sample size must not be negative.")
-
-    checks: list[Check] = []
-    missing_yahoo: list[MissingYahooTickers] = []
-    with connect(db_path) as con:
-        table_counts = {
-            name: con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
-            for (name,) in con.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
-            ).fetchall()
-        }
-        provenance = read_latest_provenance(con)
-        imports = read_import_provenance(con)
-        # Each broker is imported, and recorded, on its own, so every broker with rows needs its own record.
-        brokers_with_rows = (
-            [row[0] for row in con.execute(f"SELECT DISTINCT broker FROM {BROKER_TABLE} ORDER BY broker")]
-            if table_exists(con, BROKER_TABLE)
-            else []
-        )
-
-        present = (
-            {row[1] for row in con.execute(f"PRAGMA table_info({CONSOLIDATED_TABLE})")}
-            if table_exists(con, CONSOLIDATED_TABLE)
-            else set()
-        )
-        missing_columns = [column for column in CONSOLIDATED_COLUMNS if column not in present]
-        layout_ok = not missing_columns
-        checks.append(
-            Check(
-                "Consolidated table layout",
-                layout_ok,
-                "All columns present."
-                if layout_ok
-                else f"Missing {', '.join(missing_columns)}. Run 'stocky rebuild' to recreate the table.",
-            )
-        )
-
-        rows = table_counts.get(CONSOLIDATED_TABLE, 0)
-        checks.append(Check("Consolidated rows", rows > 0, f"{rows} rows."))
-
-        if layout_ok:
-            empty, duplicates = con.execute(
-                f"""
-                SELECT
-                    SUM(NOT {_populated("isin")}),
-                    COUNT(isin) - COUNT(DISTINCT isin)
-                FROM {CONSOLIDATED_TABLE}
-                """
-            ).fetchone()
-            empty, duplicates = empty or 0, duplicates or 0
-            checks.append(
-                Check(
-                    "ISINs present and unique",
-                    empty == 0 and duplicates == 0,
-                    f"{empty} empty, {duplicates} duplicated.",
-                )
-            )
-
-            mismatches = []
-            for exchange, ticker_column, symbol_column, suffix in YAHOO_TICKER_SOURCES:
-                count = con.execute(
-                    f"""
-                    SELECT COUNT(*) FROM {CONSOLIDATED_TABLE}
-                    WHERE CASE WHEN {_populated(symbol_column)} THEN {symbol_column} || ? ELSE '' END
-                        != COALESCE({ticker_column}, '')
-                    """,
-                    (suffix,),
-                ).fetchone()[0]
-                if count:
-                    mismatches.append(f"{count} {exchange} ({ticker_column})")
-            checks.append(
-                Check(
-                    "Yahoo tickers follow exchange symbols",
-                    not mismatches,
-                    "Every ticker is its exchange symbol plus the suffix."
-                    if not mismatches
-                    else f"Rows that differ: {', '.join(mismatches)}.",
-                )
-            )
-
-            has_yahoo = table_exists(con, YAHOO_RESPONSES_TABLE)
-            for exchange, ticker_column, _, _ in YAHOO_TICKER_SOURCES:
-                cached = f"{ticker_column} IN (SELECT yahoo_symbol FROM {YAHOO_RESPONSES_TABLE})" if has_yahoo else "0"
-                listed = con.execute(
-                    f"SELECT COUNT(DISTINCT {ticker_column}) FROM {CONSOLIDATED_TABLE} WHERE {_populated(ticker_column)}"
-                ).fetchone()[0]
-                missing_query = f"""
-                    SELECT DISTINCT {ticker_column} FROM {CONSOLIDATED_TABLE}
-                    WHERE {_populated(ticker_column)} AND NOT ({cached})
-                    ORDER BY {ticker_column}
-                """
-                missing = [row[0] for row in con.execute(missing_query).fetchall()]
-                missing_yahoo.append(
-                    MissingYahooTickers(
-                        exchange=exchange,
-                        column=ticker_column,
-                        listed=listed,
-                        missing=len(missing),
-                        sample=missing[:sample_size],
-                    )
-                )
-
-    if provenance is None:
-        checks.append(Check("Source provenance", False, "No build recorded. Run 'stocky rebuild' to record it."))
+def _layout_check(con: sqlite3.Connection, schema_version: int) -> Check:
+    """Whether consolidated exists in the layout this Stocky reads."""
+    if not table_exists(con, CONSOLIDATED_TABLE):
+        return Check("Consolidated table layout", False, "No consolidated table. Run 'stocky rebuild' to create it.")
+    problem = older_layout(con)
+    if problem is not None:
+        detail = f"Older layout {problem}. Run 'stocky rebuild' to recreate the table."
+    elif schema_version:
+        detail = f"Schema {schema_version}."
     else:
-        checks.append(
-            Check(
-                "Source provenance",
-                provenance.consolidated_rows == rows,
-                f"Build {provenance.build_id} recorded {provenance.consolidated_rows} rows; the table has {rows}.",
-            )
-        )
-        trade_dates = {
-            source.role: source.trade_date for source in provenance.sources if source.role != "zerodha_instruments"
-        }
-        dates = set(trade_dates.values())
-        checks.append(
-            Check(
-                "Bhavcopy trade dates agree",
-                len(trade_dates) == 2 and len(dates) == 1 and None not in dates,
-                ", ".join(
-                    f"{SOURCE_LABELS.get(role, role)} {value or 'unknown'}" for role, value in trade_dates.items()
-                )
-                + "."
-                if trade_dates
-                else "No bhavcopies recorded.",
-            )
-        )
+        detail = "All columns present."
+    return Check("Consolidated table layout", problem is None, detail)
 
+
+def _provenance_checks(provenance: BuildProvenance | None, rows: int) -> list[Check]:
+    """Whether the recorded build matches the table, and its two bhavcopies share one trade date."""
+    if provenance is None:
+        return [Check("Source provenance", False, "No build recorded. Run 'stocky rebuild' to record it.")]
+    trade_dates = {
+        source.role: source.trade_date for source in provenance.sources if source.role != "zerodha_instruments"
+    }
+    dates = set(trade_dates.values())
+    return [
+        Check(
+            "Source provenance",
+            provenance.consolidated_rows == rows,
+            f"Build {provenance.build_id} recorded {provenance.consolidated_rows} rows; the table has {rows}.",
+        ),
+        Check(
+            "Bhavcopy trade dates agree",
+            len(trade_dates) == 2 and len(dates) == 1 and None not in dates,
+            ", ".join(f"{SOURCE_LABELS.get(role, role)} {value or 'unknown'}" for role, value in trade_dates.items())
+            + "."
+            if trade_dates
+            else "No bhavcopies recorded.",
+        ),
+    ]
+
+
+def _import_checks(
+    table_counts: dict[str, int], imports: list[ImportRecord], brokers_with_rows: list[str]
+) -> list[Check]:
+    """One check per mapping table: it has rows and an import record, and so does every broker with rows."""
+    checks = []
     for table_name, command in MAPPING_TABLES.items():
         table_rows = table_counts.get(table_name, 0)
         records = [record for record in imports if record.table_name == table_name]
@@ -251,11 +161,125 @@ def build_refresh_summary(
                 + "' to record it."
             )
         checks.append(Check(f"{table_name} import", bool(table_rows and records and not unrecorded), detail))
+    return checks
+
+
+def _consolidated_checks(con: sqlite3.Connection, sample_size: int) -> tuple[list[Check], list[MissingYahooTickers]]:
+    """ISIN and Yahoo ticker checks on a current-layout consolidated table, and each exchange's uncached tickers."""
+    checks: list[Check] = []
+    missing_yahoo: list[MissingYahooTickers] = []
+    empty, duplicates = con.execute(
+        f"""
+        SELECT
+            SUM(NOT {_populated("isin")}),
+            COUNT(isin) - COUNT(DISTINCT isin)
+        FROM {CONSOLIDATED_TABLE}
+        """
+    ).fetchone()
+    empty, duplicates = empty or 0, duplicates or 0
+    checks.append(
+        Check(
+            "ISINs present and unique",
+            empty == 0 and duplicates == 0,
+            f"{empty} empty, {duplicates} duplicated.",
+        )
+    )
+
+    mismatches = []
+    for exchange, ticker_column, symbol_column, suffix in YAHOO_TICKER_SOURCES:
+        count = con.execute(
+            f"""
+            SELECT COUNT(*) FROM {CONSOLIDATED_TABLE}
+            WHERE CASE WHEN {_populated(symbol_column)} THEN {symbol_column} || ? ELSE '' END
+                != COALESCE({ticker_column}, '')
+            """,
+            (suffix,),
+        ).fetchone()[0]
+        if count:
+            mismatches.append(f"{count} {exchange} ({ticker_column})")
+    checks.append(
+        Check(
+            "Yahoo tickers follow exchange symbols",
+            not mismatches,
+            "Every ticker is its exchange symbol plus the suffix."
+            if not mismatches
+            else f"Rows that differ: {', '.join(mismatches)}.",
+        )
+    )
+
+    has_yahoo = table_exists(con, YAHOO_RESPONSES_TABLE)
+    for exchange, ticker_column, _, _ in YAHOO_TICKER_SOURCES:
+        cached = f"{ticker_column} IN (SELECT yahoo_symbol FROM {YAHOO_RESPONSES_TABLE})" if has_yahoo else "0"
+        listed = con.execute(
+            f"SELECT COUNT(DISTINCT {ticker_column}) FROM {CONSOLIDATED_TABLE} WHERE {_populated(ticker_column)}"
+        ).fetchone()[0]
+        missing_query = f"""
+            SELECT DISTINCT {ticker_column} FROM {CONSOLIDATED_TABLE}
+            WHERE {_populated(ticker_column)} AND NOT ({cached})
+            ORDER BY {ticker_column}
+        """
+        missing = [row[0] for row in con.execute(missing_query).fetchall()]
+        missing_yahoo.append(
+            MissingYahooTickers(
+                exchange=exchange,
+                column=ticker_column,
+                listed=listed,
+                missing=len(missing),
+                sample=missing[:sample_size],
+            )
+        )
+    return checks, missing_yahoo
+
+
+def build_refresh_summary(
+    db_path: Path = DEFAULT_DB_PATH,
+    *,
+    sample_size: int = DEFAULT_MISSING_SAMPLE_SIZE,
+) -> RefreshSummary:
+    """Validate a rebuilt database and collect what a refresh review needs: sources, counts, and gaps."""
+    if not db_path.exists():
+        raise FileNotFoundError(missing_database_message(db_path, "stocky rebuild"))
+    if sample_size < 0:
+        raise ValueError("Sample size must not be negative.")
+
+    checks: list[Check] = []
+    missing_yahoo: list[MissingYahooTickers] = []
+    with connect(db_path) as con:
+        table_counts = {
+            name: con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
+            for (name,) in con.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            ).fetchall()
+        }
+        provenance = read_latest_provenance(con)
+        imports = read_import_provenance(con)
+        schema_version = read_schema_version(con)
+        # Each broker is imported, and recorded, on its own, so every broker with rows needs its own record.
+        brokers_with_rows = (
+            [row[0] for row in con.execute(f"SELECT DISTINCT broker FROM {BROKER_TABLE} ORDER BY broker")]
+            if table_exists(con, BROKER_TABLE)
+            else []
+        )
+
+        layout = _layout_check(con, schema_version)
+        layout_ok = layout.passed
+        checks.append(layout)
+
+        rows = table_counts.get(CONSOLIDATED_TABLE, 0)
+        checks.append(Check("Consolidated rows", rows > 0, f"{rows} rows."))
+
+        if layout_ok:
+            consolidated_checks, missing_yahoo = _consolidated_checks(con, sample_size)
+            checks.extend(consolidated_checks)
+
+    checks.extend(_provenance_checks(provenance, rows))
+    checks.extend(_import_checks(table_counts, imports, brokers_with_rows))
 
     return RefreshSummary(
         db_path=db_path,
         generated_at=datetime.now(UTC).isoformat(),
         stocky_version=__version__,
+        schema_version=schema_version,
         passed=all(check.passed for check in checks),
         checks=checks,
         provenance=provenance,
@@ -280,6 +304,8 @@ def render_markdown(summary: RefreshSummary) -> str:
         "",
         f"Generated {_timestamp(summary.generated_at)} by Stocky {summary.stocky_version} "
         f"from `{summary.db_path.as_posix()}`.",
+        "",
+        f"Database schema: {describe_schema_version(summary.schema_version)}.",
         "",
         f"**Validation: {'passed' if summary.passed else 'FAILED'}**",
         "",
