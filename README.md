@@ -17,8 +17,8 @@ symbols, and the separate `mutual_funds`, `bse_debt`, `indices`, and `broker_sym
 
 ## Release data
 
-Release `v3.0.0` adds the `bse_debt`, `mutual_funds`, `indices`, `broker_symbols`, and `provenance_imports` tables,
-labels ETFs and sovereign gold bonds in `ins_type`, and records a schema number in the file. See the
+Release `v3.0.0` adds the `bse_debt`, `mutual_funds`, `indices`, and `broker_symbols` tables and the three provenance
+tables, labels ETFs and sovereign gold bonds in `ins_type`, and records a schema number in the file. See the
 [v3.0.0 release notes](docs/releases/v3.0.0.md) for the breaking changes, source dates, and row counts, and the
 [v2.0.0 notes](docs/releases/v2.0.0.md) for the earlier column change. `data/output/stocky.db` is versioned with the
 repository; pin the release tag to use that database version.
