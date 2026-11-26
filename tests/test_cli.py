@@ -12,6 +12,7 @@ import pytest
 import typer
 
 import stocky.cli as cli
+import stocky.pipeline as pipeline
 from stocky import __version__
 from stocky.cli import app
 from stocky.database import connect, encode_response_json, initialize_database, upsert_yahoo_response
@@ -1080,6 +1081,30 @@ def test_interactive_rebuild_previews_and_writes_database(tmp_path, market_csv_b
     with sqlite3.connect(db_path) as con:
         assert con.execute("SELECT COUNT(*) FROM consolidated").fetchone()[0] == 1
     assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_rebuild_prints_a_warning_raised_during_the_write(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups, monkeypatch, runner
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 5, 3))
+    db_path = tmp_path / "data" / "output" / "stocky.db"
+    db_path.parent.mkdir(parents=True)
+    seed_consolidated(db_path)
+    _use_interactive_defaults(monkeypatch, paths, db_path)
+    monkeypatch.chdir(tmp_path)
+    old_backups(tmp_path / "data" / "output" / "backup", db_path.name, 7)
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("backup folder is read-only")
+
+    monkeypatch.setattr(pipeline, "prune_backups", refuse)
+
+    result = runner.invoke(app, ["interactive"], input="1\n1\n\ny\n6\n")
+
+    assert result.exit_code == 0
+    message = " ".join(result.stdout.split())
+    assert "Rebuild failed" not in message
+    assert "Warning: The rebuild was written, but removing old backups in data/output/backup failed:" in message
 
 
 def test_interactive_rebuild_keeps_five_backups(

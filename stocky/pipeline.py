@@ -13,6 +13,7 @@ from stocky.config import DEFAULT_BACKUP_DIR, DEFAULT_DB_PATH, DEFAULT_KEEP_BACK
 from stocky.database import (
     CONSOLIDATED_COLUMNS,
     CONSOLIDATED_TABLE,
+    BackupPruneError,
     BuildProvenance,
     SourceRecord,
     backup_database,
@@ -629,9 +630,10 @@ def rebuild_database(
     removed_backups = []
     if backup and backups_belong_to(db_path, backup_dir):
         try:
-            removed_backups = prune_backups(db_path, backup_dir, keep_backups)
+            removed_backups = prune_backups(db_path, backup_dir, keep_backups, current=backup_path)
         except OSError as exc:
             # The table is already written, so a backup that cannot be removed must not report the rebuild as failed.
+            removed_backups = exc.removed if isinstance(exc, BackupPruneError) else []
             warnings.append(f"The rebuild was written, but removing old backups in {backup_dir} failed: {exc}")
 
     return result(backup_path=backup_path, build_id=build_id, removed_backups=removed_backups)
