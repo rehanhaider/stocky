@@ -127,6 +127,24 @@ def test_summary_fails_when_a_mapping_table_has_no_import_record(
     )
 
 
+def test_summary_fails_when_one_broker_with_rows_has_no_import_record(
+    tmp_path, market_csv_builder, import_mapping_tables
+) -> None:
+    db_path = _refreshed_database(tmp_path, market_csv_builder, import_mapping_tables)
+    with sqlite3.connect(db_path) as con:
+        # Upstox rows left from before imports recorded their source files, beside a recorded Groww import.
+        con.execute(
+            "INSERT INTO broker_symbols (broker, exchange, exchange_token, isin, symbol, broker_key, name) "
+            "VALUES ('upstox', 'NSE', '2885', 'INE002A01018', 'RELIANCE', 'NSE_EQ|INE002A01018', 'Reliance')"
+        )
+
+    summary = build_refresh_summary(db_path)
+
+    assert [check.name for check in summary.checks if not check.passed] == ["broker_symbols import"]
+    detail = {check.name: check.detail for check in summary.checks}["broker_symbols import"]
+    assert detail.endswith("No import recorded for upstox. Run 'stocky brokers import --broker upstox' to record it.")
+
+
 def test_summary_fails_when_a_mapping_table_is_empty(tmp_path, market_csv_builder, import_mapping_tables) -> None:
     db_path = _refreshed_database(tmp_path, market_csv_builder, import_mapping_tables)
     with sqlite3.connect(db_path) as con:

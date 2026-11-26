@@ -115,6 +115,12 @@ def build_refresh_summary(
         provenance = read_latest_provenance(con)
         imports = read_import_provenance(con)
         schema_version = read_schema_version(con)
+        # Each broker is imported, and recorded, on its own, so every broker with rows needs its own record.
+        brokers_with_rows = (
+            [row[0] for row in con.execute(f"SELECT DISTINCT broker FROM {BROKER_TABLE} ORDER BY broker")]
+            if table_exists(con, BROKER_TABLE)
+            else []
+        )
 
         problem = (
             older_layout(con) if table_exists(con, CONSOLIDATED_TABLE) else f"without {', '.join(CONSOLIDATED_COLUMNS)}"
@@ -233,7 +239,18 @@ def build_refresh_summary(
                 + ", ".join(f"`{record.file_name}` (modified {record.modified_at[:10]})" for record in records)
                 + "."
             )
-        checks.append(Check(f"{table_name} import", bool(table_rows and records), detail))
+        unrecorded = []
+        if table_name == BROKER_TABLE:
+            # Alice Blue records its two files as aliceblue_nse and aliceblue_bse.
+            recorded = {record.role.split("_")[0] for record in records}
+            unrecorded = [broker for broker in brokers_with_rows if broker not in recorded]
+        if records and unrecorded:
+            detail += (
+                f" No import recorded for {', '.join(unrecorded)}. Run '{command} "
+                + " ".join(f"--broker {broker}" for broker in unrecorded)
+                + "' to record it."
+            )
+        checks.append(Check(f"{table_name} import", bool(table_rows and records and not unrecorded), detail))
 
     return RefreshSummary(
         db_path=db_path,

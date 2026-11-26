@@ -81,10 +81,13 @@ uv sync
     - Legacy files before 2024-07-08 use the older `NSE-cmDDMONYYYYbhav.csv` filename convention.
     - This project treats exchange bhavcopies as manually downloaded local inputs; do not add automated NSE downloads here.
 3. Zerodha Instruments: Download from `https://api.kite.trade/instruments`
-4. Optional, for mutual funds: Zerodha mutual fund instruments from `https://api.kite.trade/mf/instruments`
+4. Mutual funds: Zerodha mutual fund instruments from `https://api.kite.trade/mf/instruments`
    and AMFI scheme codes from `https://www.amfiindia.com/spages/NAVAll.txt`. Both files are required for `mf import`.
-5. Optional, for BSE debt: download `https://www.bseindia.com/download/BhavCopy/Debt/DEBTBHAVCOPY<DDMMYYYY>.zip`,
+5. BSE debt: download `https://www.bseindia.com/download/BhavCopy/Debt/DEBTBHAVCOPY<DDMMYYYY>.zip`,
    replacing `<DDMMYYYY>` with the trade date, such as `16102026`.
+
+`stocky summary` fails when the `mutual_funds`, `bse_debt`, `indices`, or `broker_symbols` table is empty, so a full
+refresh needs all of these files.
 
 ### Then place these files in the following locations
 1. BSE Bhavcopy: `data/marketData/bhavCopies`
@@ -185,7 +188,9 @@ records. For the AMFI file of `mf import`, the row count is the number of scheme
 Before it writes, a rebuild copies the current database into `data/output/backup/`. After a successful write it keeps
 the newest 5 backups of that database and prints each older one it removes; `--keep N` keeps N instead. A dry run, a
 failed rebuild, or `--no-backup` removes nothing, and files in that folder that are not this database's backups are
-never touched. The menu and TUI rebuilds keep 5.
+never touched. The menu and TUI rebuilds keep 5. The backup folder does not follow `--db-path`, so a database outside
+`data/output` still backs up there, and its rebuilds remove no backups: they could not tell its backups from
+`data/output/stocky.db`'s. If removing an old backup fails, the rebuild is still written and prints a warning.
 
 Rebuild for a specific source date:
 
@@ -277,12 +282,12 @@ uv run stocky mf query 119091 --exact
 ```
 
 Load the newest BSE debt archive by the date in its filename into the `bse_debt` table. Each run replaces that table
-in one transaction and leaves the others as they are; `--file` reads a different archive and `--db` selects a database.
+in one transaction and leaves the others as they are; `--file` reads a different archive and `--db-path` selects a database.
 The 2021 `BSE-DE-*.csv` files are not used:
 
 ```bash
 uv run stocky debt import
-uv run stocky debt import --file data/marketData/bhavCopies/bseDebt/DEBTBHAVCOPY16102026.zip --db data/output/stocky.db
+uv run stocky debt import --file data/marketData/bhavCopies/bseDebt/DEBTBHAVCOPY16102026.zip --db-path data/output/stocky.db
 ```
 
 Look up BSE debt by ISIN, scrip code, symbol, or name fragment. `--exact` matches the ISIN, scrip code, or symbol only.
@@ -295,11 +300,11 @@ uv run stocky debt query INE0K0Y08060 --exact
 
 Load market indices from `data/marketData/zerodha/instruments.csv` into the `indices` table. Each run replaces
 that table in one transaction and leaves the others as they are. A failed import keeps the previous table.
-`--file` reads a different instruments file and `--db` selects a database:
+`--file` reads a different instruments file and `--db-path` selects a database:
 
 ```bash
 uv run stocky indices import
-uv run stocky indices import --file data/marketData/zerodha/instruments.csv --db data/output/stocky.db
+uv run stocky indices import --file data/marketData/zerodha/instruments.csv --db-path data/output/stocky.db
 ```
 
 Look up an index by exact symbol, instrument token, or exchange token, or by symbol or name fragment.
@@ -322,13 +327,13 @@ Download the broker files manually into the ignored folders:
 | https://v2api.aliceblueonline.com/restpy/static/contract_master/BSE.csv | `data/marketData/brokers/aliceblue/BSE.csv` |
 
 Import all three brokers, or repeat `--broker` to select brokers. File options override the default paths;
-`--db` selects the database. The output lists rows, rows with an ISIN, and rows whose ISIN is in `consolidated`
+`--db-path` selects the database. The output lists rows, rows with an ISIN, and rows whose ISIN is in `consolidated`
 for each imported broker and exchange:
 
 ```bash
 uv run stocky brokers import
 uv run stocky brokers import --broker groww --broker upstox
-uv run stocky brokers import --broker aliceblue --aliceblue-nse data/marketData/brokers/aliceblue/NSE.csv --aliceblue-bse data/marketData/brokers/aliceblue/BSE.csv --db data/output/stocky.db
+uv run stocky brokers import --broker aliceblue --aliceblue-nse data/marketData/brokers/aliceblue/NSE.csv --aliceblue-bse data/marketData/brokers/aliceblue/BSE.csv --db-path data/output/stocky.db
 ```
 
 Query by exact ISIN, symbol, exchange token, or broker key, or by symbol/name fragment. `--exact` disables

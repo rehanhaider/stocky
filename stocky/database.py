@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import gzip
 import hashlib
 import json
@@ -430,6 +431,16 @@ def backup_database(
     return backup_path
 
 
+def backups_belong_to(db_path: Path, backup_dir: Path) -> bool:
+    """Whether backup_dir sits beside db_path, so the backups named after it in there are its own.
+
+    Backups are named by timestamp and file name only, and the backup directory does not follow --db-path. A
+    database elsewhere with the same file name backs up into the same folder, and its backups cannot be told
+    apart from that folder's own database's, so only a database beside its backup folder prunes it.
+    """
+    return backup_dir.resolve().parent == db_path.resolve().parent
+
+
 def prune_backups(db_path: Path, backup_dir: Path, keep: int) -> list[Path]:
     """Delete all but the newest ``keep`` backups of ``db_path`` and return the removed paths, oldest first.
 
@@ -447,9 +458,12 @@ def prune_backups(db_path: Path, backup_dir: Path, keep: int) -> list[Path]:
         (path for path in backup_dir.iterdir() if pattern.fullmatch(path.name) and path.is_file()),
         key=lambda path: path.name,
     )
-    removed = backups[:-keep]
-    for path in removed:
-        path.unlink()
+    removed = []
+    for path in backups[:-keep]:
+        # Another rebuild may have removed it first; it is gone either way.
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+            removed.append(path)
     return removed
 
 
@@ -702,12 +716,21 @@ def delete_yahoo_response(con: sqlite3.Connection, yahoo_symbol: str) -> None:
 
 # A response is orphaned once its ticker is in neither Yahoo column of consolidated. The NULL checks
 # matter: NOT IN against a list holding NULL is never true, so it would match no row at all.
-# An empty consolidated table lists no tickers, so every cached response would look orphaned: prune none then.
+# A column that lists no ticker at all says nothing about which of that exchange's responses are stale: an empty
+# table, or a rebuild from legacy bhavcopies, which carry no BSE trading symbol and leave every yq_bo empty, would
+# otherwise make every .NS or .BO response look orphaned. So a .NS or .BO response is pruned only while its own
+# column lists at least one ticker, and any other response only while the table has rows.
 _ORPHAN_YAHOO_RESPONSES = f"""
     FROM {YAHOO_RESPONSES_TABLE}
-    WHERE EXISTS (SELECT 1 FROM {CONSOLIDATED_TABLE})
-      AND yahoo_symbol NOT IN (SELECT yq_ns FROM {CONSOLIDATED_TABLE} WHERE yq_ns IS NOT NULL)
+    WHERE yahoo_symbol NOT IN (SELECT yq_ns FROM {CONSOLIDATED_TABLE} WHERE yq_ns IS NOT NULL)
       AND yahoo_symbol NOT IN (SELECT yq_bo FROM {CONSOLIDATED_TABLE} WHERE yq_bo IS NOT NULL)
+      AND CASE
+          WHEN yahoo_symbol LIKE '%.NS'
+              THEN EXISTS (SELECT 1 FROM {CONSOLIDATED_TABLE} WHERE yq_ns IS NOT NULL AND yq_ns <> '')
+          WHEN yahoo_symbol LIKE '%.BO'
+              THEN EXISTS (SELECT 1 FROM {CONSOLIDATED_TABLE} WHERE yq_bo IS NOT NULL AND yq_bo <> '')
+          ELSE EXISTS (SELECT 1 FROM {CONSOLIDATED_TABLE})
+      END
 """
 
 
