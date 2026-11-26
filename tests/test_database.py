@@ -584,3 +584,19 @@ def test_connect_rolls_back_and_closes_when_its_with_block_raises(tmp_path) -> N
         con.execute("SELECT 1")
     with connect(db_path) as reader:
         assert reader.execute("SELECT COUNT(*) FROM items").fetchone() == (0,)
+
+
+def test_prune_backups_skips_a_backup_another_rebuild_already_removed(tmp_path, old_backups, monkeypatch) -> None:
+    backup_dir = tmp_path / "backups"
+    backups = old_backups(backup_dir, "stocky.db", 3)
+    unlink = type(backups[0]).unlink
+
+    def raced(path, *args, **kwargs):
+        unlink(path, *args, **kwargs)
+        if path == backups[0]:
+            raise FileNotFoundError(path)
+
+    monkeypatch.setattr(type(backups[0]), "unlink", raced)
+
+    assert prune_backups(tmp_path / "stocky.db", backup_dir, keep=1) == [backups[1]]
+    assert sorted(backup_dir.iterdir()) == [backups[2]]
