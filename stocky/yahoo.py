@@ -23,6 +23,10 @@ from stocky.database import (
 COMMIT_EVERY = 25
 CONSECUTIVE_FAILURE_LIMIT = 5
 NOT_FOUND_PREFIX = "Quote not found for"
+# Yahoo answers a request whose crumb or cookie it no longer accepts with "Invalid Crumb" (or, in
+# older answers, "Invalid Cookie") in place of the symbol's payload. yahooquery passes on only an
+# API error's description, never its code, so the text is all there is to match.
+AUTH_FAILURE_MARKERS = ("crumb", "cookie")
 
 ProgressCallback = Callable[[int, int, int, int], None]
 
@@ -62,6 +66,16 @@ def classify_payload(yahoo_symbol: str, data: object, payload: object) -> tuple[
             return "failure", str(data["error"])
         return "failure", f"no payload returned for {yahoo_symbol}"
     return "failure", str(payload)
+
+
+def is_auth_failure(detail: str) -> bool:
+    """Whether a failure's detail says Yahoo rejected the client's crumb or cookie.
+
+    A new client clears this: building one starts a session and requests a fresh crumb
+    (yahooquery base.py:35-38).
+    """
+    lowered = detail.lower()
+    return any(marker in lowered for marker in AUTH_FAILURE_MARKERS)
 
 
 @dataclass(frozen=True)
@@ -188,22 +202,35 @@ class YahooDataManager:
         written = 0
         skipped = 0
         consecutive_failures = 0
+        # Building a yahooquery client starts a session and fetches a crumb, two requests that one
+        # client reused for the whole run makes only once. Each ticker is still its own request: the
+        # symbol is swapped on the client, so one bad answer never spoils another ticker's.
+        client = None
+
+        def fetch(yahoo_symbol: str) -> tuple[Outcome, str, object, Exception | None]:
+            nonlocal client
+            try:
+                if client is None:
+                    client = yq.Ticker(yahoo_symbol)
+                else:
+                    client.symbols = yahoo_symbol
+                data = client.all_modules
+                payload = data.get(yahoo_symbol) if isinstance(data, dict) else None
+            except Exception as exc:
+                return "failure", repr(exc), None, exc
+            outcome, detail = classify_payload(yahoo_symbol, data, payload)
+            return outcome, detail, data, None
 
         # The sqlite3 connection context manager commits on a clean exit, so the
         # writes after the last COMMIT_EVERY boundary are persisted there. The
         # abort path commits explicitly because that exit rolls back instead.
         with connect(self.db_path) as con:
             for index, yahoo_symbol in enumerate(tickers, start=1):
-                cause: Exception | None = None
-                try:
-                    data = yq.Ticker(yahoo_symbol).all_modules
-                    payload = data.get(yahoo_symbol) if isinstance(data, dict) else None
-                except Exception as exc:
-                    cause = exc
-                    outcome: Outcome = "failure"
-                    detail = repr(exc)
-                else:
-                    outcome, detail = classify_payload(yahoo_symbol, data, payload)
+                outcome, detail, data, cause = fetch(yahoo_symbol)
+                if outcome == "failure" and is_auth_failure(detail):
+                    # The crumb or cookie has lapsed: build a new client and try this ticker once more.
+                    client = None
+                    outcome, detail, data, cause = fetch(yahoo_symbol)
 
                 if outcome == "failure":
                     consecutive_failures += 1
