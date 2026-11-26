@@ -20,14 +20,16 @@ from stocky.yahoo import YahooUpdateResult
 
 
 class _FakeTicker:
-    def __init__(self, symbol: str) -> None:
-        self.symbol = symbol
+    """Stands in for ``yahooquery.Ticker``: one client per run, its symbol swapped before each request."""
+
+    def __init__(self, symbols: str) -> None:
+        self.symbols = symbols
 
     @property
     def all_modules(self):
         return {
-            self.symbol: {
-                "quoteType": {"quoteType": "EQUITY", "longName": self.symbol},
+            self.symbols: {
+                "quoteType": {"quoteType": "EQUITY", "longName": self.symbols},
                 "price": {"regularMarketPrice": 100},
             }
         }

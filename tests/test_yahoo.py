@@ -37,8 +37,14 @@ def _seed_cached_response(db_path, yahoo_symbol: str) -> None:
 
 
 class _FakeTicker:
-    def __init__(self, symbol: str) -> None:
-        self.symbol = symbol
+    """Stands in for ``yahooquery.Ticker``: one client per run, its symbol swapped before each request."""
+
+    def __init__(self, symbols: str) -> None:
+        self.symbols = symbols
+
+    @property
+    def symbol(self) -> str:
+        return self.symbols
 
     @property
     def all_modules(self):
@@ -194,9 +200,10 @@ def test_update_fetches_only_the_exchange_column_tickers(tmp_path, monkeypatch, 
     requested: list[str] = []
 
     class RecordingTicker(_FakeTicker):
-        def __init__(self, symbol: str) -> None:
-            super().__init__(symbol)
-            requested.append(symbol)
+        @property
+        def all_modules(self):
+            requested.append(self.symbol)
+            return super().all_modules
 
     fake_module = types.ModuleType("yahooquery")
     fake_module.Ticker = RecordingTicker
@@ -234,10 +241,7 @@ def test_update_drops_a_saved_answer_when_yahoo_now_has_no_usable_data(
     _seed_cached_response(db_path, "ENERGY.BO")
     _seed_cached_response(db_path, "HITECH.BO")
 
-    class CurrentYahoo:
-        def __init__(self, symbol: str) -> None:
-            self.symbol = symbol
-
+    class CurrentYahoo(_FakeTicker):
         @property
         def all_modules(self):
             if self.symbol == "ENERGY.BO":
@@ -257,14 +261,92 @@ def test_update_drops_a_saved_answer_when_yahoo_now_has_no_usable_data(
     assert decode_response_json(blob)["HITECH.BO"]["quoteType"]["longName"] == "Hi-Tech Pipes Limited"
 
 
+def test_update_builds_one_client_for_every_ticker(tmp_path, monkeypatch, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    symbols = ["RELIANCE", "BADSYMBOL", "INFY", "TCS"]
+    seed_consolidated(db_path, [_ticker_row(f"INE{index:03d}", symbol) for index, symbol in enumerate(symbols)])
+    constructions: list[str] = []
+    requested: list[str] = []
+
+    class CountingTicker(_FakeTicker):
+        def __init__(self, symbols: str) -> None:
+            super().__init__(symbols)
+            constructions.append(symbols)
+
+        @property
+        def all_modules(self):
+            requested.append(self.symbol)
+            return super().all_modules
+
+    monkeypatch.setitem(sys.modules, "yahooquery", types.SimpleNamespace(Ticker=CountingTicker))
+
+    result = YahooDataManager(db_path).update_data(exchange="NSE")
+
+    # One client, built for the first ticker, then each later ticker is one request on it.
+    assert constructions == ["RELIANCE.NS"]
+    assert requested == [f"{symbol}.NS" for symbol in symbols]
+    assert (result.processed, result.written, result.skipped) == (4, 3, 1)
+    assert read_available_yahoo_symbols(db_path) == {"RELIANCE.NS", "INFY.NS", "TCS.NS"}
+
+
+def test_update_builds_a_new_client_when_the_crumb_lapses(tmp_path, monkeypatch, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    symbols = [f"SYM{index:02d}" for index in range(5)]
+    seed_consolidated(db_path, [_ticker_row(f"INE{index:03d}", symbol) for index, symbol in enumerate(symbols)])
+    clients: list[_FakeTicker] = []
+    requested: list[tuple[int, str]] = []
+
+    class ExpiringTicker(_FakeTicker):
+        """The first client's crumb lapses after two requests, as Yahoo's does during a long run."""
+
+        def __init__(self, symbols: str) -> None:
+            super().__init__(symbols)
+            self.number = len(clients)
+            self.requests = 0
+            clients.append(self)
+
+        @property
+        def all_modules(self):
+            self.requests += 1
+            requested.append((self.number, self.symbol))
+            if self.number == 0 and self.requests > 2:
+                return {self.symbol: "Invalid Crumb"}
+            return super().all_modules
+
+    monkeypatch.setitem(sys.modules, "yahooquery", types.SimpleNamespace(Ticker=ExpiringTicker))
+    progress = []
+
+    result = YahooDataManager(db_path).update_data(exchange="BSE", progress=lambda *args: progress.append(args))
+
+    # SYM02 meets the lapsed crumb, is retried once on a new client, and that client serves the rest.
+    assert len(clients) == 2
+    assert requested == [
+        (0, "SYM00.BO"),
+        (0, "SYM01.BO"),
+        (0, "SYM02.BO"),
+        (1, "SYM02.BO"),
+        (1, "SYM03.BO"),
+        (1, "SYM04.BO"),
+    ]
+    assert (result.processed, result.written, result.skipped) == (5, 5, 0)
+    assert progress == [(index, 5, index, 0) for index in range(1, 6)]
+    assert read_available_yahoo_symbols(db_path) == {f"{symbol}.BO" for symbol in symbols}
+
+
+def test_is_auth_failure_matches_crumb_and_cookie_answers() -> None:
+    assert yahoo.is_auth_failure("Invalid Crumb")
+    assert yahoo.is_auth_failure("Invalid Cookie")
+    assert yahoo.is_auth_failure("{'code': 'Unauthorized', 'description': 'User is unable to access this feature'}")
+    assert not yahoo.is_auth_failure("Too Many Requests")
+    assert not yahoo.is_auth_failure("HTTP 404 Not Found.  Please try again")
+    assert not yahoo.is_auth_failure("RuntimeError('offline failure')")
+
+
 def test_update_skips_fetch_exceptions(tmp_path, monkeypatch, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path, [_ticker_row("INE001", "BROKEN")])
 
-    class RaisingTicker:
-        def __init__(self, symbol: str) -> None:
-            self.symbol = symbol
-
+    class RaisingTicker(_FakeTicker):
         @property
         def all_modules(self):
             raise RuntimeError("offline failure")
@@ -288,8 +370,15 @@ def test_update_commits_every_25_reports_progress_and_writes_nse(tmp_path, monke
         [_ticker_row(f"INE{index:03d}", symbol) for index, symbol in enumerate(symbols)],
     )
 
+    constructions = []
+
+    class CountingTicker(_FakeTicker):
+        def __init__(self, symbols: str) -> None:
+            super().__init__(symbols)
+            constructions.append(symbols)
+
     fake_module = types.ModuleType("yahooquery")
-    fake_module.Ticker = _FakeTicker
+    fake_module.Ticker = CountingTicker
     monkeypatch.setitem(sys.modules, "yahooquery", fake_module)
 
     commits = []
@@ -322,6 +411,7 @@ def test_update_commits_every_25_reports_progress_and_writes_nse(tmp_path, monke
     assert result.written == 51
     assert result.skipped == 0
     assert commits == [True, True]
+    assert constructions == ["SYM00.NS"]
     assert len(progress) == 51
     assert progress[0] == (1, 51, 1, 0)
     assert progress[-1] == (51, 51, 51, 0)
@@ -350,13 +440,16 @@ def test_update_aborts_after_five_consecutive_failures(tmp_path, monkeypatch, se
     )
 
     attempts = []
+    constructions = []
 
-    class RaisingTicker:
-        def __init__(self, symbol: str) -> None:
-            attempts.append(symbol)
+    class RaisingTicker(_FakeTicker):
+        def __init__(self, symbols: str) -> None:
+            super().__init__(symbols)
+            constructions.append(symbols)
 
         @property
         def all_modules(self):
+            attempts.append(self.symbol)
             raise RuntimeError("offline failure")
 
     fake_module = types.ModuleType("yahooquery")
@@ -369,6 +462,8 @@ def test_update_aborts_after_five_consecutive_failures(tmp_path, monkeypatch, se
 
     message = str(excinfo.value)
     assert len(attempts) == yahoo.CONSECUTIVE_FAILURE_LIMIT
+    # A failure that is not about the crumb or cookie keeps the client.
+    assert len(constructions) == 1
     # The aborting symbol raises before its progress call, so the callback runs
     # once for each of the four symbols that completed.
     assert len(progress) == yahoo.CONSECUTIVE_FAILURE_LIMIT - 1
@@ -418,14 +513,10 @@ def test_update_resets_failure_counter_after_a_success(tmp_path, monkeypatch, se
     # the ninth symbol would be the fifth consecutive failure and abort the run.
     outcomes = iter([False, False, False, False, True, False, False, False, False])
 
-    class FlakyTicker:
-        def __init__(self, symbol: str) -> None:
-            self.symbol = symbol
-            self.succeeds = next(outcomes)
-
+    class FlakyTicker(_FakeTicker):
         @property
         def all_modules(self):
-            if not self.succeeds:
+            if not next(outcomes):
                 raise RuntimeError("temporary failure")
             return {
                 self.symbol: {
@@ -455,14 +546,10 @@ def test_update_resets_failure_counter_after_a_not_found(tmp_path, monkeypatch, 
     # clears the counter the same way a successful fetch does.
     quote_not_found = iter([False, False, False, False, True, False, False, False, False])
 
-    class FlakyTicker:
-        def __init__(self, symbol: str) -> None:
-            self.symbol = symbol
-            self.not_found = next(quote_not_found)
-
+    class FlakyTicker(_FakeTicker):
         @property
         def all_modules(self):
-            if not self.not_found:
+            if not next(quote_not_found):
                 raise RuntimeError("temporary failure")
             return {self.symbol: f"Quote not found for symbol: {self.symbol}"}
 
@@ -484,10 +571,7 @@ def test_update_treats_error_payloads_as_failures(tmp_path, monkeypatch, seed_co
         [_ticker_row(f"INE{index:03d}", f"SYM{index:02d}") for index in range(8)],
     )
 
-    class RateLimitedTicker:
-        def __init__(self, symbol: str) -> None:
-            self.symbol = symbol
-
+    class RateLimitedTicker(_FakeTicker):
         @property
         def all_modules(self):
             return {self.symbol: {"error": "Too Many Requests"}}
@@ -509,10 +593,7 @@ def test_update_treats_missing_payloads_as_failures(tmp_path, monkeypatch, seed_
         [_ticker_row(f"INE{index:03d}", f"SYM{index:02d}") for index in range(8)],
     )
 
-    class UndecodableTicker:
-        def __init__(self, symbol: str) -> None:
-            self.symbol = symbol
-
+    class UndecodableTicker(_FakeTicker):
         @property
         def all_modules(self):
             # yahooquery returns this for a response it cannot decode, so the
@@ -534,12 +615,17 @@ def test_update_treats_unexpected_payload_text_as_failure(tmp_path, monkeypatch,
         [_ticker_row(f"INE{index:03d}", f"SYM{index:02d}") for index in range(8)],
     )
 
-    class ApiErrorTicker:
-        def __init__(self, symbol: str) -> None:
-            self.symbol = symbol
+    constructions = []
+    requests = []
+
+    class ApiErrorTicker(_FakeTicker):
+        def __init__(self, symbols: str) -> None:
+            super().__init__(symbols)
+            constructions.append(symbols)
 
         @property
         def all_modules(self):
+            requests.append(self.symbol)
             return {self.symbol: "Invalid Crumb"}
 
     fake_module = types.ModuleType("yahooquery")
@@ -548,6 +634,12 @@ def test_update_treats_unexpected_payload_text_as_failure(tmp_path, monkeypatch,
 
     with pytest.raises(yahoo.YahooFetchError, match="Invalid Crumb"):
         YahooDataManager(db_path).update_data(exchange="BSE")
+
+    # Each ticker is retried once on a new client and then counts as one failure, so the run
+    # still aborts at the fifth ticker rather than retrying without end.
+    limit = yahoo.CONSECUTIVE_FAILURE_LIMIT
+    assert requests == [f"SYM{index:02d}.BO" for index in range(limit) for _ in range(2)]
+    assert len(constructions) == limit + 1
 
 
 def test_classify_payload_maps_yahooquery_outcomes() -> None:
