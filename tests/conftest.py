@@ -64,6 +64,20 @@ def seed_consolidated() -> Callable[[Path, Sequence[tuple[object, ...]] | None],
 
 
 @pytest.fixture
+def old_backups() -> Callable[[Path, str, int], list[Path]]:
+    """Write ``count`` backups named as ``backup_database`` names them, oldest first, dated 2025-01-0N."""
+
+    def seed(backup_dir: Path, db_name: str, count: int) -> list[Path]:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        paths = [backup_dir / f"202501{day:02d}-120000-{db_name}" for day in range(1, count + 1)]
+        for path in paths:
+            path.write_bytes(b"old backup")
+        return paths
+
+    return seed
+
+
+@pytest.fixture
 def market_csv_builder() -> Callable[..., BhavcopyPaths]:
     def build(
         directory: Path,

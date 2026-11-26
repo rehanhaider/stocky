@@ -588,6 +588,97 @@ def test_rebuild_database_backs_up_existing_table_before_overwrite(
     assert live_rows == 1
 
 
+def test_rebuild_database_keeps_the_newest_backups_after_a_successful_write(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    backup_dir = tmp_path / "backups"
+    seed_consolidated(db_path)
+    old = old_backups(backup_dir, db_path.name, 7)
+    unrelated = backup_dir / "notes.txt"
+    unrelated.write_text("keep me", encoding="utf-8")
+
+    result = rebuild_database(paths, db_path=db_path, backup_dir=backup_dir, keep_backups=3)
+
+    # The new backup counts toward the three kept.
+    assert result.removed_backups == old[:5]
+    assert result.backup_path is not None
+    assert sorted(backup_dir.iterdir()) == sorted([*old[5:], result.backup_path, unrelated])
+
+
+def test_rebuild_database_keeps_five_backups_by_default(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    backup_dir = tmp_path / "backups"
+    seed_consolidated(db_path)
+    old = old_backups(backup_dir, db_path.name, 7)
+
+    result = rebuild_database(paths, db_path=db_path, backup_dir=backup_dir)
+
+    assert result.removed_backups == old[:3]
+    assert sorted(backup_dir.iterdir()) == sorted([*old[3:], result.backup_path])
+
+
+@pytest.mark.parametrize("options", [{"dry_run": True}, {"backup": False}])
+def test_rebuild_database_removes_no_backups_on_a_dry_run_or_without_backup(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups, options
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    backup_dir = tmp_path / "backups"
+    seed_consolidated(db_path)
+    old = old_backups(backup_dir, db_path.name, 7)
+
+    result = rebuild_database(paths, db_path=db_path, backup_dir=backup_dir, keep_backups=1, **options)
+
+    assert result.removed_backups == []
+    assert sorted(backup_dir.iterdir()) == old
+
+
+def test_rebuild_database_removes_no_backups_when_the_write_fails(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups, monkeypatch
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    backup_dir = tmp_path / "backups"
+    seed_consolidated(db_path)
+    old = old_backups(backup_dir, db_path.name, 7)
+
+    def fail(*args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr("stocky.pipeline.write_consolidated_table", fail)
+
+    with pytest.raises(sqlite3.OperationalError):
+        rebuild_database(paths, db_path=db_path, backup_dir=backup_dir, keep_backups=1)
+
+    # The backup taken before the failed write stays too.
+    remaining = sorted(backup_dir.iterdir())
+    assert remaining[:7] == old
+    assert len(remaining) == 8
+
+
+@pytest.mark.parametrize("keep", [0, -2])
+def test_rebuild_database_rejects_keeping_fewer_than_one_backup_before_writing(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups, keep
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    backup_dir = tmp_path / "backups"
+    seed_consolidated(db_path)
+    before = db_path.read_bytes()
+    old = old_backups(backup_dir, db_path.name, 2)
+
+    with pytest.raises(ValueError, match="Keep at least 1 backup"):
+        rebuild_database(paths, db_path=db_path, backup_dir=backup_dir, keep_backups=keep)
+
+    assert db_path.read_bytes() == before
+    assert sorted(backup_dir.iterdir()) == old
+
+
 def test_load_zerodha_instruments_filters_segments_and_normalizes_tokens(tmp_path, market_csv_builder) -> None:
     paths = market_csv_builder(tmp_path / "inputs")
 

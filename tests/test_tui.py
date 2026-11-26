@@ -181,6 +181,37 @@ def test_rebuild_shows_the_diff_and_writes_nothing_when_cancelled(
     assert db_path.read_bytes() == before
 
 
+def test_rebuild_keeps_five_backups_and_logs_the_removed_ones(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups, monkeypatch
+) -> None:
+    # The TUI backs up to, and prunes, the default backup directory, which is relative to the working directory.
+    monkeypatch.chdir(tmp_path)
+    paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 9, 30))
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    backup_dir = tmp_path / "data" / "output" / "backup"
+    old = old_backups(backup_dir, db_path.name, 7)
+    stocky_app = StockyApp(db_path=db_path, input_dir=paths.bse.parent, zerodha_instruments=paths.zerodha)
+
+    async def scenario(stocky_app, pilot) -> None:
+        await _press(stocky_app, pilot, "#rebuild-run")
+        assert isinstance(stocky_app.screen, ConfirmRebuildScreen)
+        # Nothing is removed by the comparison that runs before the confirmation.
+        assert sorted(backup_dir.iterdir()) == old
+        await _press(stocky_app, pilot, "#confirm-write")
+
+        assert _static_text(stocky_app, "#rebuild-stage") == "Rebuild complete"
+        log = _log_text(stocky_app)
+        for path in old[:3]:
+            assert _squash(f"Removed old backup {path.relative_to(tmp_path)}") in log
+
+    _run(stocky_app, scenario)
+
+    remaining = sorted(backup_dir.iterdir())
+    assert len(remaining) == 5
+    assert remaining[:4] == old[3:]
+
+
 def test_rebuild_writes_the_pair_the_confirmation_showed(tmp_path, market_csv_builder) -> None:
     inputs = tmp_path / "inputs"
     shown = market_csv_builder(inputs, trade_date=date(2021, 5, 3))

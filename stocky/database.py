@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import re
 import shutil
 import sqlite3
 from collections.abc import Sequence
@@ -288,6 +289,29 @@ def backup_database(
     backup_path = backup_dir / f"{timestamp}-{db_path.name}"
     shutil.copy2(db_path, backup_path)
     return backup_path
+
+
+def prune_backups(db_path: Path, backup_dir: Path, keep: int) -> list[Path]:
+    """Delete all but the newest ``keep`` backups of ``db_path`` and return the removed paths, oldest first.
+
+    Only files named the way ``backup_database`` names them for this database count, so other
+    files in the directory, and backups of other databases, are never touched.
+    """
+    if keep < 1:
+        raise ValueError(f"Keep at least 1 backup, not {keep}.")
+    if not backup_dir.is_dir():
+        return []
+
+    pattern = re.compile(rf"\d{{8}}-\d{{6}}-{re.escape(db_path.name)}")
+    # The name starts with the timestamp, so sorting by name sorts oldest to newest.
+    backups = sorted(
+        (path for path in backup_dir.iterdir() if pattern.fullmatch(path.name) and path.is_file()),
+        key=lambda path: path.name,
+    )
+    removed = backups[:-keep]
+    for path in removed:
+        path.unlink()
+    return removed
 
 
 def read_available_yahoo_symbols(db_path: Path = DEFAULT_DB_PATH) -> set[str]:

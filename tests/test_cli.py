@@ -55,6 +55,8 @@ def _seed_cached_yahoo_responses(db_path, symbols, suffix: str = "BO") -> None:
 
 def _use_interactive_defaults(monkeypatch, paths, db_path) -> None:
     monkeypatch.setenv("COLUMNS", "200")
+    # The menu backs up to, and prunes, the default backup directory, which is relative to the working directory.
+    monkeypatch.chdir(db_path.parent)
     monkeypatch.setattr(cli, "DEFAULT_BHAVCOPY_DIR", paths.bse.parent)
     monkeypatch.setattr(cli, "DEFAULT_ZERODHA_INSTRUMENTS", paths.zerodha)
     monkeypatch.setattr(cli, "DEFAULT_DB_PATH", db_path)
@@ -347,6 +349,65 @@ def test_rebuild_warns_on_stderr_when_inputs_are_older_than_the_current_build(
     assert warning not in " ".join(text.stdout.split())
     assert as_json.exit_code == 0
     assert json.loads(as_json.stdout)["warnings"] == [warning + " A rebuild replaces newer listings with older ones."]
+
+
+def test_rebuild_keep_removes_older_backups_and_prints_them(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups, monkeypatch, runner
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    # rebuild backs up to the default directory, relative to the working directory.
+    monkeypatch.chdir(tmp_path)
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    backup_dir = tmp_path / "data" / "output" / "backup"
+    old = old_backups(backup_dir, db_path.name, 7)
+
+    result = runner.invoke(app, ["rebuild", *_rebuild_path_args(paths, db_path), "--keep", "2"])
+
+    assert result.exit_code == 0
+    assert result.stdout.count("Removed old backup") == 6
+    for path in old[:6]:
+        assert f"Removed old backup {path.relative_to(tmp_path)}" in result.stdout
+    # The newest old backup and the one this rebuild took remain.
+    remaining = sorted(backup_dir.iterdir())
+    assert len(remaining) == 2
+    assert remaining[0] == old[6]
+
+
+def test_rebuild_json_lists_the_removed_backups(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups, monkeypatch, runner
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    old = old_backups(tmp_path / "data" / "output" / "backup", db_path.name, 7)
+
+    result = runner.invoke(app, ["rebuild", *_rebuild_path_args(paths, db_path), "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["removed_backups"] == [str(path.relative_to(tmp_path)) for path in old[:3]]
+
+
+@pytest.mark.parametrize("keep", ["0", "-1"])
+def test_rebuild_rejects_keep_below_one(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups, monkeypatch, runner, keep
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    before = db_path.read_bytes()
+    old = old_backups(tmp_path / "data" / "output" / "backup", db_path.name, 2)
+
+    result = runner.invoke(app, ["rebuild", *_rebuild_path_args(paths, db_path), "--keep", keep])
+
+    assert result.exit_code == 2
+    assert "Invalid value for '--keep'" in result.stderr
+    assert db_path.read_bytes() == before
+    assert sorted(old[0].parent.iterdir()) == old
 
 
 def test_rebuild_missing_files_reports_failure(tmp_path, runner) -> None:
@@ -1015,6 +1076,27 @@ def test_interactive_rebuild_previews_and_writes_database(tmp_path, market_csv_b
     with sqlite3.connect(db_path) as con:
         assert con.execute("SELECT COUNT(*) FROM consolidated").fetchone()[0] == 1
     assert result.stdout.count("Choose an option") == 2
+
+
+def test_interactive_rebuild_keeps_five_backups(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups, monkeypatch, runner
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 5, 3))
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    _use_interactive_defaults(monkeypatch, paths, db_path)
+    backup_dir = tmp_path / "data" / "output" / "backup"
+    old = old_backups(backup_dir, db_path.name, 7)
+
+    result = runner.invoke(app, ["interactive"], input="1\n1\n\ny\n6\n")
+
+    assert result.exit_code == 0
+    message = " ".join(result.stdout.split())
+    for path in old[:3]:
+        assert f"Removed old backup {path.relative_to(tmp_path)}" in message
+    remaining = sorted(backup_dir.iterdir())
+    assert len(remaining) == 5
+    assert remaining[:4] == old[3:]
 
 
 def test_interactive_rebuild_keeps_sgb_rows_when_the_current_table_has_them(

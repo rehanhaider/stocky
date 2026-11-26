@@ -143,6 +143,11 @@ time and Stocky version. The `provenance_builds` and `provenance_sources` tables
 shows the latest one. Only file names are stored, not local paths.
 The `--include-sgb` flag is not recorded in provenance.
 
+Before it writes, a rebuild copies the current database into `data/output/backup/`. After a successful write it keeps
+the newest 5 backups of that database and prints each older one it removes; `--keep N` keeps N instead. A dry run, a
+failed rebuild, or `--no-backup` removes nothing, and files in that folder that are not this database's backups are
+never touched. The menu and TUI rebuilds keep 5.
+
 Rebuild for a specific source date:
 
 ```bash
