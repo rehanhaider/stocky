@@ -6,7 +6,7 @@ inputs, so step 1 stays manual.
 1. Download the inputs into the ignored local folders:
    - the BSE and NSE bhavcopies for one trade date into `data/marketData/bhavCopies`;
    - the Zerodha instruments file from `https://api.kite.trade/instruments` to `data/marketData/zerodha/instruments.csv`.
-   - for mutual fund imports, the Zerodha mutual fund instruments file from `https://api.kite.trade/mf/instruments` to
+   - the Zerodha mutual fund instruments file from `https://api.kite.trade/mf/instruments` to
      `data/marketData/zerodha/mf_instruments.csv`, and AMFI scheme codes from
      `https://www.amfiindia.com/spages/NAVAll.txt` to `data/marketData/amfi/NAVAll.txt`.
    - broker cash-market files:
@@ -75,7 +75,7 @@ inputs, so step 1 stays manual.
 
 | Check | Fails when |
 | --- | --- |
-| Consolidated table layout | A column of the current layout is missing |
+| Consolidated table layout | The schema number is older than the current `consolidated` layout, or, in a file with no schema number, a column of that layout is missing |
 | Consolidated rows | The table is empty |
 | ISINs present and unique | An ISIN is empty or appears twice |
 | Yahoo tickers follow exchange symbols | `yq_ns` or `yq_bo` is not the exchange symbol plus `.NS` or `.BO` |

@@ -393,7 +393,9 @@ def test_rebuild_keep_removes_older_backups_and_prints_them(
     # rebuild backs up to the default directory, relative to the working directory.
     monkeypatch.chdir(tmp_path)
     paths = market_csv_builder(tmp_path / "inputs")
-    db_path = tmp_path / "stocky.db"
+    # The database sits beside the default backup folder, as data/output/stocky.db does.
+    db_path = tmp_path / "data" / "output" / "stocky.db"
+    db_path.parent.mkdir(parents=True)
     seed_consolidated(db_path)
     backup_dir = tmp_path / "data" / "output" / "backup"
     old = old_backups(backup_dir, db_path.name, 7)
@@ -415,7 +417,9 @@ def test_rebuild_json_lists_the_removed_backups(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     paths = market_csv_builder(tmp_path / "inputs")
-    db_path = tmp_path / "stocky.db"
+    # The database sits beside the default backup folder, as data/output/stocky.db does.
+    db_path = tmp_path / "data" / "output" / "stocky.db"
+    db_path.parent.mkdir(parents=True)
     seed_consolidated(db_path)
     old = old_backups(tmp_path / "data" / "output" / "backup", db_path.name, 7)
 
@@ -1147,9 +1151,12 @@ def test_interactive_rebuild_keeps_five_backups(
     tmp_path, market_csv_builder, seed_consolidated, old_backups, monkeypatch, runner
 ) -> None:
     paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 5, 3))
-    db_path = tmp_path / "stocky.db"
+    # The database sits beside the default backup folder, as data/output/stocky.db does.
+    db_path = tmp_path / "data" / "output" / "stocky.db"
+    db_path.parent.mkdir(parents=True)
     seed_consolidated(db_path)
     _use_interactive_defaults(monkeypatch, paths, db_path)
+    monkeypatch.chdir(tmp_path)
     backup_dir = tmp_path / "data" / "output" / "backup"
     old = old_backups(backup_dir, db_path.name, 7)
 

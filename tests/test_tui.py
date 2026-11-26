@@ -187,7 +187,9 @@ def test_rebuild_keeps_five_backups_and_logs_the_removed_ones(
     # The TUI backs up to, and prunes, the default backup directory, which is relative to the working directory.
     monkeypatch.chdir(tmp_path)
     paths = market_csv_builder(tmp_path / "inputs", trade_date=date(2021, 9, 30))
-    db_path = tmp_path / "stocky.db"
+    # The database sits beside the default backup folder, as data/output/stocky.db does.
+    db_path = tmp_path / "data" / "output" / "stocky.db"
+    db_path.parent.mkdir(parents=True)
     seed_consolidated(db_path)
     backup_dir = tmp_path / "data" / "output" / "backup"
     old = old_backups(backup_dir, db_path.name, 7)
