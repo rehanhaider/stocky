@@ -3008,7 +3008,7 @@ def test_refreshed_database_serves_every_read_command_from_another_directory(
     assert sorted(path.name for path in elsewhere.iterdir()) == ["snapshots"]
 
 
-def test_a_second_refresh_reproduces_the_first_and_keeps_the_newest_backups(refresh_root, runner) -> None:
+def test_a_second_refresh_reproduces_the_first_row_for_row_and_keeps_the_newest_backups(refresh_root, runner) -> None:
     db_path = _refreshed_database(refresh_root, runner)
     backups = refresh_root / "data/output/backup"
     backups.mkdir(parents=True, exist_ok=True)
@@ -3016,24 +3016,24 @@ def test_a_second_refresh_reproduces_the_first_and_keeps_the_newest_backups(refr
         (backups / f"202510{day:02d}-120000-stocky.db").write_bytes(b"old")
     (backups / "notes.txt").write_text("keep me", encoding="utf-8")
 
-    def counts() -> dict[str, int]:
+    def contents() -> dict[str, object]:
+        # Every row of the tables built from the source files; Yahoo responses only by ticker, because a refetch
+        # moves fetched_at.
         with sqlite3.connect(db_path) as con:
-            return {
-                table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                for table in (
-                    "consolidated",
-                    "indices",
-                    "bse_debt",
-                    "mutual_funds",
-                    "broker_symbols",
-                    "yahoo_responses",
-                )
+            tables = {
+                table: sorted(con.execute(f"SELECT * FROM {table}").fetchall(), key=repr)
+                for table in ("consolidated", "indices", "bse_debt", "mutual_funds", "broker_symbols")
             }
+            tables["yahoo_responses"] = sorted(
+                row[0] for row in con.execute("SELECT yahoo_symbol FROM yahoo_responses")
+            )
+        return tables
 
-    first = counts()
+    first = contents()
+    assert all(first.values()), first
     assert _refresh(runner).exit_code == 0
 
-    assert counts() == first
+    assert contents() == first
     kept = sorted(path.name for path in backups.iterdir() if path.name.endswith("-stocky.db"))
     assert len(kept) == 5
     assert kept[:4] == [f"202510{day:02d}-120000-stocky.db" for day in range(4, 8)]
