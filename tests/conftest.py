@@ -8,9 +8,10 @@ from zipfile import ZipFile
 import pytest
 from typer.testing import CliRunner
 
+import stocky.database as database
 from stocky.brokers import import_broker
 from stocky.bse_debt import import_bse_debt
-from stocky.database import CONSOLIDATED_TABLE
+from stocky.database import CONSOLIDATED_TABLE, write_schema_version
 from stocky.indices import import_indices
 from stocky.mutual_funds import import_mutual_funds
 from stocky.sources import BhavcopyPaths, bse_filename_for_date, nse_filename_for_date
@@ -167,3 +168,20 @@ def import_mapping_tables() -> Callable[[Path, Path], None]:
         import_broker("groww", groww, db_path)
 
     return run
+
+
+@pytest.fixture
+def numbered_one_behind(monkeypatch) -> Callable[[Path], int]:
+    """Number a database as a rebuild would, then raise SCHEMA_VERSION by one, and return the raised number.
+
+    A write that records the number then moves the file to the raised number, and one that does not, or rolls
+    back, leaves it one behind, so a test can tell the two apart.
+    """
+
+    def number(db_path: Path) -> int:
+        with closing(sqlite3.connect(db_path)) as con:
+            write_schema_version(con, replaces_consolidated=True)
+        monkeypatch.setattr(database, "SCHEMA_VERSION", database.SCHEMA_VERSION + 1)
+        return database.SCHEMA_VERSION
+
+    return number
