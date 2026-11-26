@@ -595,6 +595,65 @@ def delete_yahoo_response(con: sqlite3.Connection, yahoo_symbol: str) -> None:
     con.execute(f"DELETE FROM {YAHOO_RESPONSES_TABLE} WHERE yahoo_symbol = ?", (yahoo_symbol,))
 
 
+# A response is orphaned once its ticker is in neither Yahoo column of consolidated. The NULL checks
+# matter: NOT IN against a list holding NULL is never true, so it would match no row at all.
+# A column that lists no ticker at all says nothing about which of that exchange's responses are stale: an empty
+# table, or a rebuild from legacy bhavcopies, which carry no BSE trading symbol and leave every yq_bo empty, would
+# otherwise make every .NS or .BO response look orphaned. So a .NS or .BO response is pruned only while its own
+# column lists at least one ticker, and any other response only while the table has rows.
+_ORPHAN_YAHOO_RESPONSES = f"""
+    FROM {YAHOO_RESPONSES_TABLE}
+    WHERE yahoo_symbol NOT IN (SELECT yq_ns FROM {CONSOLIDATED_TABLE} WHERE yq_ns IS NOT NULL)
+      AND yahoo_symbol NOT IN (SELECT yq_bo FROM {CONSOLIDATED_TABLE} WHERE yq_bo IS NOT NULL)
+      AND CASE
+          WHEN yahoo_symbol LIKE '%.NS'
+              THEN EXISTS (SELECT 1 FROM {CONSOLIDATED_TABLE} WHERE yq_ns IS NOT NULL AND yq_ns <> '')
+          WHEN yahoo_symbol LIKE '%.BO'
+              THEN EXISTS (SELECT 1 FROM {CONSOLIDATED_TABLE} WHERE yq_bo IS NOT NULL AND yq_bo <> '')
+          ELSE EXISTS (SELECT 1 FROM {CONSOLIDATED_TABLE})
+      END
+"""
+
+
+def count_orphan_yahoo_responses(db_path: Path = DEFAULT_DB_PATH) -> int:
+    """Count the cached responses whose ticker no longer appears in consolidated."""
+    if not db_path.exists():
+        return 0
+
+    with connect(db_path) as con:
+        if not table_exists(con, YAHOO_RESPONSES_TABLE):
+            return 0
+        require_consolidated_table(con, db_path, ("yq_ns", "yq_bo"))
+        return con.execute(f"SELECT COUNT(*) {_ORPHAN_YAHOO_RESPONSES}").fetchone()[0]
+
+
+class OrphanVacuumError(Exception):
+    """Raised when the orphaned responses were deleted and committed but VACUUM then failed."""
+
+    def __init__(self, pruned: int, cause: sqlite3.Error) -> None:
+        super().__init__(str(cause))
+        self.pruned = pruned
+
+
+def prune_orphan_yahoo_responses(db_path: Path = DEFAULT_DB_PATH) -> int:
+    """Delete the cached responses whose ticker no longer appears in consolidated, and return how many.
+
+    The deletion is committed first and the file is then vacuumed, on a second connection, to give the
+    freed pages back, because VACUUM cannot run inside a transaction. Nothing is vacuumed when nothing was
+    deleted. A failed VACUUM raises OrphanVacuumError, which carries the committed count.
+    """
+    with connect(db_path) as con:
+        require_consolidated_table(con, db_path, ("yq_ns", "yq_bo"))
+        pruned = con.execute(f"DELETE {_ORPHAN_YAHOO_RESPONSES}").rowcount
+    if pruned:
+        try:
+            with connect(db_path) as con:
+                con.execute("VACUUM")
+        except sqlite3.Error as exc:
+            raise OrphanVacuumError(pruned, exc) from exc
+    return pruned
+
+
 def upsert_yahoo_response(
     con: sqlite3.Connection,
     *,

@@ -543,6 +543,8 @@ class StockyApp(App[None]):
         message = f"Processed {result.processed}; wrote {result.written}; skipped {result.skipped}."
         self.query_one("#yahoo-stage", Static).update(message)
         self.log_line(message, "bold green")
+        for warning in result.warnings:
+            self.log_line(f"Warning: {warning}", "bold yellow")
         self.finish_job()
 
     # Status, database location, and export

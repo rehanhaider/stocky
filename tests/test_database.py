@@ -4,6 +4,7 @@ import sqlite3
 
 import pytest
 
+import stocky.database as database
 from stocky.database import (
     CONSOLIDATED_TABLE,
     BackupPruneError,
@@ -652,3 +653,28 @@ def test_a_database_away_from_the_backup_folder_marks_its_backups_with_its_path(
     assert re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{8}-stocky\.db", foreign.name)
     assert prune_backups(owner, backup_dir, keep=1) == own[:2]
     assert sorted(backup_dir.iterdir()) == sorted([foreign, own[2]])
+
+
+def test_prune_orphans_reports_the_committed_count_when_vacuum_fails(tmp_path, seed_consolidated, monkeypatch) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    initialize_database(db_path)
+    with connect(db_path) as con:
+        upsert_yahoo_response(
+            con, yahoo_symbol="DELISTED.NS", symbol="DELISTED", exchange="NSE", response_json=b"{}", source="test"
+        )
+
+    class NoVacuum(database.ClosingConnection):
+        def execute(self, sql, *args):
+            if sql == "VACUUM":
+                raise sqlite3.OperationalError("database or disk is full")
+            return super().execute(sql, *args)
+
+    monkeypatch.setattr(database, "connect", lambda path: sqlite3.connect(path, factory=NoVacuum))
+
+    with pytest.raises(database.OrphanVacuumError, match="disk is full") as error:
+        database.prune_orphan_yahoo_responses(db_path)
+
+    assert error.value.pruned == 1
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("SELECT COUNT(*) FROM yahoo_responses").fetchone()[0] == 0

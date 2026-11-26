@@ -1,19 +1,23 @@
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
 from stocky.config import DEFAULT_DB_PATH
 from stocky.database import (
+    OrphanVacuumError,
     connect,
+    count_orphan_yahoo_responses,
     delete_yahoo_response,
     encode_response_json,
     fetch_consolidated_symbols,
     initialize_database,
     is_usable_yahoo_payload,
+    prune_orphan_yahoo_responses,
     read_available_yahoo_symbols,
     read_yahoo_fetch_times,
     split_yahoo_symbol,
@@ -84,6 +88,10 @@ class YahooUpdateResult:
     written: int
     skipped: int
     dry_run: bool
+    # Cached responses removed because their ticker left consolidated; a dry run counts those it would remove.
+    pruned: int = 0
+    # Problems after the fetched responses were saved, such as a prune that failed; the update itself succeeded.
+    warnings: list[str] = field(default_factory=list)
 
 
 # Each exchange reads the consolidated column that holds its full Yahoo tickers.
@@ -194,7 +202,13 @@ class YahooDataManager:
         )
 
         if dry_run:
-            return YahooUpdateResult(processed=len(tickers), written=0, skipped=0, dry_run=True)
+            return YahooUpdateResult(
+                processed=len(tickers),
+                written=0,
+                skipped=0,
+                dry_run=True,
+                pruned=count_orphan_yahoo_responses(self.db_path),
+            )
 
         import yahooquery as yq
 
@@ -265,4 +279,22 @@ class YahooDataManager:
                 if progress is not None:
                     progress(index, len(tickers), written, skipped)
 
-        return YahooUpdateResult(processed=len(tickers), written=written, skipped=skipped, dry_run=False)
+        # Only a run that finished prunes: an abort or interruption raises out of the loop above first.
+        # Every fetched response is saved by now, so a failed prune is reported as a warning, not as a failed update.
+        warnings: list[str] = []
+        try:
+            pruned = prune_orphan_yahoo_responses(self.db_path)
+        except OrphanVacuumError as exc:
+            pruned = exc.pruned
+            warnings.append(
+                f"Removed {exc.pruned} responses of tickers no longer in consolidated, but VACUUM failed, so the "
+                f"file has not shrunk yet: {exc}"
+            )
+        except (sqlite3.Error, OSError) as exc:
+            pruned = 0
+            warnings.append(
+                f"The update was saved, but removing the responses of tickers no longer in consolidated failed: {exc}"
+            )
+        return YahooUpdateResult(
+            processed=len(tickers), written=written, skipped=skipped, dry_run=False, pruned=pruned, warnings=warnings
+        )
