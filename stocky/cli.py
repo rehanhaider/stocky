@@ -1182,6 +1182,103 @@ def _yahoo_resume_command(exchange: str, db_path: Path, stale_days: float | None
     return shlex.join(command)
 
 
+@dataclasses.dataclass(frozen=True)
+class _RefreshContext:
+    """What every refresh step needs: the trade date, the database, and the run's options."""
+
+    trade_date: str
+    db_path: Path
+    dry_run: bool
+    stale_days: float | None
+    yahoo_progress: Callable[[str], contextlib.AbstractContextManager[ProgressCallback | None]]
+
+
+def _refresh_rebuild(ctx: _RefreshContext) -> RebuildResult:
+    # Keep the SGB rows of an --include-sgb build, as the menu and TUI rebuilds do by default.
+    return _rebuild_impl(
+        trade_date=ctx.trade_date, db_path=ctx.db_path, dry_run=ctx.dry_run, include_sgb=has_sgb_rows(ctx.db_path)
+    )
+
+
+def _refresh_indices(ctx: _RefreshContext) -> IndicesImportResult | ImportPreview:
+    if ctx.dry_run:
+        rows = len(load_indices(DEFAULT_ZERODHA_INSTRUMENTS))
+        return ImportPreview("indices", [DEFAULT_ZERODHA_INSTRUMENTS], rows)
+    return import_indices(DEFAULT_ZERODHA_INSTRUMENTS, ctx.db_path)
+
+
+def _refresh_debt(ctx: _RefreshContext) -> BseDebtImportResult | ImportPreview:
+    archive = newest_bse_debt_archive()
+    if ctx.dry_run:
+        return ImportPreview("BSE debt", [archive], len(load_bse_debt(archive)))
+    return import_bse_debt(archive, ctx.db_path)
+
+
+def _refresh_mutual_funds(ctx: _RefreshContext) -> MutualFundImportResult | ImportPreview:
+    if ctx.dry_run:
+        rows = len(load_mf_instruments(DEFAULT_ZERODHA_MF_INSTRUMENTS))
+        load_amfi_codes(DEFAULT_AMFI_NAV)
+        return ImportPreview("mutual funds", [DEFAULT_ZERODHA_MF_INSTRUMENTS, DEFAULT_AMFI_NAV], rows)
+    return import_mutual_funds(DEFAULT_ZERODHA_MF_INSTRUMENTS, DEFAULT_AMFI_NAV, ctx.db_path)
+
+
+def _preview_broker(broker: Broker, db_path: Path) -> ImportPreview:
+    if broker is Broker.groww:
+        return ImportPreview(broker.value, [DEFAULT_GROWW_INSTRUMENTS], len(load_groww(DEFAULT_GROWW_INSTRUMENTS)))
+    if broker is Broker.upstox:
+        rows = len(load_upstox(DEFAULT_UPSTOX_INSTRUMENTS))
+        return ImportPreview(broker.value, [DEFAULT_UPSTOX_INSTRUMENTS], rows)
+    rows = len(load_aliceblue(DEFAULT_ALICEBLUE_NSE, DEFAULT_ALICEBLUE_BSE, db_path))
+    return ImportPreview(broker.value, [DEFAULT_ALICEBLUE_NSE, DEFAULT_ALICEBLUE_BSE], rows)
+
+
+def _refresh_brokers(ctx: _RefreshContext) -> list[BrokerImportResult] | list[ImportPreview]:
+    paths = {
+        Broker.groww: DEFAULT_GROWW_INSTRUMENTS,
+        Broker.upstox: DEFAULT_UPSTOX_INSTRUMENTS,
+        Broker.aliceblue: DEFAULT_ALICEBLUE_NSE,
+    }
+    results: list = []
+    for broker in Broker:
+        try:
+            if ctx.dry_run:
+                results.append(_preview_broker(broker, ctx.db_path))
+            else:
+                results.extend(import_broker(broker, paths[broker], ctx.db_path, bse_path=DEFAULT_ALICEBLUE_BSE))
+        except Exception as exc:
+            # Each broker commits on its own, so the ones before the failure stay imported.
+            raise _RefreshStepError(str(exc), results) from exc
+    return results
+
+
+def _refresh_yahoo(ctx: _RefreshContext, exchange: str) -> YahooUpdateResult:
+    manager = YahooDataManager(ctx.db_path)
+    if ctx.dry_run:
+        preview = manager.update_data(exchange=exchange, dry_run=True, stale_days=ctx.stale_days)
+        # Pruning removes the orphans of both exchanges, so the NSE step prunes them all and the BSE step none.
+        return preview if exchange == "NSE" else dataclasses.replace(preview, pruned=0)
+    with ctx.yahoo_progress(exchange) as progress:
+        try:
+            return manager.update_data(exchange=exchange, stale_days=ctx.stale_days, progress=progress)
+        except YahooFetchError as exc:
+            raise RuntimeError(
+                f"{exc.reason} Check the network connection, or wait if Yahoo is rate limiting, then run "
+                f"'{_yahoo_resume_command(exchange, ctx.db_path, ctx.stale_days)}' to fetch the tickers this "
+                "refresh had not saved yet, and then the steps that did not run."
+            ) from exc
+
+
+def _refresh_summary(ctx: _RefreshContext) -> RefreshSummary | None:
+    # Validating the current database would say nothing about the refreshed one.
+    if ctx.dry_run:
+        return None
+    result = build_refresh_summary(ctx.db_path)
+    if not result.passed:
+        failed = ", ".join(check.name for check in result.checks if not check.passed)
+        raise _RefreshStepError(f"Validation failed: {failed}.", result)
+    return result
+
+
 def _refresh_impl(
     *,
     trade_date: str,
@@ -1202,92 +1299,16 @@ def _refresh_impl(
     A dry run runs each step's preview against the current database and writes nothing: the rebuild's
     own dry run, the import loaders, and the Yahoo update's count of tickers and orphaned responses.
     """
-
-    def rebuild() -> RebuildResult:
-        # Keep the SGB rows of an --include-sgb build, as the menu and TUI rebuilds do by default.
-        return _rebuild_impl(trade_date=trade_date, db_path=db_path, dry_run=dry_run, include_sgb=has_sgb_rows(db_path))
-
-    def indices() -> IndicesImportResult | ImportPreview:
-        if dry_run:
-            rows = len(load_indices(DEFAULT_ZERODHA_INSTRUMENTS))
-            return ImportPreview("indices", [DEFAULT_ZERODHA_INSTRUMENTS], rows)
-        return import_indices(DEFAULT_ZERODHA_INSTRUMENTS, db_path)
-
-    def debt() -> BseDebtImportResult | ImportPreview:
-        archive = newest_bse_debt_archive()
-        if dry_run:
-            return ImportPreview("BSE debt", [archive], len(load_bse_debt(archive)))
-        return import_bse_debt(archive, db_path)
-
-    def mutual_funds() -> MutualFundImportResult | ImportPreview:
-        if dry_run:
-            rows = len(load_mf_instruments(DEFAULT_ZERODHA_MF_INSTRUMENTS))
-            load_amfi_codes(DEFAULT_AMFI_NAV)
-            return ImportPreview("mutual funds", [DEFAULT_ZERODHA_MF_INSTRUMENTS, DEFAULT_AMFI_NAV], rows)
-        return import_mutual_funds(DEFAULT_ZERODHA_MF_INSTRUMENTS, DEFAULT_AMFI_NAV, db_path)
-
-    def preview_broker(broker: Broker) -> ImportPreview:
-        if broker is Broker.groww:
-            return ImportPreview(broker.value, [DEFAULT_GROWW_INSTRUMENTS], len(load_groww(DEFAULT_GROWW_INSTRUMENTS)))
-        if broker is Broker.upstox:
-            rows = len(load_upstox(DEFAULT_UPSTOX_INSTRUMENTS))
-            return ImportPreview(broker.value, [DEFAULT_UPSTOX_INSTRUMENTS], rows)
-        rows = len(load_aliceblue(DEFAULT_ALICEBLUE_NSE, DEFAULT_ALICEBLUE_BSE, db_path))
-        return ImportPreview(broker.value, [DEFAULT_ALICEBLUE_NSE, DEFAULT_ALICEBLUE_BSE], rows)
-
-    def brokers() -> list[BrokerImportResult] | list[ImportPreview]:
-        paths = {
-            Broker.groww: DEFAULT_GROWW_INSTRUMENTS,
-            Broker.upstox: DEFAULT_UPSTOX_INSTRUMENTS,
-            Broker.aliceblue: DEFAULT_ALICEBLUE_NSE,
-        }
-        results: list = []
-        for broker in Broker:
-            try:
-                if dry_run:
-                    results.append(preview_broker(broker))
-                else:
-                    results.extend(import_broker(broker, paths[broker], db_path, bse_path=DEFAULT_ALICEBLUE_BSE))
-            except Exception as exc:
-                # Each broker commits on its own, so the ones before the failure stay imported.
-                raise _RefreshStepError(str(exc), results) from exc
-        return results
-
-    def yahoo(exchange: str) -> YahooUpdateResult:
-        manager = YahooDataManager(db_path)
-        if dry_run:
-            preview = manager.update_data(exchange=exchange, dry_run=True, stale_days=stale_days)
-            # Pruning removes the orphans of both exchanges, so the NSE step prunes them all and the BSE step none.
-            return preview if exchange == "NSE" else dataclasses.replace(preview, pruned=0)
-        with yahoo_progress(exchange) as progress:
-            try:
-                return manager.update_data(exchange=exchange, stale_days=stale_days, progress=progress)
-            except YahooFetchError as exc:
-                raise RuntimeError(
-                    f"{exc.reason} Check the network connection, or wait if Yahoo is rate limiting, then run "
-                    f"'{_yahoo_resume_command(exchange, db_path, stale_days)}' to fetch the tickers this refresh "
-                    "had not saved yet, and then the steps that did not run."
-                ) from exc
-
-    def summary() -> RefreshSummary | None:
-        # Validating the current database would say nothing about the refreshed one.
-        if dry_run:
-            return None
-        result = build_refresh_summary(db_path)
-        if not result.passed:
-            failed = ", ".join(check.name for check in result.checks if not check.passed)
-            raise _RefreshStepError(f"Validation failed: {failed}.", result)
-        return result
-
+    ctx = _RefreshContext(trade_date, db_path, dry_run, stale_days, yahoo_progress)
     steps: list[tuple[str, Callable[[], object]]] = [
-        ("rebuild", rebuild),
-        ("indices import", indices),
-        ("debt import", debt),
-        ("mf import", mutual_funds),
-        ("brokers import", brokers),
-        ("yahoo update NSE", lambda: yahoo("NSE")),
-        ("yahoo update BSE", lambda: yahoo("BSE")),
-        ("summary", summary),
+        ("rebuild", lambda: _refresh_rebuild(ctx)),
+        ("indices import", lambda: _refresh_indices(ctx)),
+        ("debt import", lambda: _refresh_debt(ctx)),
+        ("mf import", lambda: _refresh_mutual_funds(ctx)),
+        ("brokers import", lambda: _refresh_brokers(ctx)),
+        ("yahoo update NSE", lambda: _refresh_yahoo(ctx, "NSE")),
+        ("yahoo update BSE", lambda: _refresh_yahoo(ctx, "BSE")),
+        ("summary", lambda: _refresh_summary(ctx)),
     ]
     completed: list[RefreshStep] = []
     for index, (name, run) in enumerate(steps, start=1):
