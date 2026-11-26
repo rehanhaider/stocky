@@ -93,7 +93,7 @@ from stocky.summary import (
     build_refresh_summary,
     render_markdown,
 )
-from stocky.yahoo import ProgressCallback, YahooDataManager, YahooUpdateResult, ticker_column
+from stocky.yahoo import ProgressCallback, YahooDataManager, YahooFetchError, YahooUpdateResult, ticker_column
 
 console = Console()
 error_console = Console(stderr=True)
@@ -1236,7 +1236,15 @@ def _refresh_impl(
         if dry_run:
             return manager.update_data(exchange=exchange, dry_run=True, stale_days=stale_days)
         with yahoo_progress(exchange) as progress:
-            return manager.update_data(exchange=exchange, stale_days=stale_days, progress=progress)
+            try:
+                return manager.update_data(exchange=exchange, stale_days=stale_days, progress=progress)
+            except YahooFetchError as exc:
+                # refresh takes no --missing-only, so name the command that resumes this step.
+                raise RuntimeError(
+                    f"{exc.reason} Check the network connection, or wait if Yahoo is rate limiting, then run "
+                    f"'stocky yahoo update --exchange {exchange} --missing-only' to resume from the symbols already "
+                    "saved, and then the steps that did not run."
+                ) from exc
 
     def summary() -> RefreshSummary | None:
         # Validating the current database would say nothing about the refreshed one.

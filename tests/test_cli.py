@@ -13,6 +13,7 @@ import pytest
 import typer
 
 import stocky.cli as cli
+import stocky.yahoo as yahoo
 from stocky import __version__
 from stocky.cli import app
 from stocky.database import SCHEMA_VERSION, connect, encode_response_json, initialize_database, upsert_yahoo_response
@@ -2790,6 +2791,26 @@ def test_refresh_stops_at_the_first_failure_and_names_the_completed_steps(
         assert payload["not_run"] == REFRESH_STEPS[4:]
     else:
         assert "Refresh complete." not in result.stdout
+
+
+def test_refresh_names_the_command_that_resumes_a_failing_yahoo_update(refresh_root, monkeypatch, runner) -> None:
+    class OfflineTicker(_FakeTicker):
+        @property
+        def all_modules(self):
+            raise RuntimeError("offline")
+
+    fake_module = types.ModuleType("yahooquery")
+    fake_module.Ticker = OfflineTicker
+    monkeypatch.setitem(sys.modules, "yahooquery", fake_module)
+    monkeypatch.setattr(yahoo, "CONSECUTIVE_FAILURE_LIMIT", 1)
+
+    result = _refresh(runner)
+
+    assert result.exit_code == 1
+    stderr = " ".join(result.stderr.split())
+    assert "Refresh stopped at step 6 of 8, yahoo update NSE: Yahoo Finance request failed for" in stderr
+    assert "then run 'stocky yahoo update --exchange NSE --missing-only' to resume" in stderr
+    assert "re-run with --missing-only" not in stderr
 
 
 def test_refresh_reports_the_brokers_that_committed_before_one_failed(refresh_root, runner) -> None:

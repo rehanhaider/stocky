@@ -35,7 +35,20 @@ ProgressCallback = Callable[[int, int, int, int], None]
 
 
 class YahooFetchError(RuntimeError):
-    """Raised when Yahoo Finance keeps failing and the run cannot continue."""
+    """Raised when Yahoo Finance keeps failing and the run cannot continue.
+
+    ``reason`` says what failed; the message adds how to resume a `stocky yahoo update`, which a caller that runs
+    the update as one step of something else can replace with its own.
+    """
+
+    RESUME_HINT = (
+        "Check the network connection, or wait if Yahoo is rate limiting, "
+        "then re-run with --missing-only to resume from the symbols already saved."
+    )
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"{reason} {self.RESUME_HINT}")
+        self.reason = reason
 
 
 Outcome = Literal["success", "not_found", "failure"]
@@ -250,9 +263,7 @@ class YahooDataManager:
                         con.commit()
                         raise YahooFetchError(
                             f"Yahoo Finance request failed for {yahoo_symbol} "
-                            f"({consecutive_failures} consecutive failures; last error: {detail}). "
-                            "Check the network connection, or wait if Yahoo is rate limiting, "
-                            "then re-run with --missing-only to resume from the symbols already saved."
+                            f"({consecutive_failures} consecutive failures; last error: {detail})."
                         ) from cause
                 elif outcome == "not_found":
                     consecutive_failures = 0
