@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import sys
 import types
 from datetime import UTC, datetime, timedelta
@@ -7,6 +8,7 @@ import pytest
 
 import stocky.yahoo as yahoo
 from stocky.database import (
+    OrphanVacuumError,
     connect,
     decode_response_json,
     encode_response_json,
@@ -589,6 +591,41 @@ def test_update_keeps_an_exchanges_responses_when_its_column_lists_no_ticker(
     assert YahooDataManager(db_path).update_data(exchange="NSE", limit=0, dry_run=True).pruned == 1
     assert YahooDataManager(db_path).update_data(exchange="NSE", limit=0).pruned == 1
     assert set(_cached_rows(db_path)) == {"RELIANCE.NS", "RELIANCE.BO", "INFY.BO"}
+
+
+@pytest.mark.parametrize(
+    ("failure", "pruned", "warning"),
+    [
+        (
+            sqlite3.OperationalError("database is locked"),
+            0,
+            "The update was saved, but removing the responses of tickers no longer in consolidated failed: "
+            "database is locked",
+        ),
+        (
+            OrphanVacuumError(2, sqlite3.OperationalError("database or disk is full")),
+            2,
+            "Removed 2 responses of tickers no longer in consolidated, but VACUUM failed, so the file has not "
+            "shrunk yet: database or disk is full",
+        ),
+    ],
+)
+def test_a_failed_prune_after_a_finished_update_is_a_warning(
+    tmp_path, monkeypatch, seed_consolidated, failure, pruned, warning
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    _seed_orphans_beside_listed(db_path, seed_consolidated)
+    _use_fake_yahooquery(monkeypatch)
+
+    def failing(db_path):
+        raise failure
+
+    monkeypatch.setattr(yahoo, "prune_orphan_yahoo_responses", failing)
+
+    result = YahooDataManager(db_path).update_data(exchange="NSE", symbols=["RELIANCE"])
+
+    assert (result.written, result.pruned, result.warnings) == (1, pruned, [warning])
+    assert "RELIANCE.NS" in _cached_rows(db_path)
 
 
 def test_aborted_update_prunes_nothing(tmp_path, monkeypatch, seed_consolidated) -> None:

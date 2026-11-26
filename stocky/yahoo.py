@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
 from stocky.config import DEFAULT_DB_PATH
 from stocky.database import (
+    OrphanVacuumError,
     connect,
     count_orphan_yahoo_responses,
     delete_yahoo_response,
@@ -74,7 +76,7 @@ def is_auth_failure(detail: str) -> bool:
     """Whether a failure's detail says Yahoo rejected the client's crumb or cookie.
 
     A new client clears this: building one starts a session and requests a fresh crumb
-    (yahooquery base.py:36-38).
+    (yahooquery base.py:35-38).
     """
     lowered = detail.lower()
     return any(marker in lowered for marker in AUTH_FAILURE_MARKERS)
@@ -88,6 +90,8 @@ class YahooUpdateResult:
     dry_run: bool
     # Cached responses removed because their ticker left consolidated; a dry run counts those it would remove.
     pruned: int = 0
+    # Problems after the fetched responses were saved, such as a prune that failed; the update itself succeeded.
+    warnings: list[str] = field(default_factory=list)
 
 
 # Each exchange reads the consolidated column that holds its full Yahoo tickers.
@@ -276,5 +280,21 @@ class YahooDataManager:
                     progress(index, len(tickers), written, skipped)
 
         # Only a run that finished prunes: an abort or interruption raises out of the loop above first.
-        pruned = prune_orphan_yahoo_responses(self.db_path)
-        return YahooUpdateResult(processed=len(tickers), written=written, skipped=skipped, dry_run=False, pruned=pruned)
+        # Every fetched response is saved by now, so a failed prune is reported as a warning, not as a failed update.
+        warnings: list[str] = []
+        try:
+            pruned = prune_orphan_yahoo_responses(self.db_path)
+        except OrphanVacuumError as exc:
+            pruned = exc.pruned
+            warnings.append(
+                f"Removed {exc.pruned} responses of tickers no longer in consolidated, but VACUUM failed, so the "
+                f"file has not shrunk yet: {exc}"
+            )
+        except (sqlite3.Error, OSError) as exc:
+            pruned = 0
+            warnings.append(
+                f"The update was saved, but removing the responses of tickers no longer in consolidated failed: {exc}"
+            )
+        return YahooUpdateResult(
+            processed=len(tickers), written=written, skipped=skipped, dry_run=False, pruned=pruned, warnings=warnings
+        )
