@@ -3026,6 +3026,38 @@ def test_refresh_fails_at_the_summary_when_a_check_fails_and_still_prints_it(ref
     assert "Refresh stopped at step 8 of 8, summary: Validation failed: Consolidated table layout." in stderr
     assert "Completed: rebuild, indices import, debt import, mf import, brokers import, yahoo update NSE, " in stderr
     assert "Not run: none." in stderr
+    # The failed summary is still written, as `stocky summary --output` writes it.
+    assert "**Validation: FAILED**" in (refresh_root / "data/output/refresh-summary.md").read_text(encoding="utf-8")
+
+
+def test_refresh_writes_the_summary_file_and_a_dry_run_does_not(refresh_root, runner) -> None:
+    summary_path = refresh_root / "data/output/refresh-summary.md"
+    # The dry run previews Alice Blue against the current table, so a database must exist.
+    _initial_rebuild(runner)
+
+    preview = _refresh(runner, "--dry-run")
+
+    assert preview.exit_code == 0
+    assert not summary_path.exists()
+
+    result = _refresh(runner)
+
+    assert result.exit_code == 0
+    text = summary_path.read_text(encoding="utf-8")
+    assert text.startswith("# Stocky refresh summary")
+    assert "**Validation: passed**" in text
+    assert "Wrote the refresh summary to data/output/refresh-summary.md." in " ".join(result.stderr.split())
+
+
+def test_refresh_writes_the_summary_where_summary_output_says(refresh_root, runner) -> None:
+    custom = refresh_root / "reports" / "quarter.md"
+
+    result = _refresh(runner, "--summary-output", str(custom), "--json")
+
+    assert result.exit_code == 0
+    assert "**Validation: passed**" in custom.read_text(encoding="utf-8")
+    assert not (refresh_root / "data/output/refresh-summary.md").exists()
+    json.loads(result.stdout)
 
 
 # End to end: a real refresh from source files, then every read command against the database it wrote.

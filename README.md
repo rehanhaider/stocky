@@ -252,8 +252,9 @@ uv run stocky summary --output data/output/refresh-summary.md
 Run the whole quarterly refresh in one command: the rebuild (keeping SGB rows when the current table has them),
 `indices import`, `debt import`, `mf import`, `brokers import`, `yahoo update` for NSE and then BSE, and `summary`, in
 that order, with each command's default input files. `--dry-run` shows every step's preview and writes nothing;
-`--stale-days` applies to both Yahoo updates. It stops at the first step that fails, names that step and the completed
-ones, and exits with status 1:
+`--stale-days` applies to both Yahoo updates. The summary step writes `data/output/refresh-summary.md` (or
+`--summary-output`), passed or failed. It stops at the first step that fails, names that step and the completed ones,
+and exits with status 1:
 
 ```bash
 uv run stocky refresh --date 2026-07-17 --stale-days 90 --dry-run

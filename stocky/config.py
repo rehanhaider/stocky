@@ -15,3 +15,4 @@ DEFAULT_BACKUP_DIR = Path("data/output/backup")
 # How many backups of a database a successful rebuild leaves in the backup directory.
 DEFAULT_KEEP_BACKUPS = 5
 DEFAULT_SNAPSHOT_DIR = Path("data/output/snapshots")
+DEFAULT_REFRESH_SUMMARY = Path("data/output/refresh-summary.md")
