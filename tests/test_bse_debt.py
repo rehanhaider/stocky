@@ -1,6 +1,7 @@
 import csv
 import io
 import sqlite3
+from contextlib import closing
 from zipfile import ZipFile
 
 import pytest
@@ -40,7 +41,7 @@ def _write_debt_zip(path, rows=None, headers=None, missing=None, date="16102026"
 
 
 def _read_debt(db_path):
-    with sqlite3.connect(db_path) as con:
+    with closing(sqlite3.connect(db_path)) as con:
         return con.execute(
             f"SELECT {', '.join(BSE_DEBT_COLUMNS)} FROM {BSE_DEBT_TABLE} ORDER BY family, scrip_code, isin"
         ).fetchall()

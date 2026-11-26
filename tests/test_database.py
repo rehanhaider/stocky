@@ -488,3 +488,30 @@ def test_search_instruments_fuzzy_ranks_strongest_score_first(tmp_path, seed_con
 
     assert result.fuzzy is True
     assert [match.nse_symbol for match in result.matches] == ["TCS"]
+
+
+def test_connect_commits_and_closes_when_its_with_block_ends(tmp_path) -> None:
+    db_path = tmp_path / "stocky.db"
+    with connect(db_path) as con:
+        con.execute("CREATE TABLE items (value INTEGER)")
+        con.execute("INSERT INTO items VALUES (1)")
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        con.execute("SELECT 1")
+    with connect(db_path) as reader:
+        assert reader.execute("SELECT value FROM items").fetchall() == [(1,)]
+
+
+def test_connect_rolls_back_and_closes_when_its_with_block_raises(tmp_path) -> None:
+    db_path = tmp_path / "stocky.db"
+    with connect(db_path) as con:
+        con.execute("CREATE TABLE items (value INTEGER)")
+
+    with pytest.raises(RuntimeError, match="stop"), connect(db_path) as con:
+        con.execute("INSERT INTO items VALUES (1)")
+        raise RuntimeError("stop")
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        con.execute("SELECT 1")
+    with connect(db_path) as reader:
+        assert reader.execute("SELECT COUNT(*) FROM items").fetchone() == (0,)

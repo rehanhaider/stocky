@@ -1,5 +1,6 @@
 import sqlite3
 from collections.abc import Callable, Sequence
+from contextlib import closing
 from datetime import date
 from pathlib import Path
 
@@ -52,7 +53,7 @@ def seed_consolidated() -> Callable[[Path, Sequence[tuple[object, ...]] | None],
         selected_rows = CONSOLIDATED_ROWS if rows is None else rows
         column_definitions = ", ".join(f"{column} TEXT" for column in CONSOLIDATED_COLUMNS)
         placeholders = ", ".join("?" for _ in CONSOLIDATED_COLUMNS)
-        with sqlite3.connect(db_path) as con:
+        with closing(sqlite3.connect(db_path)) as con, con:
             con.execute(f"CREATE TABLE {CONSOLIDATED_TABLE} ({column_definitions})")
             con.executemany(
                 f"INSERT INTO {CONSOLIDATED_TABLE} VALUES ({placeholders})",

@@ -1,5 +1,6 @@
 import csv
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -46,7 +47,7 @@ def _write_indices_csv(path, rows=INDICES_ROWS, missing=None):
 
 
 def _read_indices(db_path):
-    with sqlite3.connect(db_path) as con:
+    with closing(sqlite3.connect(db_path)) as con:
         return con.execute(
             f"SELECT {', '.join(INDICES_COLUMNS)} FROM {INDICES_TABLE} ORDER BY zd_instrument_token"
         ).fetchall()

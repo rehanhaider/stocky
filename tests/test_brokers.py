@@ -2,6 +2,7 @@ import csv
 import gzip
 import json
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -85,7 +86,7 @@ def sources(tmp_path):
 
 
 def _read(db):
-    with sqlite3.connect(db) as con:
+    with closing(sqlite3.connect(db)) as con:
         return con.execute("SELECT * FROM broker_symbols ORDER BY broker, exchange, exchange_token").fetchall()
 
 
