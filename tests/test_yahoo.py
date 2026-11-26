@@ -336,7 +336,8 @@ def test_update_builds_a_new_client_when_the_crumb_lapses(tmp_path, monkeypatch,
 def test_is_auth_failure_matches_crumb_and_cookie_answers() -> None:
     assert yahoo.is_auth_failure("Invalid Crumb")
     assert yahoo.is_auth_failure("Invalid Cookie")
-    assert yahoo.is_auth_failure("{'code': 'Unauthorized', 'description': 'User is unable to access this feature'}")
+    assert yahoo.is_auth_failure("invalid crumb")
+    assert not yahoo.is_auth_failure("User is unable to access this feature")
     assert not yahoo.is_auth_failure("Too Many Requests")
     assert not yahoo.is_auth_failure("HTTP 404 Not Found.  Please try again")
     assert not yahoo.is_auth_failure("RuntimeError('offline failure')")
