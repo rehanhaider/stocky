@@ -663,4 +663,7 @@ def test_tui_command_explains_how_to_install_textual(monkeypatch, runner) -> Non
     result = runner.invoke(cli.app, ["tui"])
 
     assert result.exit_code == 1
-    assert "uv sync --extra tui" in " ".join(result.stderr.split())
+    assert " ".join(result.stderr.split()) == (
+        "The TUI needs Textual. Install it with 'uv sync --extra tui' or "
+        "'pip install -e \".[tui]\"' from the repository root."
+    )

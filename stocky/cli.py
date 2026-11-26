@@ -893,7 +893,10 @@ def tui(
     except ModuleNotFoundError as exc:
         if exc.name is None or exc.name.partition(".")[0] != "textual":
             raise
-        _print_error("The TUI needs Textual. Install it with 'uv sync --extra tui' or 'pip install \"stocky[tui]\"'.")
+        _print_error(
+            "The TUI needs Textual. Install it with 'uv sync --extra tui' or "
+            "'pip install -e \".[tui]\"' from the repository root."
+        )
         raise typer.Exit(1) from exc
 
     StockyApp(db_path=db_path, input_dir=input_dir, zerodha_instruments=zerodha_instruments).run()
