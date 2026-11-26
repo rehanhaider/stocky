@@ -11,8 +11,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
-
-import pandas as pd
+from typing import TYPE_CHECKING
 
 from stocky import __version__
 from stocky.config import DEFAULT_DB_PATH, DEFAULT_SNAPSHOT_DIR
@@ -23,6 +22,9 @@ from stocky.database import (
     connect,
     require_consolidated_table,
 )
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 EXPORT_FORMATS = ("csv", "json", "parquet")
 EXPORT_COLUMNS = CONSOLIDATED_COLUMNS
@@ -96,6 +98,8 @@ def read_consolidated(
     columns: Sequence[str] | None = None,
     require: Sequence[str] | None = None,
 ) -> pd.DataFrame:
+    import pandas as pd
+
     selected = _resolve_columns(columns)
     required = _resolve_require(require)
 

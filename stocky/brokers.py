@@ -6,12 +6,14 @@ import sqlite3
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-
-import pandas as pd
+from typing import TYPE_CHECKING
 
 from stocky.config import DEFAULT_DB_PATH
 from stocky.database import _escape_like, connect, table_exists
 from stocky.pipeline import NSE_EQUITY_SERIES
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 BROKER_TABLE = "broker_symbols"
 BROKER_COLUMNS = ("broker", "exchange", "exchange_token", "isin", "symbol", "broker_key", "name")
@@ -79,6 +81,8 @@ def _require_columns(frame: pd.DataFrame, required: set[str], label: str) -> Non
 
 
 def _read_csv(path: Path, required: set[str], label: str) -> pd.DataFrame:
+    import pandas as pd
+
     if not path.is_file():
         raise FileNotFoundError(f"{label} not found: {path}")
     frame = pd.read_csv(path, dtype=str, keep_default_na=False)
@@ -114,6 +118,8 @@ def load_groww(path: Path) -> pd.DataFrame:
 
 def load_upstox(path: Path) -> pd.DataFrame:
     """Keep NSE_EQ/BSE_EQ cash rows, excluding indices, derivatives and W1 warrants."""
+    import pandas as pd
+
     if not path.is_file():
         raise FileNotFoundError(f"Upstox instruments not found: {path}")
     with gzip.open(path, "rt", encoding="utf-8") as source:
@@ -135,6 +141,8 @@ def load_upstox(path: Path) -> pd.DataFrame:
 
 
 def _load_aliceblue(nse_path: Path, bse_path: Path, con: sqlite3.Connection) -> pd.DataFrame:
+    import pandas as pd
+
     if not table_exists(con, "consolidated"):
         raise RuntimeError("Database table 'consolidated' does not exist. Run 'stocky rebuild' first.")
     mappings = con.execute("SELECT isin, nse_symbol, bse_sc_code FROM consolidated").fetchall()

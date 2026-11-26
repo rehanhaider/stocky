@@ -6,8 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
-
-import pandas as pd
+from typing import TYPE_CHECKING
 
 from stocky import __version__
 from stocky.config import DEFAULT_BACKUP_DIR, DEFAULT_DB_PATH
@@ -24,6 +23,9 @@ from stocky.database import (
     table_exists,
 )
 from stocky.sources import BhavcopyPaths, parse_bse_bhavcopy_date, parse_nse_bhavcopy_date, require_existing_files
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 NSE_LEGACY_COLUMNS = {"SERIES", "ISIN", "SYMBOL"}
 NSE_UDIFF_COLUMNS = {"SctySrs", "ISIN", "TckrSymb", "FinInstrmId"}
@@ -110,6 +112,8 @@ def _require_columns(dataframe: pd.DataFrame, required_columns: set[str], source
 
 
 def load_bse_equities(path: Path, *, include_sgb: bool = False) -> pd.DataFrame:
+    import pandas as pd
+
     bse_bhavcopy = _strip_dataframe_strings(pd.read_csv(path))
 
     if BSE_LEGACY_COLUMNS.issubset(bse_bhavcopy.columns):
@@ -153,6 +157,8 @@ def load_bse_equities(path: Path, *, include_sgb: bool = False) -> pd.DataFrame:
 
 
 def load_nse_equities(path: Path, *, include_sgb: bool = False) -> pd.DataFrame:
+    import pandas as pd
+
     nse_bhavcopy = _strip_dataframe_strings(pd.read_csv(path))
 
     if NSE_LEGACY_COLUMNS.issubset(nse_bhavcopy.columns):
@@ -184,6 +190,8 @@ def load_nse_equities(path: Path, *, include_sgb: bool = False) -> pd.DataFrame:
 
 
 def load_zerodha_instruments(path: Path) -> pd.DataFrame:
+    import pandas as pd
+
     instruments = _strip_dataframe_strings(pd.read_csv(path))
     _require_columns(instruments, {"segment", "exchange_token", "tradingsymbol"}, f"Zerodha instruments ({path})")
 
@@ -203,6 +211,8 @@ def match_zerodha_symbols(tokens: pd.Series, zerodha_instruments: pd.DataFrame, 
     an NSE share from picking up a different company's BSE symbol, and yields Zerodha's own spelling,
     such as AAREYDRUGS-BE for NSE trade-for-trade shares.
     """
+    import pandas as pd
+
     segment_rows = zerodha_instruments[zerodha_instruments["segment"] == segment]
     token_to_symbol = dict(zip(segment_rows["exchange_token"], segment_rows["tradingsymbol"], strict=False))
     return tokens.map(lambda token: token_to_symbol.get(str(token)) if pd.notna(token) else None)
@@ -215,6 +225,8 @@ def match_zerodha_symbols_by_name(symbols: pd.Series, zerodha_instruments: pd.Da
     different day can hold the share under its other token. Searching only the named segment keeps the
     symbol from matching a different company on the other exchange. Sovereign gold bonds use -GB.
     """
+    import pandas as pd
+
     listed = set(zerodha_instruments.loc[zerodha_instruments["segment"] == segment, "tradingsymbol"])
 
     def match(symbol: object) -> str | None:
@@ -234,6 +246,8 @@ def match_zerodha_symbols_by_name(symbols: pd.Series, zerodha_instruments: pd.Da
 
 def yahoo_tickers(symbols: pd.Series, suffix: str) -> pd.Series:
     """Append Yahoo's exchange suffix to an exchange's own symbol, leaving unlisted rows empty."""
+    import pandas as pd
+
     return symbols.map(lambda symbol: f"{symbol}{suffix}" if pd.notna(symbol) and str(symbol) else None)
 
 
@@ -244,6 +258,8 @@ def build_consolidated_dataframe(
     zerodha_instruments: pd.DataFrame,
     include_sgb: bool = False,
 ) -> pd.DataFrame:
+    import pandas as pd
+
     equities = pd.merge(nse_equities, bse_equities, on="isin", how="outer")
     equities.set_index("isin", inplace=True)
     equities["ins_type"] = "equity"
@@ -291,6 +307,8 @@ def describe_source(path: Path, *, role: str, rows: int, trade_date: date | None
 
 
 def _normalize(value: object) -> str | None:
+    import pandas as pd
+
     if value is None or (not isinstance(value, str) and pd.isna(value)):
         return None
     text = str(value)
@@ -326,6 +344,8 @@ def diff_consolidated(
     unchanged, and duplicate rows add up to ``rebuilt_rows``, and kept, removed, and duplicate rows
     add up to ``current_rows``.
     """
+    import pandas as pd
+
     if sample_size < 0:
         raise ValueError("Sample size must not be negative.")
 
@@ -419,6 +439,8 @@ def require_matching_trade_dates(paths: BhavcopyPaths) -> date:
 
 def require_valid_consolidated(consolidated: pd.DataFrame) -> None:
     """Fail when the rebuilt table, indexed by ISIN, is empty or has empty or duplicate ISINs."""
+    import pandas as pd
+
     if consolidated.empty:
         raise ValueError("The rebuilt table has no rows. Check that the bhavcopies list equities.")
 
@@ -486,6 +508,8 @@ def preview_sources(paths: BhavcopyPaths) -> SourcePreview:
 
 def write_consolidated_table(con: sqlite3.Connection, consolidated: pd.DataFrame) -> None:
     """Replace the consolidated table inside the caller's transaction: TEXT columns and an ISIN index."""
+    import pandas as pd
+
     frame = consolidated.reset_index()
     columns = list(frame.columns)
     column_definitions = ", ".join(f'"{column}" TEXT' for column in columns)

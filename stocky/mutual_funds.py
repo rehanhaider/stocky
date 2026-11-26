@@ -3,11 +3,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-
-import pandas as pd
+from typing import TYPE_CHECKING
 
 from stocky.config import DEFAULT_DB_PATH
 from stocky.database import _escape_like, connect, table_exists
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 MUTUAL_FUNDS_TABLE = "mutual_funds"
 
@@ -49,6 +51,8 @@ class MutualFundSearchResult:
 
 def load_mf_instruments(path: Path) -> pd.DataFrame:
     """Read Zerodha's mutual fund instruments into one row per ISIN with the `mutual_funds` columns."""
+    import pandas as pd
+
     if not path.is_file():
         raise FileNotFoundError(f"Zerodha mutual fund instruments not found: {path}")
 
