@@ -7,11 +7,12 @@ import re
 import shutil
 import sqlite3
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from stocky import __version__
 from stocky.config import DEFAULT_BACKUP_DIR, DEFAULT_DB_PATH
 
 CONSOLIDATED_TABLE = "consolidated"
@@ -19,6 +20,8 @@ YAHOO_RESPONSES_TABLE = "yahoo_responses"
 # Every rebuild replaces the whole consolidated table, so one build's sources produced every row in it.
 PROVENANCE_BUILDS_TABLE = "provenance_builds"
 PROVENANCE_SOURCES_TABLE = "provenance_sources"
+# Each import replaces its own rows of a mapping table, so the latest record per table and source describes them.
+PROVENANCE_IMPORTS_TABLE = "provenance_imports"
 
 # Yahoo quote types that describe a listed security. Yahoo labels some thinly traded Indian
 # shares MUTUALFUND and liquid ETFs BOND; an INDEX answer carries index levels, not the share's.
@@ -84,6 +87,21 @@ class BuildProvenance:
 
 
 @dataclass(frozen=True)
+class ImportRecord:
+    """One source file of the latest import into a mapping table such as `mutual_funds` or `broker_symbols`."""
+
+    table_name: str
+    role: str
+    file_name: str
+    sha256: str
+    size_bytes: int
+    modified_at: str
+    rows: int
+    imported_at: str
+    stocky_version: str
+
+
+@dataclass(frozen=True)
 class DatabaseStatus:
     db_path: Path
     db_size_bytes: int
@@ -97,6 +115,7 @@ class DatabaseStatus:
     yahoo_cached_ns: int
     yahoo_cached_bo: int
     provenance: BuildProvenance | None = None
+    imports: list[ImportRecord] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -250,6 +269,79 @@ def read_latest_provenance(con: sqlite3.Connection) -> BuildProvenance | None:
         ).fetchall()
     ]
     return BuildProvenance(*build, sources=sources)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def record_import_provenance(
+    con: sqlite3.Connection,
+    table_name: str,
+    sources: Sequence[tuple[str, Path, int]],
+) -> None:
+    """Record the files an import read, as (role, path, rows) entries, in the caller's open transaction.
+
+    Each entry replaces the earlier record for the same table and role, so a broker import keeps the other brokers'
+    records. Only the file name is kept, not the local directory, as in `provenance_sources`.
+    """
+    con.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {PROVENANCE_IMPORTS_TABLE} (
+            table_name TEXT NOT NULL,
+            role TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            modified_at TEXT NOT NULL,
+            rows INTEGER NOT NULL,
+            imported_at TEXT NOT NULL,
+            stocky_version TEXT NOT NULL,
+            PRIMARY KEY (table_name, role)
+        )
+        """
+    )
+    imported_at = datetime.now(UTC).isoformat()
+    for role, path, rows in sources:
+        stat = path.stat()
+        con.execute(
+            f"""
+            INSERT OR REPLACE INTO {PROVENANCE_IMPORTS_TABLE}
+                (table_name, role, file_name, sha256, size_bytes, modified_at, rows, imported_at, stocky_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                table_name,
+                role,
+                path.name,
+                file_sha256(path),
+                stat.st_size,
+                datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
+                rows,
+                imported_at,
+                __version__,
+            ),
+        )
+
+
+def read_import_provenance(con: sqlite3.Connection) -> list[ImportRecord]:
+    """Return the recorded source files of every mapping table, or an empty list for a database without any."""
+    if not table_exists(con, PROVENANCE_IMPORTS_TABLE):
+        return []
+    return [
+        ImportRecord(*row)
+        for row in con.execute(
+            f"""
+            SELECT table_name, role, file_name, sha256, size_bytes, modified_at, rows, imported_at, stocky_version
+            FROM {PROVENANCE_IMPORTS_TABLE}
+            ORDER BY table_name, role
+            """
+        ).fetchall()
+    ]
 
 
 def table_exists(con: sqlite3.Connection, table_name: str) -> bool:
@@ -452,6 +544,7 @@ def read_status(db_path: Path = DEFAULT_DB_PATH) -> DatabaseStatus:
         yahoo_cached_ns = 0
         yahoo_cached_bo = 0
         provenance = read_latest_provenance(con)
+        imports = read_import_provenance(con)
         if table_exists(con, YAHOO_RESPONSES_TABLE):
             yahoo_rows, yahoo_oldest_fetch, yahoo_newest_fetch = con.execute(
                 f"SELECT COUNT(*), MIN(fetched_at), MAX(fetched_at) FROM {YAHOO_RESPONSES_TABLE}"
@@ -488,6 +581,7 @@ def read_status(db_path: Path = DEFAULT_DB_PATH) -> DatabaseStatus:
         yahoo_cached_ns=yahoo_cached_ns,
         yahoo_cached_bo=yahoo_cached_bo,
         provenance=provenance,
+        imports=imports,
     )
 
 

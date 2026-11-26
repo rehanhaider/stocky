@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import io
 import sqlite3
 from contextlib import closing
@@ -15,7 +16,7 @@ from stocky.bse_debt import (
     newest_bse_debt_archive,
     search_bse_debt,
 )
-from stocky.database import CONSOLIDATED_TABLE
+from stocky.database import CONSOLIDATED_TABLE, connect, read_import_provenance, record_import_provenance
 from stocky.pipeline import rebuild_database
 
 DEBT_HEADERS = {
@@ -249,6 +250,45 @@ def test_failed_write_rolls_back_previous_table(tmp_path, monkeypatch) -> None:
     assert _read_debt(db_path) == before
     with sqlite3.connect(db_path) as con:
         assert len(con.execute(f"PRAGMA index_list({BSE_DEBT_TABLE})").fetchall()) == 2
+
+
+def _read_records(db_path):
+    with connect(db_path) as con:
+        return read_import_provenance(con)
+
+
+def test_import_bse_debt_records_the_archive(tmp_path) -> None:
+    db_path = tmp_path / "stocky.db"
+    path = _write_debt_zip(tmp_path / "DEBTBHAVCOPY16102026.zip")
+
+    import_bse_debt(path, db_path)
+
+    (record,) = _read_records(db_path)
+    assert (record.table_name, record.role, record.file_name, record.rows) == (
+        "bse_debt",
+        "bse_debt_bhavcopy",
+        "DEBTBHAVCOPY16102026.zip",
+        3,
+    )
+    assert record.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert record.size_bytes == path.stat().st_size
+
+
+def test_failed_write_rolls_back_the_import_record(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "stocky.db"
+    path = _write_debt_zip(tmp_path / "debt.zip")
+    import_bse_debt(path, db_path)
+    before = (_read_records(db_path), _read_debt(db_path))
+
+    def record_then_fail(*args):
+        record_import_provenance(*args)
+        raise sqlite3.OperationalError("write failed")
+
+    monkeypatch.setattr(bse_debt, "record_import_provenance", record_then_fail)
+    with pytest.raises(sqlite3.OperationalError, match="write failed"):
+        import_bse_debt(_write_debt_zip(path, rows={"fgroup": ()}), db_path)
+
+    assert (_read_records(db_path), _read_debt(db_path)) == before
 
 
 def test_search_bse_debt_matches_fragments_and_exact_identifiers(tmp_path) -> None:

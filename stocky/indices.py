@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from stocky.config import DEFAULT_DB_PATH
-from stocky.database import _escape_like, connect, missing_database_message, table_exists
+from stocky.database import _escape_like, connect, missing_database_message, record_import_provenance, table_exists
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -92,6 +92,7 @@ def import_indices(path: Path, db_path: Path = DEFAULT_DB_PATH) -> IndicesImport
             indices.itertuples(index=False, name=None),
         )
         con.execute(f"CREATE INDEX idx_{INDICES_TABLE}_zd_symbol ON {INDICES_TABLE} (zd_symbol)")
+        record_import_provenance(con, INDICES_TABLE, [("zerodha_instruments", path, len(indices))])
 
     return IndicesImportResult(rows=len(indices), db_path=db_path, file=path)
 

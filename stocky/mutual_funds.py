@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from stocky.config import DEFAULT_DB_PATH
-from stocky.database import _escape_like, connect, missing_database_message, table_exists
+from stocky.database import _escape_like, connect, missing_database_message, record_import_provenance, table_exists
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -108,6 +108,7 @@ def import_mutual_funds(path: Path, amfi_path: Path, db_path: Path = DEFAULT_DB_
     funds = load_mf_instruments(path)
     codes, ambiguous = load_amfi_codes(amfi_path)
     funds["amfi_code"] = funds["isin"].map(codes).replace({float("nan"): None})
+    coded_rows = int(funds["amfi_code"].notna().sum())
     column_definitions = ", ".join(
         f"{column} TEXT PRIMARY KEY" if column == "isin" else f"{column} TEXT" for column in MUTUAL_FUND_COLUMNS
     )
@@ -122,10 +123,14 @@ def import_mutual_funds(path: Path, amfi_path: Path, db_path: Path = DEFAULT_DB_
             f"INSERT INTO {MUTUAL_FUNDS_TABLE} ({', '.join(MUTUAL_FUND_COLUMNS)}) VALUES ({placeholders})",
             funds.itertuples(index=False, name=None),
         )
+        # The AMFI file's rows are the schemes it gave a code.
+        record_import_provenance(
+            con, MUTUAL_FUNDS_TABLE, [("zerodha_mf_instruments", path, len(funds)), ("amfi_nav", amfi_path, coded_rows)]
+        )
 
     return MutualFundImportResult(
         rows=len(funds),
-        coded_rows=int(funds["amfi_code"].notna().sum()),
+        coded_rows=coded_rows,
         ambiguous_isins=sorted(ambiguous.intersection(funds["isin"])),
         db_path=db_path,
         mf_instruments=path,

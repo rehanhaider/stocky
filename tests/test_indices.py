@@ -1,11 +1,19 @@
 import csv
+import hashlib
 import sqlite3
 from contextlib import closing
 
 import pytest
 
 import stocky.indices as indices
-from stocky.database import CONSOLIDATED_TABLE
+from stocky.database import (
+    CONSOLIDATED_TABLE,
+    PROVENANCE_IMPORTS_TABLE,
+    connect,
+    read_import_provenance,
+    record_import_provenance,
+    table_exists,
+)
 from stocky.indices import (
     INDICES_COLUMNS,
     INDICES_SOURCE_COLUMNS,
@@ -180,6 +188,53 @@ def test_failed_write_rolls_back_previous_table(tmp_path, monkeypatch) -> None:
     assert _read_indices(db_path) == before
     with sqlite3.connect(db_path) as con:
         assert len(con.execute(f"PRAGMA index_list({INDICES_TABLE})").fetchall()) == 2
+
+
+def _read_records(db_path):
+    with connect(db_path) as con:
+        return read_import_provenance(con)
+
+
+def test_import_indices_records_the_instruments_file(tmp_path) -> None:
+    db_path = tmp_path / "stocky.db"
+    path = _write_indices_csv(tmp_path / "instruments.csv")
+
+    import_indices(path, db_path)
+    first = _read_records(db_path)
+    import_indices(_write_indices_csv(path, rows=INDICES_ROWS[:1]), db_path)
+
+    (record,) = _read_records(db_path)
+    assert [(entry.role, entry.rows) for entry in first] == [("zerodha_instruments", 3)]
+    assert (record.table_name, record.role, record.file_name, record.rows) == (
+        "indices",
+        "zerodha_instruments",
+        "instruments.csv",
+        1,
+    )
+    assert record.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("initial", [True, False])
+def test_failed_write_rolls_back_the_import_record(tmp_path, monkeypatch, initial) -> None:
+    db_path = tmp_path / "stocky.db"
+    path = _write_indices_csv(tmp_path / "instruments.csv")
+    if not initial:
+        import_indices(path, db_path)
+    before = _read_records(db_path) if db_path.exists() else []
+
+    def record_then_fail(*args):
+        record_import_provenance(*args)
+        raise sqlite3.OperationalError("write failed")
+
+    monkeypatch.setattr(indices, "record_import_provenance", record_then_fail)
+    with pytest.raises(sqlite3.OperationalError, match="write failed"):
+        import_indices(_write_indices_csv(path, rows=INDICES_ROWS[:1]), db_path)
+
+    assert _read_records(db_path) == before
+    with connect(db_path) as con:
+        # A failed first import leaves neither the table nor the record table behind.
+        assert table_exists(con, PROVENANCE_IMPORTS_TABLE) is not initial
+        assert table_exists(con, INDICES_TABLE) is not initial
 
 
 def test_search_indices_matches_fragments_and_exact_identifiers(tmp_path) -> None:

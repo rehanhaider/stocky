@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from stocky import __version__
+from stocky.brokers import BROKER_TABLE
+from stocky.bse_debt import BSE_DEBT_TABLE
 from stocky.config import DEFAULT_DB_PATH
 from stocky.database import (
     CONSOLIDATED_COLUMNS,
@@ -12,12 +14,16 @@ from stocky.database import (
     YAHOO_RESPONSES_TABLE,
     BuildProvenance,
     DatabaseStatus,
+    ImportRecord,
     connect,
     missing_database_message,
+    read_import_provenance,
     read_latest_provenance,
     read_status,
     table_exists,
 )
+from stocky.indices import INDICES_TABLE
+from stocky.mutual_funds import MUTUAL_FUNDS_TABLE
 
 DEFAULT_MISSING_SAMPLE_SIZE = 20
 
@@ -28,6 +34,21 @@ SOURCE_LABELS = {
     "bse_bhavcopy": "BSE bhavcopy",
     "nse_bhavcopy": "NSE bhavcopy",
     "zerodha_instruments": "Zerodha instruments",
+    "zerodha_mf_instruments": "Zerodha MF instruments",
+    "amfi_nav": "AMFI NAV",
+    "bse_debt_bhavcopy": "BSE debt bhavcopy",
+    "groww": "Groww instruments",
+    "upstox": "Upstox instruments",
+    "aliceblue_nse": "Alice Blue NSE",
+    "aliceblue_bse": "Alice Blue BSE",
+}
+
+# Each mapping table and the command whose import fills it and records its source files.
+MAPPING_TABLES = {
+    MUTUAL_FUNDS_TABLE: "stocky mf import",
+    BSE_DEBT_TABLE: "stocky debt import",
+    INDICES_TABLE: "stocky indices import",
+    BROKER_TABLE: "stocky brokers import",
 }
 
 
@@ -57,6 +78,7 @@ class RefreshSummary:
     passed: bool
     checks: list[Check]
     provenance: BuildProvenance | None
+    imports: list[ImportRecord]
     table_counts: dict[str, int]
     status: DatabaseStatus | None
     missing_yahoo: list[MissingYahooTickers]
@@ -87,6 +109,13 @@ def build_refresh_summary(
             ).fetchall()
         }
         provenance = read_latest_provenance(con)
+        imports = read_import_provenance(con)
+        # Each broker is imported, and recorded, on its own, so every broker with rows needs its own record.
+        brokers_with_rows = (
+            [row[0] for row in con.execute(f"SELECT DISTINCT broker FROM {BROKER_TABLE} ORDER BY broker")]
+            if table_exists(con, BROKER_TABLE)
+            else []
+        )
 
         present = (
             {row[1] for row in con.execute(f"PRAGMA table_info({CONSOLIDATED_TABLE})")}
@@ -197,6 +226,32 @@ def build_refresh_summary(
             )
         )
 
+    for table_name, command in MAPPING_TABLES.items():
+        table_rows = table_counts.get(table_name, 0)
+        records = [record for record in imports if record.table_name == table_name]
+        if not table_rows:
+            detail = f"No rows. Run '{command}'."
+        elif not records:
+            detail = f"{table_rows} rows; no import recorded. Run '{command}' to record it."
+        else:
+            detail = (
+                f"{table_rows} rows from "
+                + ", ".join(f"`{record.file_name}` (modified {record.modified_at[:10]})" for record in records)
+                + "."
+            )
+        unrecorded = []
+        if table_name == BROKER_TABLE:
+            # Alice Blue records its two files as aliceblue_nse and aliceblue_bse.
+            recorded = {record.role.split("_")[0] for record in records}
+            unrecorded = [broker for broker in brokers_with_rows if broker not in recorded]
+        if records and unrecorded:
+            detail += (
+                f" No import recorded for {', '.join(unrecorded)}. Run '{command} "
+                + " ".join(f"--broker {broker}" for broker in unrecorded)
+                + "' to record it."
+            )
+        checks.append(Check(f"{table_name} import", bool(table_rows and records and not unrecorded), detail))
+
     return RefreshSummary(
         db_path=db_path,
         generated_at=datetime.now(UTC).isoformat(),
@@ -204,6 +259,7 @@ def build_refresh_summary(
         passed=all(check.passed for check in checks),
         checks=checks,
         provenance=provenance,
+        imports=imports,
         table_counts=table_counts,
         status=read_status(db_path) if layout_ok else None,
         missing_yahoo=missing_yahoo,
@@ -249,6 +305,21 @@ def render_markdown(summary: RefreshSummary) -> str:
                 f"| {SOURCE_LABELS.get(source.role, source.role)} | `{source.file_name}` | {source.trade_date or '-'} "
                 f"| {source.rows} | {source.size_bytes} | {_timestamp(source.modified_at)} | `{source.sha256}` |"
                 for source in provenance.sources
+            ),
+        ]
+
+    lines += ["", "## Imported tables", ""]
+    if not summary.imports:
+        lines.append("No import provenance is recorded in this database.")
+    else:
+        lines += [
+            "| Table | Source | File | Rows | Size (bytes) | Modified | Imported | SHA-256 |",
+            "| --- | --- | --- | ---: | ---: | --- | --- | --- |",
+            *(
+                f"| `{record.table_name}` | {SOURCE_LABELS.get(record.role, record.role)} | `{record.file_name}` "
+                f"| {record.rows} | {record.size_bytes} | {_timestamp(record.modified_at)} "
+                f"| {_timestamp(record.imported_at)} by Stocky {record.stocky_version} | `{record.sha256}` |"
+                for record in summary.imports
             ),
         ]
 

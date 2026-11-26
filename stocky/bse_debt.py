@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from zipfile import ZipFile
 
 from stocky.config import DEFAULT_BSE_DEBT_DIR, DEFAULT_DB_PATH
-from stocky.database import _escape_like, connect, missing_database_message, table_exists
+from stocky.database import _escape_like, connect, missing_database_message, record_import_provenance, table_exists
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -171,6 +171,7 @@ def import_bse_debt(path: Path, db_path: Path = DEFAULT_DB_PATH) -> BseDebtImpor
         )
         for column in ("isin", "scrip_code"):
             con.execute(f"CREATE INDEX idx_{BSE_DEBT_TABLE}_{column} ON {BSE_DEBT_TABLE} ({column})")
+        record_import_provenance(con, BSE_DEBT_TABLE, [("bse_debt_bhavcopy", path, len(debt))])
 
     return BseDebtImportResult(rows=len(debt), db_path=db_path, file=path)
 
