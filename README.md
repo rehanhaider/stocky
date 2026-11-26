@@ -17,9 +17,11 @@ symbols, and the separate `mutual_funds`, `bse_debt`, `indices`, and `broker_sym
 
 ## Release data
 
-Release `v2.0.0` replaces the shared Zerodha and Yahoo symbol columns with exchange-specific columns. See the
-[release notes](docs/releases/v2.0.0.md) for the column changes, source trade date, and database row counts.
-`data/output/stocky.db` is versioned with the repository; pin the release tag to use that database version.
+Release `v3.0.0` adds the `bse_debt`, `mutual_funds`, `indices`, `broker_symbols`, and `provenance_imports` tables,
+labels ETFs and sovereign gold bonds in `ins_type`, and records a schema number in the file. See the
+[v3.0.0 release notes](docs/releases/v3.0.0.md) for the breaking changes, source dates, and row counts, and the
+[v2.0.0 notes](docs/releases/v2.0.0.md) for the earlier column change. `data/output/stocky.db` is versioned with the
+repository; pin the release tag to use that database version.
 
 ### Quick start for consumers
 
@@ -30,7 +32,7 @@ curl -fLo stocky.db https://raw.githubusercontent.com/rehanhaider/stocky/v3.0.0/
 shasum -a 256 stocky.db
 ```
 
-SHA-256 for `v3.0.0`: to be filled in when the release is tagged.
+SHA-256 for `v3.0.0`: `d173305ca9763cc2a6719e4f87b2d15cd4a8714f61a9edd305a4609b1813972e`.
 
 Look up an instrument's identifiers on both exchanges:
 
