@@ -367,10 +367,15 @@ def describe_schema_version(schema_version: int) -> str:
 def write_schema_version(con: sqlite3.Connection, *, replaces_consolidated: bool = False) -> None:
     """Record SCHEMA_VERSION inside the caller's write transaction, so it commits or rolls back with the tables.
 
-    A write that leaves consolidated alone keeps the file's number while that table has an older layout: stamping
-    it would make the layout check trust a table only a rebuild can bring up to date.
+    Only a rebuild can vouch for consolidated, so a write that leaves that table alone never numbers a file whose
+    consolidated has no number yet or an older one. A v2.0.0 file, for one, has every current column but labels ETFs
+    as equity; stamping it would make the layout check trust a table only a rebuild can bring up to date.
     """
-    if not replaces_consolidated and table_exists(con, CONSOLIDATED_TABLE) and older_layout(con) is not None:
+    if (
+        not replaces_consolidated
+        and table_exists(con, CONSOLIDATED_TABLE)
+        and (read_schema_version(con) == 0 or older_layout(con) is not None)
+    ):
         return
     con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
