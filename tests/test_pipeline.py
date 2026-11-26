@@ -6,6 +6,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pandas as pd
 import pytest
 
+import stocky.pipeline as pipeline
 from stocky import __version__
 from stocky.database import CONSOLIDATED_COLUMNS, CONSOLIDATED_TABLE, PROVENANCE_BUILDS_TABLE, read_latest_provenance
 from stocky.pipeline import (
@@ -586,6 +587,48 @@ def test_rebuild_database_backs_up_existing_table_before_overwrite(
         live_rows = live_con.execute(f"SELECT COUNT(*) FROM {CONSOLIDATED_TABLE}").fetchone()[0]
     assert backup_rows == 4
     assert live_rows == 1
+
+
+def test_rebuild_database_leaves_a_shared_backup_folder_alone_for_a_database_elsewhere(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups
+) -> None:
+    # The backup folder does not follow --db-path: another stocky.db backs up beside these, under the same names.
+    paths = market_csv_builder(tmp_path / "inputs")
+    backup_dir = tmp_path / "project" / "data" / "output" / "backup"
+    others = old_backups(backup_dir, "stocky.db", 7)
+    db_path = tmp_path / "elsewhere" / "stocky.db"
+    db_path.parent.mkdir()
+    seed_consolidated(db_path)
+
+    result = rebuild_database(paths, db_path=db_path, backup_dir=backup_dir, keep_backups=1)
+
+    assert result.removed_backups == []
+    assert set(others) < set(backup_dir.iterdir())
+    assert result.backup_path in set(backup_dir.iterdir())
+
+
+def test_rebuild_database_reports_a_failed_prune_as_a_warning_after_writing(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups, monkeypatch
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    backup_dir = tmp_path / "backups"
+    seed_consolidated(db_path)
+    old_backups(backup_dir, db_path.name, 7)
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("backup folder is read-only")
+
+    monkeypatch.setattr(pipeline, "prune_backups", refuse)
+
+    result = rebuild_database(paths, db_path=db_path, backup_dir=backup_dir)
+
+    assert result.removed_backups == []
+    assert result.warnings == [
+        f"The rebuild was written, but removing old backups in {backup_dir} failed: backup folder is read-only"
+    ]
+    with sqlite3.connect(db_path) as con:
+        assert con.execute(f"SELECT isin FROM {CONSOLIDATED_TABLE}").fetchall() == [("INE002A01018",)]
 
 
 def test_rebuild_database_keeps_the_newest_backups_after_a_successful_write(
