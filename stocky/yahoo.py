@@ -74,7 +74,7 @@ def is_auth_failure(detail: str) -> bool:
     """Whether a failure's detail says Yahoo rejected the client's crumb or cookie.
 
     A new client clears this: building one starts a session and requests a fresh crumb
-    (yahooquery base.py:36-38).
+    (yahooquery base.py:35-38).
     """
     lowered = detail.lower()
     return any(marker in lowered for marker in AUTH_FAILURE_MARKERS)

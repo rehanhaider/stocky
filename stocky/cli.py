@@ -784,6 +784,10 @@ def _interactive_rebuild() -> None:
         return
 
     _print_rebuild_result(result)
+    # The preview already showed its warnings; these arose during the write, such as a backup that could not be removed.
+    for warning in result.warnings:
+        if warning not in planned.warnings:
+            console.print(f"[yellow]Warning: {escape(warning)}[/yellow]")
 
 
 def _interactive_show_matches(term: str, result: SearchResult) -> None:
