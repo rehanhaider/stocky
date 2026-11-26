@@ -2873,6 +2873,7 @@ def test_refresh_names_the_command_that_resumes_a_failing_yahoo_update(refresh_r
     ("stale_days", "db_path", "expected"),
     [
         (None, cli.DEFAULT_DB_PATH, "stocky yahoo update --exchange NSE --stale-days 1"),
+        (0.0, cli.DEFAULT_DB_PATH, "stocky yahoo update --exchange NSE --stale-days 1"),
         (90.0, cli.DEFAULT_DB_PATH, "stocky yahoo update --exchange NSE --stale-days 90"),
         (
             0.5,

@@ -1171,10 +1171,11 @@ def _no_yahoo_progress(exchange: str) -> contextlib.AbstractContextManager[Progr
 def _yahoo_resume_command(exchange: str, db_path: Path, stale_days: float | None) -> str:
     """The yahoo update that finishes a refresh's stopped Yahoo step, skipping the tickers it already saved.
 
-    With --stale-days the same age does that. Without it the refresh refetched every ticker, so --missing-only
-    would skip every ticker that has any older response; one day skips only those saved since the refresh began.
+    With --stale-days the same age does that. Without it, or with 0, the refresh refetched every ticker, so
+    --missing-only would skip every ticker that has any older response and --stale-days 0 would fetch them all
+    again; one day skips only those saved since the refresh began.
     """
-    days = 1 if stale_days is None else stale_days
+    days = stale_days if stale_days else 1
     command = ["stocky", "yahoo", "update", "--exchange", exchange, "--stale-days", f"{days:g}"]
     if db_path != DEFAULT_DB_PATH:
         command += ["--db-path", str(db_path)]
