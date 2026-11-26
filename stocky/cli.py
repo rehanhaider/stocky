@@ -45,6 +45,7 @@ from stocky.config import (
     DEFAULT_DB_PATH,
     DEFAULT_GROWW_INSTRUMENTS,
     DEFAULT_KEEP_BACKUPS,
+    DEFAULT_REFRESH_SUMMARY,
     DEFAULT_SNAPSHOT_DIR,
     DEFAULT_UPSTOX_INSTRUMENTS,
     DEFAULT_YAHOO_JSON_CACHE_DIR,
@@ -543,8 +544,9 @@ def _print_yahoo_fields(row: EnrichedRow) -> None:
         console.print(f"[yellow]{_YAHOO_STATUS_NOTES[row.yahoo_status]}[/yellow]")
 
 
-# Below this width the eight-column table truncates identifiers, so the screen switches to the compact layout.
-_COMPACT_SCREEN_WIDTH = 100
+# Below this width the eight-column table truncates identifiers, names or sectors, so the screen switches to the
+# compact layout. At 100 columns the table still cut names and sectors short.
+_COMPACT_SCREEN_WIDTH = 120
 
 
 def _print_screen_result(result: ScreenResult) -> None:
@@ -1384,6 +1386,10 @@ def refresh(
         ),
     ] = None,
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    summary_output: Annotated[
+        Path,
+        typer.Option("--summary-output", help="Markdown file the summary step writes, passed or failed."),
+    ] = DEFAULT_REFRESH_SUMMARY,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Print the result as JSON on stdout and step and progress events on stderr."),
@@ -1392,6 +1398,8 @@ def refresh(
     """Run the quarterly refresh in order: rebuild, indices, debt, mutual funds, brokers, Yahoo NSE and BSE, summary.
 
     The rebuild keeps SGB rows when the current table has them. Each step reads its command's default input files.
+
+    The summary step writes the refresh summary to --summary-output, passed or failed. A dry run writes nothing.
 
     Each step commits on its own. The refresh stops at the first step that fails and exits with status 1.
     """
@@ -1422,6 +1430,16 @@ def refresh(
         _emit_json(result)
 
     failure = result.failure
+    summary = next((step.result for step in result.steps if isinstance(step.result, RefreshSummary)), None)
+    if failure is not None and isinstance(failure.result, RefreshSummary):
+        summary = failure.result
+    if summary is not None:
+        # Written passed or failed, as `stocky summary --output` does, so a failed check can be read in the file.
+        summary_output.parent.mkdir(parents=True, exist_ok=True)
+        summary_output.write_text(render_markdown(summary), encoding="utf-8")
+        if not json_output:
+            error_console.print(f"Wrote the refresh summary to {escape(str(summary_output))}.")
+
     if failure is not None:
         if not json_output and failure.result is not None:
             _print_refresh_step(failure.step, failure.result, dry_run=dry_run)
