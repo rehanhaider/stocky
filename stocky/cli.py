@@ -892,6 +892,8 @@ def _interactive_yahoo_update() -> None:
         return
 
     console.print(f"[green]Processed {result.processed}; wrote {result.written}; skipped {result.skipped}.[/green]")
+    for warning in result.warnings:
+        console.print(f"[yellow]Warning: {escape(warning)}[/yellow]")
 
 
 @app.callback(invoke_without_command=True)
@@ -1529,6 +1531,8 @@ def yahoo_update(
             f"[green]Processed {result.processed}; wrote {result.written}; skipped {result.skipped}; "
             f"pruned {result.pruned}; dry_run={result.dry_run}.[/green]"
         )
+        for warning in result.warnings:
+            error_console.print(f"[yellow]Warning: {escape(warning)}[/yellow]")
 
 
 @yahoo_app.command("import-cache")

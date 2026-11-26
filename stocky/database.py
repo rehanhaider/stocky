@@ -627,19 +627,30 @@ def count_orphan_yahoo_responses(db_path: Path = DEFAULT_DB_PATH) -> int:
         return con.execute(f"SELECT COUNT(*) {_ORPHAN_YAHOO_RESPONSES}").fetchone()[0]
 
 
+class OrphanVacuumError(Exception):
+    """Raised when the orphaned responses were deleted and committed but VACUUM then failed."""
+
+    def __init__(self, pruned: int, cause: sqlite3.Error) -> None:
+        super().__init__(str(cause))
+        self.pruned = pruned
+
+
 def prune_orphan_yahoo_responses(db_path: Path = DEFAULT_DB_PATH) -> int:
     """Delete the cached responses whose ticker no longer appears in consolidated, and return how many.
 
     The deletion is committed first and the file is then vacuumed, on a second connection, to give the
     freed pages back, because VACUUM cannot run inside a transaction. Nothing is vacuumed when nothing was
-    deleted.
+    deleted. A failed VACUUM raises OrphanVacuumError, which carries the committed count.
     """
     with connect(db_path) as con:
         require_consolidated_table(con, db_path, ("yq_ns", "yq_bo"))
         pruned = con.execute(f"DELETE {_ORPHAN_YAHOO_RESPONSES}").rowcount
     if pruned:
-        with connect(db_path) as con:
-            con.execute("VACUUM")
+        try:
+            with connect(db_path) as con:
+                con.execute("VACUUM")
+        except sqlite3.Error as exc:
+            raise OrphanVacuumError(pruned, exc) from exc
     return pruned
 
 
