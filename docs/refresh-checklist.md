@@ -21,7 +21,7 @@ inputs, so step 1 stays manual.
    `mf import`, `brokers import`, `yahoo update` for NSE and then BSE, and `summary`, in that order, with each command's
    default input files. The rebuild keeps the SGB rows when the current table has them. `--dry-run` shows every step's
    preview and writes nothing. The refresh stops at the first step that fails and names it and the steps that
-   completed. Its summary step writes `data/output/refresh-summary.md`, passed or failed, then go on to step 6:
+   completed. Its summary step writes `data/output/refresh-summary.md`, passed or failed. Then go on to step 6:
 
    ```bash
    uv run stocky refresh --date YYYY-MM-DD --stale-days 90 --dry-run
