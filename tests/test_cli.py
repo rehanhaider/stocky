@@ -7,6 +7,7 @@ import subprocess
 import sys
 import types
 from datetime import date
+from pathlib import Path
 from zipfile import ZipFile
 
 import pytest
@@ -2864,8 +2865,24 @@ def test_refresh_names_the_command_that_resumes_a_failing_yahoo_update(refresh_r
     assert result.exit_code == 1
     stderr = " ".join(result.stderr.split())
     assert "Refresh stopped at step 6 of 8, yahoo update NSE: Yahoo Finance request failed for" in stderr
-    assert "then run 'stocky yahoo update --exchange NSE --missing-only' to resume" in stderr
-    assert "re-run with --missing-only" not in stderr
+    assert "then run 'stocky yahoo update --exchange NSE --stale-days 1' to fetch the tickers" in stderr
+    assert "--missing-only" not in stderr
+
+
+@pytest.mark.parametrize(
+    ("stale_days", "db_path", "expected"),
+    [
+        (None, cli.DEFAULT_DB_PATH, "stocky yahoo update --exchange NSE --stale-days 1"),
+        (90.0, cli.DEFAULT_DB_PATH, "stocky yahoo update --exchange NSE --stale-days 90"),
+        (
+            0.5,
+            Path("my data/other.db"),
+            "stocky yahoo update --exchange NSE --stale-days 0.5 --db-path 'my data/other.db'",
+        ),
+    ],
+)
+def test_refresh_resume_command_follows_the_refresh_options(stale_days, db_path, expected) -> None:
+    assert cli._yahoo_resume_command("NSE", db_path, stale_days) == expected
 
 
 def test_refresh_reports_the_brokers_that_committed_before_one_failed(refresh_root, runner) -> None:
