@@ -13,6 +13,7 @@ from stocky.database import (
     BuildProvenance,
     DatabaseStatus,
     connect,
+    missing_database_message,
     read_latest_provenance,
     read_status,
     table_exists,
@@ -72,7 +73,7 @@ def build_refresh_summary(
 ) -> RefreshSummary:
     """Validate a rebuilt database and collect what a refresh review needs: sources, counts, and gaps."""
     if not db_path.exists():
-        raise FileNotFoundError(f"Database not found: {db_path}. Run 'stocky rebuild' first.")
+        raise FileNotFoundError(missing_database_message(db_path, "stocky rebuild"))
     if sample_size < 0:
         raise ValueError("Sample size must not be negative.")
 

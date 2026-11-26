@@ -41,6 +41,7 @@ from stocky.database import (
     SourceRecord,
     has_sgb_rows,
     import_yahoo_json_cache,
+    missing_database_message,
     read_status,
     search_instruments,
 )
@@ -89,6 +90,20 @@ def _print_error(message: str) -> None:
     read a bracketed fragment such as '[/]' as a markup tag and raise MarkupError.
     """
     error_console.print(f"[red]{escape(message)}[/red]")
+
+
+# The debt, indices and brokers commands once took --db. It stays as a hidden alias of --db-path.
+DbAliasOption = Annotated[Path | None, typer.Option("--db", hidden=True, help="Old spelling of --db-path.")]
+
+
+def _db_path_or_alias(ctx: typer.Context, db_path: Path, db_alias: Path | None) -> Path:
+    if db_alias is None:
+        return db_path
+    source = ctx.get_parameter_source("db_path")
+    if source is not None and source.name == "COMMANDLINE":
+        _print_error("Pass --db-path or --db, not both.")
+        raise typer.Exit(1)
+    return db_alias
 
 
 def _parse_date(value: str | None) -> date | None:
@@ -1132,7 +1147,7 @@ def explore(
         raise typer.Exit(1)
 
     if not db_path.exists():
-        _print_error(f"Database not found: {db_path}. Run 'stocky rebuild' first.")
+        _print_error(missing_database_message(db_path, "stocky rebuild"))
         raise typer.Exit(1)
 
     while True:
@@ -1571,11 +1586,14 @@ def mf_query(
 
 @debt_app.command("import")
 def debt_import(
+    ctx: typer.Context,
     file: Annotated[Path | None, typer.Option("--file", help="BSE debt bhavcopy zip path.")] = None,
-    db_path: Annotated[Path, typer.Option("--db", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    db_alias: DbAliasOption = None,
     json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
 ) -> None:
     """Replace the bse_debt table with the instruments in a BSE debt bhavcopy archive."""
+    db_path = _db_path_or_alias(ctx, db_path, db_alias)
     try:
         result = import_bse_debt(file if file is not None else newest_bse_debt_archive(), db_path)
     except Exception as exc:
@@ -1593,13 +1611,16 @@ def debt_import(
 
 @debt_app.command("query")
 def debt_query(
+    ctx: typer.Context,
     term: Annotated[str, typer.Argument(help="ISIN, scrip code, symbol, or name fragment.")],
     limit: Annotated[int, typer.Option("--limit", help="Maximum number of matches to display.")] = 20,
     exact: Annotated[bool, typer.Option("--exact", help="Match the ISIN, scrip code, or symbol exactly.")] = False,
-    db_path: Annotated[Path, typer.Option("--db", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    db_alias: DbAliasOption = None,
     json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
 ) -> None:
     """Look up BSE debt by ISIN, scrip code, symbol, or name."""
+    db_path = _db_path_or_alias(ctx, db_path, db_alias)
     try:
         result = search_bse_debt(term, db_path, limit=limit, exact=exact)
     except Exception as exc:
@@ -1614,11 +1635,14 @@ def debt_query(
 
 @indices_app.command("import")
 def indices_import(
+    ctx: typer.Context,
     file: Annotated[Path, typer.Option("--file", help="Zerodha instruments CSV path.")] = DEFAULT_ZERODHA_INSTRUMENTS,
-    db_path: Annotated[Path, typer.Option("--db", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    db_alias: DbAliasOption = None,
     json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
 ) -> None:
     """Replace the indices table with the INDICES rows in Zerodha's instruments file."""
+    db_path = _db_path_or_alias(ctx, db_path, db_alias)
     try:
         result = import_indices(file, db_path)
     except Exception as exc:
@@ -1636,16 +1660,19 @@ def indices_import(
 
 @indices_app.command("query")
 def indices_query(
+    ctx: typer.Context,
     term: Annotated[str, typer.Argument(help="Symbol, instrument token, exchange token, or name fragment.")],
     limit: Annotated[int, typer.Option("--limit", help="Maximum number of matches to display.")] = 20,
     exact: Annotated[
         bool, typer.Option("--exact", help="Match the symbol, instrument token, or exchange token exactly.")
     ] = False,
     exchange: Annotated[str | None, typer.Option("--exchange", help="Filter by exchange, case-insensitive.")] = None,
-    db_path: Annotated[Path, typer.Option("--db", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    db_alias: DbAliasOption = None,
     json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
 ) -> None:
     """Look up a market index by symbol, instrument token, exchange token, or name."""
+    db_path = _db_path_or_alias(ctx, db_path, db_alias)
     try:
         result = search_indices(term, db_path, limit=limit, exact=exact, exchange=exchange)
     except Exception as exc:
@@ -1660,6 +1687,7 @@ def indices_query(
 
 @brokers_app.command("import")
 def brokers_import(
+    ctx: typer.Context,
     broker: Annotated[
         list[Broker] | None, typer.Option("--broker", help="Import only these brokers; repeat to select several.")
     ] = None,
@@ -1671,9 +1699,11 @@ def brokers_import(
     aliceblue_bse: Annotated[
         Path, typer.Option("--aliceblue-bse", help="Alice Blue BSE CSV path.")
     ] = DEFAULT_ALICEBLUE_BSE,
-    db_path: Annotated[Path, typer.Option("--db", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    db_alias: DbAliasOption = None,
 ) -> None:
     """Replace each selected broker's cash-market mappings in its own transaction."""
+    db_path = _db_path_or_alias(ctx, db_path, db_alias)
     paths = {Broker.groww: groww, Broker.upstox: upstox, Broker.aliceblue: aliceblue_nse}
     table = Table(title="Broker cash instruments", padding=(0, 0), show_edge=False)
     for label in ("Broker", "Exchange", "Rows", "With ISIN", "In consolidated"):
@@ -1696,15 +1726,18 @@ def brokers_import(
 
 @brokers_app.command("query")
 def brokers_query(
+    ctx: typer.Context,
     term: Annotated[str, typer.Argument(help="ISIN, symbol, token, broker key, or name fragment.")],
     limit: Annotated[int, typer.Option("--limit", help="Maximum number of matches to display.")] = 20,
     exact: Annotated[bool, typer.Option("--exact", help="Match identifiers exactly.")] = False,
     broker: Annotated[Broker | None, typer.Option("--broker", help="Filter by broker.")] = None,
     exchange: Annotated[str | None, typer.Option("--exchange", help="Filter by exchange, case-insensitive.")] = None,
-    db_path: Annotated[Path, typer.Option("--db", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
+    db_alias: DbAliasOption = None,
     json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
 ) -> None:
     """Look up broker cash-market identifiers or a symbol/name fragment."""
+    db_path = _db_path_or_alias(ctx, db_path, db_alias)
     try:
         result = search_brokers(term, db_path, limit=limit, exact=exact, broker=broker, exchange=exchange)
     except Exception as exc:

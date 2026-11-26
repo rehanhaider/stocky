@@ -422,7 +422,10 @@ def test_fetch_consolidated_symbols_limit_and_failures(tmp_path, seed_consolidat
         fetch_consolidated_symbols(db_path, key="bad_key")
     with pytest.raises(FileNotFoundError, match="Database not found") as missing_db:
         fetch_consolidated_symbols(tmp_path / "missing.db", key="yq_ns")
-    assert "Run 'stocky rebuild' first." in str(missing_db.value)
+    assert str(missing_db.value) == (
+        f"Database not found: {(tmp_path / 'missing.db').resolve()}. Run 'stocky rebuild' first. "
+        "To use an existing database, pass --db-path or run from the repository root."
+    )
 
     yahoo_only = tmp_path / "yahoo-only.db"
     initialize_database(yahoo_only)

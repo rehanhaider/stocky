@@ -6,7 +6,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from stocky.config import DEFAULT_DB_PATH
-from stocky.database import _escape_like, connect, table_exists
+from stocky.database import _escape_like, connect, missing_database_message, table_exists
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -147,7 +150,7 @@ def search_mutual_funds(
         raise ValueError("Limit must be at least 1.")
 
     if not db_path.exists():
-        raise FileNotFoundError(f"Database not found: {db_path}. Run 'stocky mf import' first.")
+        raise FileNotFoundError(missing_database_message(db_path, "stocky mf import"))
 
     equality = " OR ".join(f"UPPER({column}) = :exact" for column in EXACT_COLUMNS)
     where = f"({equality})"

@@ -39,6 +39,14 @@ CONSOLIDATED_COLUMNS = (
 SEARCHABLE_COLUMNS = tuple(column for column in CONSOLIDATED_COLUMNS if column != "ins_type")
 
 
+def missing_database_message(db_path: Path, first_step: str) -> str:
+    """Name the absolute path, since every default path is relative to the current directory."""
+    return (
+        f"Database not found: {db_path.resolve()}. Run '{first_step}' first. "
+        "To use an existing database, pass --db-path or run from the repository root."
+    )
+
+
 @dataclass(frozen=True)
 class JsonImportResult:
     imported: int
@@ -314,7 +322,7 @@ def fetch_consolidated_symbols(
         raise ValueError(f"Unsupported symbol key: {key}")
 
     if not db_path.exists():
-        raise FileNotFoundError(f"Database not found: {db_path}. Run 'stocky rebuild' first.")
+        raise FileNotFoundError(missing_database_message(db_path, "stocky rebuild"))
 
     with connect(db_path) as con:
         require_consolidated_table(con, db_path, ("isin", key))
@@ -350,7 +358,7 @@ def has_sgb_rows(db_path: Path = DEFAULT_DB_PATH) -> bool:
 
 def read_status(db_path: Path = DEFAULT_DB_PATH) -> DatabaseStatus:
     if not db_path.exists():
-        raise FileNotFoundError(f"Database not found: {db_path}. Run 'stocky rebuild' first.")
+        raise FileNotFoundError(missing_database_message(db_path, "stocky rebuild"))
 
     with connect(db_path) as con:
         consolidated_rows = 0
@@ -439,7 +447,7 @@ def search_instruments(
         raise ValueError("Limit must be at least 1.")
 
     if not db_path.exists():
-        raise FileNotFoundError(f"Database not found: {db_path}. Run 'stocky rebuild' first.")
+        raise FileNotFoundError(missing_database_message(db_path, "stocky rebuild"))
 
     equality = " OR ".join(f"UPPER(CAST({column} AS TEXT)) = :exact" for column in SEARCHABLE_COLUMNS)
     where = f"({equality})"

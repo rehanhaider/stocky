@@ -2303,3 +2303,92 @@ def test_brokers_import_reports_earlier_commits_when_later_broker_fails(tmp_path
     assert "groww" in result.stdout and "Upstox instruments not found" in result.stderr
     with sqlite3.connect(db) as con:
         assert con.execute("SELECT broker FROM broker_symbols").fetchall() == [("groww",)]
+
+
+def _import_debt_indices_and_brokers(tmp_path, runner, db_flag):
+    """Import every table the debt, indices and brokers commands read, naming the database with db_flag."""
+    db = tmp_path / "stocky.db"
+    files = _write_cli_broker_sources(tmp_path / "brokers")
+    imports = [
+        ["debt", "import", "--file", str(_write_cli_debt_zip(tmp_path / "debt.zip"))],
+        ["indices", "import", "--file", str(_write_cli_indices_csv(tmp_path / "instruments.csv"))],
+        ["brokers", "import", "--broker", "groww", "--groww", str(files["groww/instrument.csv"])],
+    ]
+    return db, [runner.invoke(app, [*args, db_flag, str(db)]) for args in imports]
+
+
+# Each query, and how many rows the imports above give it: the debt ISIN is in two bhavcopy families.
+DB_QUERIES = [
+    (["debt", "query", "INE0K0Y08060", "--exact", "--json"], 2),
+    (["indices", "query", "NIFTY BANK", "--exact", "--json"], 1),
+    (["brokers", "query", "INE002A01018", "--exact", "--json"], 1),
+]
+
+
+@pytest.mark.parametrize("db_flag", ["--db-path", "--db"])
+def test_debt_indices_and_brokers_commands_accept_db_path_and_the_db_alias(
+    tmp_path, seed_consolidated, runner, db_flag
+) -> None:
+    seed_consolidated(tmp_path / "stocky.db")
+
+    db, imports = _import_debt_indices_and_brokers(tmp_path, runner, db_flag)
+
+    for imported in imports:
+        assert imported.exit_code == 0, imported.output
+    for args, total in DB_QUERIES:
+        queried = runner.invoke(app, [*args, db_flag, str(db)])
+        assert queried.exit_code == 0, queried.output
+        assert json.loads(queried.stdout)["total"] == total
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["debt", "import"],
+        ["debt", "query"],
+        ["indices", "import"],
+        ["indices", "query"],
+        ["brokers", "import"],
+        ["brokers", "query"],
+    ],
+)
+def test_db_alias_is_hidden_from_help(runner, command) -> None:
+    result = runner.invoke(app, [*command, "--help"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0
+    assert "--db-path" in result.stdout
+    assert "--db " not in result.stdout.replace("--db-path", "")
+
+
+def test_db_path_and_db_together_are_refused(tmp_path, runner) -> None:
+    result = runner.invoke(
+        app, ["debt", "query", "GOI", "--db-path", str(tmp_path / "a.db"), "--db", str(tmp_path / "b.db")]
+    )
+
+    assert result.exit_code == 1
+    assert "Pass --db-path or --db, not both." in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("args", "first_step"),
+    [
+        (["status"], "stocky rebuild"),
+        (["query", "RELIANCE"], "stocky rebuild"),
+        (["debt", "query", "GOI"], "stocky debt import"),
+        (["debt", "query", "GOI", "--db", "data/output/stocky.db"], "stocky debt import"),
+        (["indices", "query", "NIFTY"], "stocky indices import"),
+        (["brokers", "query", "RELIANCE"], "stocky brokers import"),
+        (["mf", "query", "liquid"], "stocky mf import"),
+    ],
+)
+def test_missing_database_message_names_the_absolute_path(tmp_path, monkeypatch, runner, args, first_step) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, args, env={"COLUMNS": "1000"})
+
+    assert result.exit_code == 1
+    absolute = (tmp_path / "data/output/stocky.db").resolve()
+    assert result.stderr.strip() == (
+        f"Database not found: {absolute}. Run '{first_step}' first. "
+        "To use an existing database, pass --db-path or run from the repository root."
+    )

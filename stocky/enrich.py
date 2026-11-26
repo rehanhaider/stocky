@@ -17,6 +17,7 @@ from stocky.database import (
     connect,
     decode_response_json,
     is_usable_yahoo_payload,
+    missing_database_message,
     require_consolidated_table,
     search_instruments,
     table_exists,
@@ -227,7 +228,7 @@ def read_enriched(
     for it; a ticker with nothing cached keeps its row with empty fields and status "missing".
     """
     if not db_path.exists():
-        raise FileNotFoundError(f"Database not found: {db_path}. Run 'stocky rebuild' first.")
+        raise FileNotFoundError(missing_database_message(db_path, "stocky rebuild"))
 
     exchanges = _resolve_exchanges(exchange)
     rows: list[EnrichedRow] = []
