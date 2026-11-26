@@ -54,7 +54,7 @@ uv sync
    replacing `<DDMMYYYY>` with the trade date, such as `16102026`.
 
 `stocky summary` fails when the `mutual_funds`, `bse_debt`, `indices`, or `broker_symbols` table is empty, so a full
-refresh needs all of these files.
+refresh needs all of these files and the broker files listed under the `brokers import` command below.
 
 ### Then place these files in the following locations
 1. BSE Bhavcopy: `data/marketData/bhavCopies`
