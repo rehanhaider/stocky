@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -91,6 +92,145 @@ def _populated(column: str) -> str:
     return f"({column} IS NOT NULL AND TRIM({column}) != '')"
 
 
+def _layout_check(con: sqlite3.Connection, schema_version: int) -> Check:
+    """Whether consolidated exists in the layout this Stocky reads."""
+    if not table_exists(con, CONSOLIDATED_TABLE):
+        return Check("Consolidated table layout", False, "No consolidated table. Run 'stocky rebuild' to create it.")
+    problem = older_layout(con)
+    if problem is not None:
+        detail = f"Older layout {problem}. Run 'stocky rebuild' to recreate the table."
+    elif schema_version:
+        detail = f"Schema {schema_version}."
+    else:
+        detail = "All columns present."
+    return Check("Consolidated table layout", problem is None, detail)
+
+
+def _provenance_checks(provenance: BuildProvenance | None, rows: int) -> list[Check]:
+    """Whether the recorded build matches the table, and its two bhavcopies share one trade date."""
+    if provenance is None:
+        return [Check("Source provenance", False, "No build recorded. Run 'stocky rebuild' to record it.")]
+    trade_dates = {
+        source.role: source.trade_date for source in provenance.sources if source.role != "zerodha_instruments"
+    }
+    dates = set(trade_dates.values())
+    return [
+        Check(
+            "Source provenance",
+            provenance.consolidated_rows == rows,
+            f"Build {provenance.build_id} recorded {provenance.consolidated_rows} rows; the table has {rows}.",
+        ),
+        Check(
+            "Bhavcopy trade dates agree",
+            len(trade_dates) == 2 and len(dates) == 1 and None not in dates,
+            ", ".join(f"{SOURCE_LABELS.get(role, role)} {value or 'unknown'}" for role, value in trade_dates.items())
+            + "."
+            if trade_dates
+            else "No bhavcopies recorded.",
+        ),
+    ]
+
+
+def _import_checks(
+    table_counts: dict[str, int], imports: list[ImportRecord], brokers_with_rows: list[str]
+) -> list[Check]:
+    """One check per mapping table: it has rows and an import record, and so does every broker with rows."""
+    checks = []
+    for table_name, command in MAPPING_TABLES.items():
+        table_rows = table_counts.get(table_name, 0)
+        records = [record for record in imports if record.table_name == table_name]
+        if not table_rows:
+            detail = f"No rows. Run '{command}'."
+        elif not records:
+            detail = f"{table_rows} rows; no import recorded. Run '{command}' to record it."
+        else:
+            detail = (
+                f"{table_rows} rows from "
+                + ", ".join(f"`{record.file_name}` (modified {record.modified_at[:10]})" for record in records)
+                + "."
+            )
+        unrecorded = []
+        if table_name == BROKER_TABLE:
+            # Alice Blue records its two files as aliceblue_nse and aliceblue_bse.
+            recorded = {record.role.split("_")[0] for record in records}
+            unrecorded = [broker for broker in brokers_with_rows if broker not in recorded]
+        if records and unrecorded:
+            detail += (
+                f" No import recorded for {', '.join(unrecorded)}. Run '{command} "
+                + " ".join(f"--broker {broker}" for broker in unrecorded)
+                + "' to record it."
+            )
+        checks.append(Check(f"{table_name} import", bool(table_rows and records and not unrecorded), detail))
+    return checks
+
+
+def _consolidated_checks(con: sqlite3.Connection, sample_size: int) -> tuple[list[Check], list[MissingYahooTickers]]:
+    """ISIN and Yahoo ticker checks on a current-layout consolidated table, and each exchange's uncached tickers."""
+    checks: list[Check] = []
+    missing_yahoo: list[MissingYahooTickers] = []
+    empty, duplicates = con.execute(
+        f"""
+        SELECT
+            SUM(NOT {_populated("isin")}),
+            COUNT(isin) - COUNT(DISTINCT isin)
+        FROM {CONSOLIDATED_TABLE}
+        """
+    ).fetchone()
+    empty, duplicates = empty or 0, duplicates or 0
+    checks.append(
+        Check(
+            "ISINs present and unique",
+            empty == 0 and duplicates == 0,
+            f"{empty} empty, {duplicates} duplicated.",
+        )
+    )
+
+    mismatches = []
+    for exchange, ticker_column, symbol_column, suffix in YAHOO_TICKER_SOURCES:
+        count = con.execute(
+            f"""
+            SELECT COUNT(*) FROM {CONSOLIDATED_TABLE}
+            WHERE CASE WHEN {_populated(symbol_column)} THEN {symbol_column} || ? ELSE '' END
+                != COALESCE({ticker_column}, '')
+            """,
+            (suffix,),
+        ).fetchone()[0]
+        if count:
+            mismatches.append(f"{count} {exchange} ({ticker_column})")
+    checks.append(
+        Check(
+            "Yahoo tickers follow exchange symbols",
+            not mismatches,
+            "Every ticker is its exchange symbol plus the suffix."
+            if not mismatches
+            else f"Rows that differ: {', '.join(mismatches)}.",
+        )
+    )
+
+    has_yahoo = table_exists(con, YAHOO_RESPONSES_TABLE)
+    for exchange, ticker_column, _, _ in YAHOO_TICKER_SOURCES:
+        cached = f"{ticker_column} IN (SELECT yahoo_symbol FROM {YAHOO_RESPONSES_TABLE})" if has_yahoo else "0"
+        listed = con.execute(
+            f"SELECT COUNT(DISTINCT {ticker_column}) FROM {CONSOLIDATED_TABLE} WHERE {_populated(ticker_column)}"
+        ).fetchone()[0]
+        missing_query = f"""
+            SELECT DISTINCT {ticker_column} FROM {CONSOLIDATED_TABLE}
+            WHERE {_populated(ticker_column)} AND NOT ({cached})
+            ORDER BY {ticker_column}
+        """
+        missing = [row[0] for row in con.execute(missing_query).fetchall()]
+        missing_yahoo.append(
+            MissingYahooTickers(
+                exchange=exchange,
+                column=ticker_column,
+                listed=listed,
+                missing=len(missing),
+                sample=missing[:sample_size],
+            )
+        )
+    return checks, missing_yahoo
+
+
 def build_refresh_summary(
     db_path: Path = DEFAULT_DB_PATH,
     *,
@@ -121,136 +261,19 @@ def build_refresh_summary(
             else []
         )
 
-        has_table = table_exists(con, CONSOLIDATED_TABLE)
-        problem = older_layout(con) if has_table else "missing"
-        layout_ok = problem is None
-        if not has_table:
-            layout_detail = "No consolidated table. Run 'stocky rebuild' to create it."
-        elif not layout_ok:
-            layout_detail = f"Older layout {problem}. Run 'stocky rebuild' to recreate the table."
-        elif schema_version:
-            layout_detail = f"Schema {schema_version}."
-        else:
-            layout_detail = "All columns present."
-        checks.append(Check("Consolidated table layout", layout_ok, layout_detail))
+        layout = _layout_check(con, schema_version)
+        layout_ok = layout.passed
+        checks.append(layout)
 
         rows = table_counts.get(CONSOLIDATED_TABLE, 0)
         checks.append(Check("Consolidated rows", rows > 0, f"{rows} rows."))
 
         if layout_ok:
-            empty, duplicates = con.execute(
-                f"""
-                SELECT
-                    SUM(NOT {_populated("isin")}),
-                    COUNT(isin) - COUNT(DISTINCT isin)
-                FROM {CONSOLIDATED_TABLE}
-                """
-            ).fetchone()
-            empty, duplicates = empty or 0, duplicates or 0
-            checks.append(
-                Check(
-                    "ISINs present and unique",
-                    empty == 0 and duplicates == 0,
-                    f"{empty} empty, {duplicates} duplicated.",
-                )
-            )
+            consolidated_checks, missing_yahoo = _consolidated_checks(con, sample_size)
+            checks.extend(consolidated_checks)
 
-            mismatches = []
-            for exchange, ticker_column, symbol_column, suffix in YAHOO_TICKER_SOURCES:
-                count = con.execute(
-                    f"""
-                    SELECT COUNT(*) FROM {CONSOLIDATED_TABLE}
-                    WHERE CASE WHEN {_populated(symbol_column)} THEN {symbol_column} || ? ELSE '' END
-                        != COALESCE({ticker_column}, '')
-                    """,
-                    (suffix,),
-                ).fetchone()[0]
-                if count:
-                    mismatches.append(f"{count} {exchange} ({ticker_column})")
-            checks.append(
-                Check(
-                    "Yahoo tickers follow exchange symbols",
-                    not mismatches,
-                    "Every ticker is its exchange symbol plus the suffix."
-                    if not mismatches
-                    else f"Rows that differ: {', '.join(mismatches)}.",
-                )
-            )
-
-            has_yahoo = table_exists(con, YAHOO_RESPONSES_TABLE)
-            for exchange, ticker_column, _, _ in YAHOO_TICKER_SOURCES:
-                cached = f"{ticker_column} IN (SELECT yahoo_symbol FROM {YAHOO_RESPONSES_TABLE})" if has_yahoo else "0"
-                listed = con.execute(
-                    f"SELECT COUNT(DISTINCT {ticker_column}) FROM {CONSOLIDATED_TABLE} WHERE {_populated(ticker_column)}"
-                ).fetchone()[0]
-                missing_query = f"""
-                    SELECT DISTINCT {ticker_column} FROM {CONSOLIDATED_TABLE}
-                    WHERE {_populated(ticker_column)} AND NOT ({cached})
-                    ORDER BY {ticker_column}
-                """
-                missing = [row[0] for row in con.execute(missing_query).fetchall()]
-                missing_yahoo.append(
-                    MissingYahooTickers(
-                        exchange=exchange,
-                        column=ticker_column,
-                        listed=listed,
-                        missing=len(missing),
-                        sample=missing[:sample_size],
-                    )
-                )
-
-    if provenance is None:
-        checks.append(Check("Source provenance", False, "No build recorded. Run 'stocky rebuild' to record it."))
-    else:
-        checks.append(
-            Check(
-                "Source provenance",
-                provenance.consolidated_rows == rows,
-                f"Build {provenance.build_id} recorded {provenance.consolidated_rows} rows; the table has {rows}.",
-            )
-        )
-        trade_dates = {
-            source.role: source.trade_date for source in provenance.sources if source.role != "zerodha_instruments"
-        }
-        dates = set(trade_dates.values())
-        checks.append(
-            Check(
-                "Bhavcopy trade dates agree",
-                len(trade_dates) == 2 and len(dates) == 1 and None not in dates,
-                ", ".join(
-                    f"{SOURCE_LABELS.get(role, role)} {value or 'unknown'}" for role, value in trade_dates.items()
-                )
-                + "."
-                if trade_dates
-                else "No bhavcopies recorded.",
-            )
-        )
-
-    for table_name, command in MAPPING_TABLES.items():
-        table_rows = table_counts.get(table_name, 0)
-        records = [record for record in imports if record.table_name == table_name]
-        if not table_rows:
-            detail = f"No rows. Run '{command}'."
-        elif not records:
-            detail = f"{table_rows} rows; no import recorded. Run '{command}' to record it."
-        else:
-            detail = (
-                f"{table_rows} rows from "
-                + ", ".join(f"`{record.file_name}` (modified {record.modified_at[:10]})" for record in records)
-                + "."
-            )
-        unrecorded = []
-        if table_name == BROKER_TABLE:
-            # Alice Blue records its two files as aliceblue_nse and aliceblue_bse.
-            recorded = {record.role.split("_")[0] for record in records}
-            unrecorded = [broker for broker in brokers_with_rows if broker not in recorded]
-        if records and unrecorded:
-            detail += (
-                f" No import recorded for {', '.join(unrecorded)}. Run '{command} "
-                + " ".join(f"--broker {broker}" for broker in unrecorded)
-                + "' to record it."
-            )
-        checks.append(Check(f"{table_name} import", bool(table_rows and records and not unrecorded), detail))
+    checks.extend(_provenance_checks(provenance, rows))
+    checks.extend(_import_checks(table_counts, imports, brokers_with_rows))
 
     return RefreshSummary(
         db_path=db_path,
