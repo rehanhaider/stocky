@@ -16,6 +16,7 @@ from stocky.database import (
     initialize_database,
     read_available_yahoo_symbols,
     upsert_yahoo_response,
+    write_schema_version,
 )
 from stocky.yahoo import YahooDataManager, ticker_column
 
@@ -169,6 +170,9 @@ def test_update_writes_responses_and_skips_unknown_symbols(tmp_path, monkeypatch
         db_path,
         [_ticker_row(f"INE{index:03d}", symbol) for index, symbol in enumerate(["RELIANCE", "BADSYMBOL"])],
     )
+    # Numbered as a rebuild numbers it: only a rebuild can vouch for consolidated.
+    with sqlite3.connect(db_path) as con:
+        write_schema_version(con, replaces_consolidated=True)
 
     fake_module = types.ModuleType("yahooquery")
     fake_module.Ticker = _FakeTicker

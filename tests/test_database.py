@@ -143,7 +143,7 @@ def test_read_status_reports_the_schema_number_and_zero_for_a_file_written_befor
     assert read_status(db_path).schema_version == 0
 
     with connect(db_path) as con:
-        write_schema_version(con)
+        write_schema_version(con, replaces_consolidated=True)
     assert read_status(db_path).schema_version == SCHEMA_VERSION
 
 
@@ -153,7 +153,7 @@ def test_layout_check_uses_the_schema_number_when_the_file_records_one(
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path)
     with connect(db_path) as con:
-        write_schema_version(con)
+        write_schema_version(con, replaces_consolidated=True)
     monkeypatch.setattr(database, "CONSOLIDATED_LAYOUT_VERSION", SCHEMA_VERSION + 1)
 
     for read in (
@@ -183,7 +183,7 @@ def test_a_schema_bump_for_another_table_keeps_consolidated_readable(tmp_path, s
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path)
     with connect(db_path) as con:
-        write_schema_version(con)
+        write_schema_version(con, replaces_consolidated=True)
     monkeypatch.setattr(database, "SCHEMA_VERSION", SCHEMA_VERSION + 1)
 
     assert read_status(db_path).schema_version == SCHEMA_VERSION
@@ -794,3 +794,18 @@ def test_prune_orphans_reports_the_committed_count_when_vacuum_fails(tmp_path, s
     assert error.value.pruned == 1
     with sqlite3.connect(db_path) as con:
         assert con.execute("SELECT COUNT(*) FROM yahoo_responses").fetchone()[0] == 0
+
+
+def test_only_a_rebuild_numbers_a_file_whose_consolidated_has_no_number(tmp_path, seed_consolidated) -> None:
+    # A v2.0.0 file has every current column but older ins_type values, so the columns cannot vouch for it.
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+
+    with connect(db_path) as con:
+        write_schema_version(con)
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 0
+        write_schema_version(con, replaces_consolidated=True)
+        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        # Once numbered, other writes keep recording the number.
+        write_schema_version(con)
+        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION

@@ -14,6 +14,7 @@ from stocky.database import (
     read_import_provenance,
     record_import_provenance,
     table_exists,
+    write_schema_version,
 )
 from stocky.indices import (
     INDICES_COLUMNS,
@@ -131,6 +132,9 @@ def test_load_indices_reports_missing_file(tmp_path) -> None:
 def test_import_indices_leaves_consolidated_untouched(tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path)
+    # Numbered as a rebuild numbers it: only a rebuild can vouch for consolidated.
+    with sqlite3.connect(db_path) as con:
+        write_schema_version(con, replaces_consolidated=True)
     with sqlite3.connect(db_path) as con:
         before = con.execute(f"SELECT * FROM {CONSOLIDATED_TABLE} ORDER BY isin").fetchall()
 
