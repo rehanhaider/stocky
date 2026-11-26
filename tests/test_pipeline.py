@@ -6,6 +6,8 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pandas as pd
 import pytest
 
+import stocky.database as database
+import stocky.pipeline as pipeline
 from stocky import __version__
 from stocky.database import CONSOLIDATED_COLUMNS, CONSOLIDATED_TABLE, PROVENANCE_BUILDS_TABLE, read_latest_provenance
 from stocky.pipeline import (
@@ -588,6 +590,139 @@ def test_rebuild_database_backs_up_existing_table_before_overwrite(
     assert live_rows == 1
 
 
+def test_rebuild_database_leaves_a_shared_backup_folder_alone_for_a_database_elsewhere(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups
+) -> None:
+    # The backup folder does not follow --db-path: another stocky.db backs up beside these, under the same names.
+    paths = market_csv_builder(tmp_path / "inputs")
+    backup_dir = tmp_path / "project" / "data" / "output" / "backup"
+    others = old_backups(backup_dir, "stocky.db", 7)
+    db_path = tmp_path / "elsewhere" / "stocky.db"
+    db_path.parent.mkdir()
+    seed_consolidated(db_path)
+
+    result = rebuild_database(paths, db_path=db_path, backup_dir=backup_dir, keep_backups=1)
+
+    assert result.removed_backups == []
+    assert set(others) < set(backup_dir.iterdir())
+    assert result.backup_path in set(backup_dir.iterdir())
+
+
+def test_rebuild_database_reports_a_failed_prune_as_a_warning_after_writing(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups, monkeypatch
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    backup_dir = tmp_path / "backups"
+    seed_consolidated(db_path)
+    old_backups(backup_dir, db_path.name, 7)
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("backup folder is read-only")
+
+    monkeypatch.setattr(pipeline, "prune_backups", refuse)
+
+    result = rebuild_database(paths, db_path=db_path, backup_dir=backup_dir)
+
+    assert result.removed_backups == []
+    assert result.warnings == [
+        f"The rebuild was written, but removing old backups in {backup_dir} failed: backup folder is read-only"
+    ]
+    with sqlite3.connect(db_path) as con:
+        assert con.execute(f"SELECT isin FROM {CONSOLIDATED_TABLE}").fetchall() == [("INE002A01018",)]
+
+
+def test_rebuild_database_keeps_the_newest_backups_after_a_successful_write(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    backup_dir = tmp_path / "backups"
+    seed_consolidated(db_path)
+    old = old_backups(backup_dir, db_path.name, 7)
+    unrelated = backup_dir / "notes.txt"
+    unrelated.write_text("keep me", encoding="utf-8")
+
+    result = rebuild_database(paths, db_path=db_path, backup_dir=backup_dir, keep_backups=3)
+
+    # The new backup counts toward the three kept.
+    assert result.removed_backups == old[:5]
+    assert result.backup_path is not None
+    assert sorted(backup_dir.iterdir()) == sorted([*old[5:], result.backup_path, unrelated])
+
+
+def test_rebuild_database_keeps_five_backups_by_default(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    backup_dir = tmp_path / "backups"
+    seed_consolidated(db_path)
+    old = old_backups(backup_dir, db_path.name, 7)
+
+    result = rebuild_database(paths, db_path=db_path, backup_dir=backup_dir)
+
+    assert result.removed_backups == old[:3]
+    assert sorted(backup_dir.iterdir()) == sorted([*old[3:], result.backup_path])
+
+
+@pytest.mark.parametrize("options", [{"dry_run": True}, {"backup": False}])
+def test_rebuild_database_removes_no_backups_on_a_dry_run_or_without_backup(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups, options
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    backup_dir = tmp_path / "backups"
+    seed_consolidated(db_path)
+    old = old_backups(backup_dir, db_path.name, 7)
+
+    result = rebuild_database(paths, db_path=db_path, backup_dir=backup_dir, keep_backups=1, **options)
+
+    assert result.removed_backups == []
+    assert sorted(backup_dir.iterdir()) == old
+
+
+def test_rebuild_database_removes_no_backups_when_the_write_fails(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups, monkeypatch
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    backup_dir = tmp_path / "backups"
+    seed_consolidated(db_path)
+    old = old_backups(backup_dir, db_path.name, 7)
+
+    def fail(*args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr("stocky.pipeline.write_consolidated_table", fail)
+
+    with pytest.raises(sqlite3.OperationalError):
+        rebuild_database(paths, db_path=db_path, backup_dir=backup_dir, keep_backups=1)
+
+    # The backup taken before the failed write stays too.
+    remaining = sorted(backup_dir.iterdir())
+    assert remaining[:7] == old
+    assert len(remaining) == 8
+
+
+@pytest.mark.parametrize("keep", [0, -2])
+def test_rebuild_database_rejects_keeping_fewer_than_one_backup_before_writing(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups, keep
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    backup_dir = tmp_path / "backups"
+    seed_consolidated(db_path)
+    before = db_path.read_bytes()
+    old = old_backups(backup_dir, db_path.name, 2)
+
+    with pytest.raises(ValueError, match="Keep at least 1 backup"):
+        rebuild_database(paths, db_path=db_path, backup_dir=backup_dir, keep_backups=keep)
+
+    assert db_path.read_bytes() == before
+    assert sorted(backup_dir.iterdir()) == old
+
+
 def test_load_zerodha_instruments_filters_segments_and_normalizes_tokens(tmp_path, market_csv_builder) -> None:
     paths = market_csv_builder(tmp_path / "inputs")
 
@@ -890,3 +1025,26 @@ def test_diff_consolidated_counts_duplicate_isins_so_every_row_is_accounted_for(
     assert diff.current_rows - diff.removed - diff.duplicate_current == diff.changed + diff.unchanged
     assert (diff.changed, diff.unchanged) == (1, 1)
     assert diff.sample_duplicates == ["INE002A01018", "INE009A01021"]
+
+
+def test_rebuild_database_lists_the_backups_removed_before_a_prune_failure(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups, monkeypatch
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    backup_dir = tmp_path / "backups"
+    seed_consolidated(db_path)
+    old = old_backups(backup_dir, db_path.name, 3)
+
+    def partly(*args, **kwargs):
+        old[0].unlink()
+        raise database.BackupPruneError([old[0]], [f"{old[1]}: Permission denied"])
+
+    monkeypatch.setattr(pipeline, "prune_backups", partly)
+
+    result = rebuild_database(paths, db_path=db_path, backup_dir=backup_dir)
+
+    assert result.removed_backups == [old[0]]
+    assert result.warnings == [
+        f"The rebuild was written, but removing old backups in {backup_dir} failed: {old[1]}: Permission denied"
+    ]

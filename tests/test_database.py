@@ -1,10 +1,12 @@
 import json
+import re
 import sqlite3
 
 import pytest
 
 from stocky.database import (
     CONSOLIDATED_TABLE,
+    BackupPruneError,
     backup_database,
     connect,
     decode_response_json,
@@ -13,6 +15,7 @@ from stocky.database import (
     has_sgb_rows,
     import_yahoo_json_cache,
     initialize_database,
+    prune_backups,
     read_available_yahoo_symbols,
     read_status,
     search_instruments,
@@ -455,6 +458,71 @@ def test_backup_database_returns_none_for_missing_source(tmp_path) -> None:
     assert not backup_dir.exists()
 
 
+def test_prune_backups_keeps_the_newest_by_timestamp(tmp_path) -> None:
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    # Written newest first, so file times run opposite to the timestamps in the names.
+    names = ["20260301-090000-stocky.db", "20260215-235959-stocky.db", "20260215-000000-stocky.db"]
+    names += ["20260101-120000-stocky.db", "20251231-235959-stocky.db"]
+    for name in names:
+        (backup_dir / name).write_bytes(b"backup")
+
+    removed = prune_backups(tmp_path / "stocky.db", backup_dir, keep=2)
+
+    assert removed == [
+        backup_dir / "20251231-235959-stocky.db",
+        backup_dir / "20260101-120000-stocky.db",
+        backup_dir / "20260215-000000-stocky.db",
+    ]
+    assert sorted(path.name for path in backup_dir.iterdir()) == [
+        "20260215-235959-stocky.db",
+        "20260301-090000-stocky.db",
+    ]
+
+
+def test_prune_backups_ignores_files_that_are_not_backups_of_this_database(tmp_path, old_backups) -> None:
+    backup_dir = tmp_path / "backups"
+    backups = old_backups(backup_dir, "stocky.db", 3)
+    unrelated = [
+        "notes.txt",
+        "stocky.db",
+        "20250101-120000-other.db",
+        "20250101-120000-x-stocky.db",
+        "20250101-120000-stocky.db.tmp",
+        "2025010-120000-stocky.db",
+        "copy-20250101-120000-stocky.db",
+    ]
+    for name in unrelated:
+        (backup_dir / name).write_text("keep me", encoding="utf-8")
+    (backup_dir / "20240101-120000-stocky.db").mkdir()
+
+    removed = prune_backups(backup_dir.parent / "stocky.db", backup_dir, keep=1)
+
+    assert removed == backups[:2]
+    assert sorted(path.name for path in backup_dir.iterdir()) == sorted(
+        [*unrelated, "20240101-120000-stocky.db", backups[2].name]
+    )
+
+
+def test_prune_backups_removes_nothing_with_fewer_backups_than_kept(tmp_path, old_backups) -> None:
+    backup_dir = tmp_path / "backups"
+    backups = old_backups(backup_dir, "stocky.db", 3)
+
+    assert prune_backups(tmp_path / "stocky.db", backup_dir, keep=5) == []
+    assert prune_backups(tmp_path / "stocky.db", tmp_path / "missing", keep=5) == []
+    assert all(path.exists() for path in backups)
+
+
+@pytest.mark.parametrize("keep", [0, -1])
+def test_prune_backups_rejects_keeping_fewer_than_one(tmp_path, old_backups, keep) -> None:
+    backup_dir = tmp_path / "backups"
+    backups = old_backups(backup_dir, "stocky.db", 2)
+
+    with pytest.raises(ValueError, match="Keep at least 1 backup"):
+        prune_backups(tmp_path / "stocky.db", backup_dir, keep=keep)
+    assert all(path.exists() for path in backups)
+
+
 def test_search_instruments_fuzzy_ranks_strongest_score_first(tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(
@@ -518,3 +586,69 @@ def test_connect_rolls_back_and_closes_when_its_with_block_raises(tmp_path) -> N
         con.execute("SELECT 1")
     with connect(db_path) as reader:
         assert reader.execute("SELECT COUNT(*) FROM items").fetchone() == (0,)
+
+
+def test_prune_backups_skips_a_backup_another_rebuild_already_removed(tmp_path, old_backups, monkeypatch) -> None:
+    backup_dir = tmp_path / "backups"
+    backups = old_backups(backup_dir, "stocky.db", 3)
+    unlink = type(backups[0]).unlink
+
+    def raced(path, *args, **kwargs):
+        unlink(path, *args, **kwargs)
+        if path == backups[0]:
+            raise FileNotFoundError(path)
+
+    monkeypatch.setattr(type(backups[0]), "unlink", raced)
+
+    assert prune_backups(tmp_path / "stocky.db", backup_dir, keep=1) == [backups[1]]
+    assert sorted(backup_dir.iterdir()) == [backups[2]]
+
+
+def test_prune_backups_keeps_the_current_backup_when_older_names_sort_after_it(tmp_path, old_backups) -> None:
+    # After the clock goes back, the backup just taken can carry an earlier time than ones already there.
+    backup_dir = tmp_path / "backups"
+    current = old_backups(backup_dir, "stocky.db", 1)[0]
+    later = [backup_dir / f"2099010{day}-120000-stocky.db" for day in (1, 2)]
+    for path in later:
+        path.write_bytes(b"from before the clock went back")
+
+    removed = prune_backups(tmp_path / "stocky.db", backup_dir, keep=2, current=current)
+
+    assert removed == [later[0]]
+    assert sorted(backup_dir.iterdir()) == [current, later[1]]
+
+
+def test_prune_backups_reports_what_it_removed_before_a_failure(tmp_path, old_backups, monkeypatch) -> None:
+    backup_dir = tmp_path / "backups"
+    backups = old_backups(backup_dir, "stocky.db", 4)
+    unlink = type(backups[0]).unlink
+
+    def locked(path, *args, **kwargs):
+        if path == backups[1]:
+            raise PermissionError(13, "Permission denied")
+        unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(backups[0]), "unlink", locked)
+
+    with pytest.raises(BackupPruneError, match="Permission denied") as error:
+        prune_backups(tmp_path / "stocky.db", backup_dir, keep=1)
+
+    assert error.value.removed == [backups[0], backups[2]]
+    assert sorted(backup_dir.iterdir()) == [backups[1], backups[3]]
+
+
+def test_a_database_away_from_the_backup_folder_marks_its_backups_with_its_path(tmp_path, old_backups) -> None:
+    backup_dir = tmp_path / "project" / "data" / "output" / "backup"
+    owner = backup_dir.parent / "stocky.db"
+    owner.parent.mkdir(parents=True)
+    owner.write_bytes(b"the folder's own database")
+    elsewhere = tmp_path / "elsewhere" / "stocky.db"
+    elsewhere.parent.mkdir()
+    elsewhere.write_bytes(b"another database")
+
+    foreign = backup_database(elsewhere, backup_dir)
+    own = old_backups(backup_dir, "stocky.db", 3)
+
+    assert re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{8}-stocky\.db", foreign.name)
+    assert prune_backups(owner, backup_dir, keep=1) == own[:2]
+    assert sorted(backup_dir.iterdir()) == sorted([foreign, own[2]])

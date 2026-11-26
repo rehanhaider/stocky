@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
+import re
 import shutil
 import sqlite3
 from collections.abc import Sequence
@@ -285,9 +287,69 @@ def backup_database(
 
     backup_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup_path = backup_dir / f"{timestamp}-{db_path.name}"
+    name = db_path.name
+    if not backups_belong_to(db_path, backup_dir):
+        # A database away from this folder marks its backups with its own path, so they never pass for the backups
+        # of the database that lives beside the folder under the same file name, which pruning removes.
+        name = f"{hashlib.sha256(str(db_path.resolve()).encode()).hexdigest()[:8]}-{name}"
+    backup_path = backup_dir / f"{timestamp}-{name}"
     shutil.copy2(db_path, backup_path)
     return backup_path
+
+
+def backups_belong_to(db_path: Path, backup_dir: Path) -> bool:
+    """Whether backup_dir sits beside db_path, so the backups named after it in there are its own.
+
+    The backup directory does not follow --db-path, so a database elsewhere with the same file name backs up into
+    the same folder. Only a database beside its backup folder prunes it, and a database elsewhere names its
+    backups with a hash of its path (see backup_database), so neither touches the other's backups.
+    """
+    return backup_dir.resolve().parent == db_path.resolve().parent
+
+
+class BackupPruneError(OSError):
+    """Raised when some old backups could not be removed; ``removed`` lists the ones that were."""
+
+    def __init__(self, removed: list[Path], failures: list[str]) -> None:
+        super().__init__("; ".join(failures))
+        self.removed = removed
+
+
+def prune_backups(db_path: Path, backup_dir: Path, keep: int, *, current: Path | None = None) -> list[Path]:
+    """Delete all but the newest ``keep`` backups of ``db_path`` and return the removed paths, oldest first.
+
+    Only files named the way ``backup_database`` names them for this database count, so other
+    files in the directory, and backups of other databases, are never touched. ``current``, the backup
+    the caller just took, always stays and counts toward ``keep``: backup names carry the local time,
+    so after the clock goes back an older backup can sort after it.
+    """
+    if keep < 1:
+        raise ValueError(f"Keep at least 1 backup, not {keep}.")
+    if not backup_dir.is_dir():
+        return []
+
+    pattern = re.compile(rf"\d{{8}}-\d{{6}}-{re.escape(db_path.name)}")
+    # The name starts with the timestamp, so sorting by name sorts oldest to newest.
+    backups = sorted(
+        (path for path in backup_dir.iterdir() if pattern.fullmatch(path.name) and path.is_file() and path != current),
+        key=lambda path: path.name,
+    )
+    kept = keep - 1 if current is not None and current.is_file() else keep
+    removed: list[Path] = []
+    failures: list[str] = []
+    for path in backups[: max(0, len(backups) - kept)]:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            # Another rebuild removed it first; it is gone either way.
+            continue
+        except OSError as exc:
+            failures.append(f"{path}: {exc.strerror or exc}")
+            continue
+        removed.append(path)
+    if failures:
+        raise BackupPruneError(removed, failures)
+    return removed
 
 
 def read_available_yahoo_symbols(db_path: Path = DEFAULT_DB_PATH) -> set[str]:

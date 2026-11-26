@@ -12,4 +12,6 @@ DEFAULT_ALICEBLUE_NSE = Path("data/marketData/brokers/aliceblue/NSE.csv")
 DEFAULT_ALICEBLUE_BSE = Path("data/marketData/brokers/aliceblue/BSE.csv")
 DEFAULT_DB_PATH = Path("data/output/stocky.db")
 DEFAULT_BACKUP_DIR = Path("data/output/backup")
+# How many backups of a database a successful rebuild leaves in the backup directory.
+DEFAULT_KEEP_BACKUPS = 5
 DEFAULT_SNAPSHOT_DIR = Path("data/output/snapshots")

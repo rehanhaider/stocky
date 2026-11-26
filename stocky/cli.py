@@ -28,6 +28,7 @@ from stocky.config import (
     DEFAULT_BHAVCOPY_DIR,
     DEFAULT_DB_PATH,
     DEFAULT_GROWW_INSTRUMENTS,
+    DEFAULT_KEEP_BACKUPS,
     DEFAULT_SNAPSHOT_DIR,
     DEFAULT_UPSTOX_INSTRUMENTS,
     DEFAULT_YAHOO_JSON_CACHE_DIR,
@@ -647,6 +648,8 @@ def _print_rebuild_result(result: RebuildResult) -> None:
     table.add_row("Zerodha instruments", str(result.zerodha_instruments))
     table.add_row("Backup", str(result.backup_path) if result.backup_path else "None")
     console.print(table)
+    for path in result.removed_backups:
+        console.print(f"Removed old backup {escape(str(path))}")
 
 
 def _print_bhavcopy_pairs(pairs: list) -> int:
@@ -781,6 +784,10 @@ def _interactive_rebuild() -> None:
         return
 
     _print_rebuild_result(result)
+    # The preview already showed its warnings; these arose during the write, such as a backup that could not be removed.
+    for warning in result.warnings:
+        if warning not in planned.warnings:
+            console.print(f"[yellow]Warning: {escape(warning)}[/yellow]")
 
 
 def _interactive_show_matches(term: str, result: SearchResult) -> None:
@@ -987,6 +994,7 @@ def _rebuild_impl(
     dry_run: bool = False,
     include_sgb: bool = False,
     no_backup: bool = False,
+    keep_backups: int = DEFAULT_KEEP_BACKUPS,
     sample_size: int = DEFAULT_DIFF_SAMPLE_SIZE,
     progress: Callable[[str], None] | None = None,
 ) -> RebuildResult:
@@ -1002,6 +1010,7 @@ def _rebuild_impl(
         paths,
         db_path=db_path,
         backup=not no_backup,
+        keep_backups=keep_backups,
         dry_run=dry_run,
         include_sgb=include_sgb,
         sample_size=sample_size,
@@ -1044,6 +1053,14 @@ def rebuild(
         bool,
         typer.Option("--no-backup", help="Do not back up an existing DB before writing."),
     ] = False,
+    keep: Annotated[
+        int,
+        typer.Option(
+            "--keep",
+            min=1,
+            help="After a successful rebuild, delete older backups of the DB so this many remain.",
+        ),
+    ] = DEFAULT_KEEP_BACKUPS,
     sample: Annotated[
         int,
         typer.Option("--sample", min=0, help="Number of added, removed, and changed rows to show from the comparison."),
@@ -1063,6 +1080,7 @@ def rebuild(
             dry_run=dry_run,
             include_sgb=include_sgb,
             no_backup=no_backup,
+            keep_backups=keep,
             sample_size=sample,
         )
     except Exception as exc:

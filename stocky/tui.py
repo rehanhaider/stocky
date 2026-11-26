@@ -447,6 +447,8 @@ class StockyApp(App[None]):
         backup = f"; backup {result.backup_path}" if result.backup_path else ""
         verb = "Validated" if result.dry_run else "Wrote"
         self.log_line(f"{verb} {result.rows} rows to {result.db_path}{backup}.", "bold green")
+        for path in result.removed_backups:
+            self.log_line(f"Removed old backup {path}")
         self.log_rebuild_diff(result)
         self.finish_job()
 

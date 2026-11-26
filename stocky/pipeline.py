@@ -9,15 +9,18 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from stocky import __version__
-from stocky.config import DEFAULT_BACKUP_DIR, DEFAULT_DB_PATH
+from stocky.config import DEFAULT_BACKUP_DIR, DEFAULT_DB_PATH, DEFAULT_KEEP_BACKUPS
 from stocky.database import (
     CONSOLIDATED_COLUMNS,
     CONSOLIDATED_TABLE,
+    BackupPruneError,
     BuildProvenance,
     SourceRecord,
     backup_database,
+    backups_belong_to,
     connect,
     initialize_database,
+    prune_backups,
     read_latest_provenance,
     record_build_provenance,
     table_exists,
@@ -99,6 +102,8 @@ class RebuildResult:
     diff: RebuildDiff | None = None
     # Reasons to look twice before writing, such as inputs older than the current build.
     warnings: list[str] = field(default_factory=list)
+    # Older backups deleted after the write, oldest first.
+    removed_backups: list[Path] = field(default_factory=list)
 
 
 def _strip_dataframe_strings(dataframe: pd.DataFrame) -> pd.DataFrame:
@@ -535,6 +540,7 @@ def rebuild_database(
     db_path: Path = DEFAULT_DB_PATH,
     backup_dir: Path = DEFAULT_BACKUP_DIR,
     backup: bool = True,
+    keep_backups: int = DEFAULT_KEEP_BACKUPS,
     dry_run: bool = False,
     include_sgb: bool = False,
     sample_size: int = DEFAULT_DIFF_SAMPLE_SIZE,
@@ -544,6 +550,8 @@ def rebuild_database(
         if progress is not None:
             progress(stage)
 
+    if keep_backups < 1:
+        raise ValueError(f"Keep at least 1 backup, not {keep_backups}.")
     require_existing_files(paths)
     trade_date = require_matching_trade_dates(paths)
 
@@ -576,7 +584,9 @@ def rebuild_database(
     diff = diff_consolidated(db_path, stocky, sample_size=sample_size)
     warnings = [warning for warning in (older_inputs_warning(trade_date, diff.current_provenance),) if warning]
 
-    def result(*, backup_path: Path | None = None, build_id: int | None = None) -> RebuildResult:
+    def result(
+        *, backup_path: Path | None = None, build_id: int | None = None, removed_backups: list[Path] | None = None
+    ) -> RebuildResult:
         return RebuildResult(
             rows=len(stocky),
             db_path=db_path,
@@ -590,6 +600,7 @@ def rebuild_database(
             sources=sources,
             diff=diff,
             warnings=warnings,
+            removed_backups=removed_backups or [],
         )
 
     if dry_run:
@@ -615,4 +626,14 @@ def rebuild_database(
             sources=sources,
         )
 
-    return result(backup_path=backup_path, build_id=build_id)
+    # Only after the write succeeds, so a failed rebuild never costs a backup.
+    removed_backups = []
+    if backup and backups_belong_to(db_path, backup_dir):
+        try:
+            removed_backups = prune_backups(db_path, backup_dir, keep_backups, current=backup_path)
+        except OSError as exc:
+            # The table is already written, so a backup that cannot be removed must not report the rebuild as failed.
+            removed_backups = exc.removed if isinstance(exc, BackupPruneError) else []
+            warnings.append(f"The rebuild was written, but removing old backups in {backup_dir} failed: {exc}")
+
+    return result(backup_path=backup_path, build_id=build_id, removed_backups=removed_backups)
