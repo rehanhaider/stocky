@@ -575,6 +575,22 @@ def test_update_prunes_nothing_when_consolidated_is_empty(tmp_path, monkeypatch,
     assert _cached_rows(db_path) == before
 
 
+def test_update_keeps_an_exchanges_responses_when_its_column_lists_no_ticker(
+    tmp_path, monkeypatch, seed_consolidated
+) -> None:
+    # A rebuild from legacy bhavcopies has no BSE trading symbol, so every yq_bo is empty.
+    db_path = tmp_path / "stocky.db"
+    rows = [(*_ticker_row("INE001", "RELIANCE")[:-1], None), (*_ticker_row("INE002", "INFY")[:-1], "")]
+    seed_consolidated(db_path, rows)
+    for yahoo_symbol in ["RELIANCE.NS", "DELISTED.NS", "RELIANCE.BO", "INFY.BO"]:
+        _seed_cached_response(db_path, yahoo_symbol)
+    _use_fake_yahooquery(monkeypatch)
+
+    assert YahooDataManager(db_path).update_data(exchange="NSE", limit=0, dry_run=True).pruned == 1
+    assert YahooDataManager(db_path).update_data(exchange="NSE", limit=0).pruned == 1
+    assert set(_cached_rows(db_path)) == {"RELIANCE.NS", "RELIANCE.BO", "INFY.BO"}
+
+
 def test_aborted_update_prunes_nothing(tmp_path, monkeypatch, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
     _seed_orphans_beside_listed(db_path, seed_consolidated)
