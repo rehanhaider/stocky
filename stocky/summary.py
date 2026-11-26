@@ -9,7 +9,6 @@ from stocky.brokers import BROKER_TABLE
 from stocky.bse_debt import BSE_DEBT_TABLE
 from stocky.config import DEFAULT_DB_PATH
 from stocky.database import (
-    CONSOLIDATED_COLUMNS,
     CONSOLIDATED_TABLE,
     YAHOO_RESPONSES_TABLE,
     BuildProvenance,
@@ -122,11 +121,12 @@ def build_refresh_summary(
             else []
         )
 
-        problem = (
-            older_layout(con) if table_exists(con, CONSOLIDATED_TABLE) else f"without {', '.join(CONSOLIDATED_COLUMNS)}"
-        )
+        has_table = table_exists(con, CONSOLIDATED_TABLE)
+        problem = older_layout(con) if has_table else "missing"
         layout_ok = problem is None
-        if not layout_ok:
+        if not has_table:
+            layout_detail = "No consolidated table. Run 'stocky rebuild' to create it."
+        elif not layout_ok:
             layout_detail = f"Older layout {problem}. Run 'stocky rebuild' to recreate the table."
         elif schema_version:
             layout_detail = f"Schema {schema_version}."

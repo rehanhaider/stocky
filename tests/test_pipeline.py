@@ -6,6 +6,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pandas as pd
 import pytest
 
+import stocky.database as database
 import stocky.pipeline as pipeline
 from stocky import __version__
 from stocky.database import (
@@ -1064,3 +1065,26 @@ def test_diff_consolidated_counts_duplicate_isins_so_every_row_is_accounted_for(
     assert diff.current_rows - diff.removed - diff.duplicate_current == diff.changed + diff.unchanged
     assert (diff.changed, diff.unchanged) == (1, 1)
     assert diff.sample_duplicates == ["INE002A01018", "INE009A01021"]
+
+
+def test_rebuild_database_lists_the_backups_removed_before_a_prune_failure(
+    tmp_path, market_csv_builder, seed_consolidated, old_backups, monkeypatch
+) -> None:
+    paths = market_csv_builder(tmp_path / "inputs")
+    db_path = tmp_path / "stocky.db"
+    backup_dir = tmp_path / "backups"
+    seed_consolidated(db_path)
+    old = old_backups(backup_dir, db_path.name, 3)
+
+    def partly(*args, **kwargs):
+        old[0].unlink()
+        raise database.BackupPruneError([old[0]], [f"{old[1]}: Permission denied"])
+
+    monkeypatch.setattr(pipeline, "prune_backups", partly)
+
+    result = rebuild_database(paths, db_path=db_path, backup_dir=backup_dir)
+
+    assert result.removed_backups == [old[0]]
+    assert result.warnings == [
+        f"The rebuild was written, but removing old backups in {backup_dir} failed: {old[1]}: Permission denied"
+    ]

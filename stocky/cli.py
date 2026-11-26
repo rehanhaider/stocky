@@ -751,6 +751,8 @@ def _print_yahoo_update_result(result: YahooUpdateResult) -> None:
         f"[green]Processed {result.processed}; wrote {result.written}; skipped {result.skipped}; "
         f"pruned {result.pruned}; dry_run={result.dry_run}.[/green]"
     )
+    for warning in result.warnings:
+        error_console.print(f"[yellow]Warning: {escape(warning)}[/yellow]")
 
 
 def _print_bhavcopy_pairs(pairs: list) -> int:
@@ -885,6 +887,10 @@ def _interactive_rebuild() -> None:
         return
 
     _print_rebuild_result(result)
+    # The preview already showed its warnings; these arose during the write, such as a backup that could not be removed.
+    for warning in result.warnings:
+        if warning not in planned.warnings:
+            console.print(f"[yellow]Warning: {escape(warning)}[/yellow]")
 
 
 def _interactive_show_matches(term: str, result: SearchResult) -> None:
@@ -989,6 +995,8 @@ def _interactive_yahoo_update() -> None:
         return
 
     console.print(f"[green]Processed {result.processed}; wrote {result.written}; skipped {result.skipped}.[/green]")
+    for warning in result.warnings:
+        console.print(f"[yellow]Warning: {escape(warning)}[/yellow]")
 
 
 @app.callback(invoke_without_command=True)
@@ -1160,6 +1168,19 @@ def _no_yahoo_progress(exchange: str) -> contextlib.AbstractContextManager[Progr
     return contextlib.nullcontext(None)
 
 
+def _yahoo_resume_command(exchange: str, db_path: Path, stale_days: float | None) -> str:
+    """The yahoo update that finishes a refresh's stopped Yahoo step, skipping the tickers it already saved.
+
+    With --stale-days the same age does that. Without it the refresh refetched every ticker, so --missing-only
+    would skip every ticker that has any older response; one day skips only those saved since the refresh began.
+    """
+    days = 1 if stale_days is None else stale_days
+    command = ["stocky", "yahoo", "update", "--exchange", exchange, "--stale-days", f"{days:g}"]
+    if db_path != DEFAULT_DB_PATH:
+        command += ["--db-path", str(db_path)]
+    return shlex.join(command)
+
+
 def _refresh_impl(
     *,
     trade_date: str,
@@ -1239,11 +1260,10 @@ def _refresh_impl(
             try:
                 return manager.update_data(exchange=exchange, stale_days=stale_days, progress=progress)
             except YahooFetchError as exc:
-                # refresh takes no --missing-only, so name the command that resumes this step.
                 raise RuntimeError(
                     f"{exc.reason} Check the network connection, or wait if Yahoo is rate limiting, then run "
-                    f"'stocky yahoo update --exchange {exchange} --missing-only' to resume from the symbols already "
-                    "saved, and then the steps that did not run."
+                    f"'{_yahoo_resume_command(exchange, db_path, stale_days)}' to fetch the tickers this refresh "
+                    "had not saved yet, and then the steps that did not run."
                 ) from exc
 
     def summary() -> RefreshSummary | None:
