@@ -15,6 +15,7 @@ from stocky.database import (
     connect,
     read_import_provenance,
     record_import_provenance,
+    write_schema_version,
 )
 from stocky.mutual_funds import (
     MUTUAL_FUND_COLUMNS,
@@ -229,6 +230,9 @@ def test_search_mutual_funds_matches_amfi_codes_exactly(tmp_path, amfi_path) -> 
 def test_import_mutual_funds_leaves_consolidated_untouched(tmp_path, seed_consolidated, amfi_path) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path)
+    # Numbered as a rebuild numbers it: only a rebuild can vouch for consolidated.
+    with sqlite3.connect(db_path) as con:
+        write_schema_version(con, replaces_consolidated=True)
     with sqlite3.connect(db_path) as con:
         before = con.execute(f"SELECT * FROM {CONSOLIDATED_TABLE} ORDER BY isin").fetchall()
 

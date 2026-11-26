@@ -22,6 +22,7 @@ from stocky.database import (
     connect,
     read_import_provenance,
     record_import_provenance,
+    write_schema_version,
 )
 from stocky.pipeline import rebuild_database
 
@@ -198,6 +199,9 @@ def test_newest_bse_debt_archive_reports_missing_archive(tmp_path) -> None:
 def test_import_bse_debt_leaves_consolidated_untouched(tmp_path, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path)
+    # Numbered as a rebuild numbers it: only a rebuild can vouch for consolidated.
+    with sqlite3.connect(db_path) as con:
+        write_schema_version(con, replaces_consolidated=True)
     with sqlite3.connect(db_path) as con:
         before = con.execute(f"SELECT * FROM {CONSOLIDATED_TABLE} ORDER BY isin").fetchall()
 

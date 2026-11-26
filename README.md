@@ -46,9 +46,9 @@ INE002A01018  equity    RELIANCE    500325       RELIANCE  RELIANCE.NS  RELIANCE
 ```
 
 The file records its table layout as a schema number in `PRAGMA user_version`, and `stocky status` and `stocky summary`
-show it. Every rebuild writes the number. The imports and Yahoo commands write it too, except into a file whose
-`consolidated` table has an older layout, which keeps its number until a rebuild. A file written before Stocky recorded
-the number reads 0.
+show it. Every rebuild writes the number. The imports and Yahoo commands write it too, but only into a file that a
+rebuild has already numbered, or one with no `consolidated` table: only a rebuild can vouch for `consolidated`, so a file
+written before Stocky recorded the number keeps reading 0 until its next rebuild.
 
 ```bash
 sqlite3 stocky.db 'PRAGMA user_version'
