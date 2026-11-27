@@ -61,7 +61,6 @@ from stocky.database import (
     SourceRecord,
     describe_schema_version,
     has_sgb_rows,
-    import_yahoo_json_cache,
     missing_database_message,
     read_status,
     search_instruments,
@@ -94,12 +93,19 @@ from stocky.summary import (
     build_refresh_summary,
     render_markdown,
 )
-from stocky.yahoo import ProgressCallback, YahooDataManager, YahooFetchError, YahooUpdateResult, ticker_column
+from stocky.yahoo import (
+    ProgressCallback,
+    YahooDataManager,
+    YahooFetchError,
+    YahooUpdateResult,
+    import_yahoo_json_cache,
+    ticker_column,
+)
 
 console = Console()
 error_console = Console(stderr=True)
 app = typer.Typer(help="Consolidate Indian market instrument symbols.", no_args_is_help=False)
-yahoo_app = typer.Typer(help="Manage Yahoo Finance cache data.")
+yahoo_app = typer.Typer(help="Fetch, import, and read Yahoo Finance data.")
 brokers_app = typer.Typer(help="Map cash-market identifiers from Groww, Upstox, and Alice Blue.")
 indices_app = typer.Typer(help="Map market index identifiers from Zerodha instruments.")
 debt_app = typer.Typer(help="Map BSE debt identifiers from debt bhavcopies.")
@@ -233,7 +239,7 @@ def _print_status(status: DatabaseStatus) -> None:
     overview.add_row("Consolidated rows", str(status.consolidated_rows))
     for ins_type, count in status.ins_type_counts.items():
         overview.add_row(f"  {ins_type}", str(count))
-    overview.add_row("Yahoo responses", str(status.yahoo_rows))
+    overview.add_row("Yahoo tickers", str(status.yahoo_rows))
     for exchange, count in status.yahoo_exchange_counts.items():
         overview.add_row(f"  {exchange}", str(count))
     console.print(overview)
@@ -252,7 +258,7 @@ def _print_status(status: DatabaseStatus) -> None:
         )
     console.print(coverage)
 
-    yahoo = Table(title="Yahoo cache")
+    yahoo = Table(title="Yahoo fields")
     yahoo.add_column("Field")
     yahoo.add_column("Value")
     yahoo.add_row("Newest fetch", _format_timestamp(status.yahoo_newest_fetch))
@@ -501,8 +507,7 @@ def _print_equivalents(match: InstrumentMatch, term: str | None = None) -> None:
 
 
 _YAHOO_STATUS_NOTES = {
-    "missing": "No cached Yahoo response for this ticker. Run 'stocky yahoo update' to fetch it.",
-    "unusable": "The cached Yahoo response is an error or names no listed security.",
+    "missing": "No Yahoo fields are stored for this ticker. Run 'stocky yahoo update' to fetch them.",
 }
 
 
@@ -936,7 +941,7 @@ def _interactive_yahoo_update() -> None:
             _print_error("Enter a positive number, or leave blank for all.")
             return
 
-    missing_only = typer.confirm("Only fetch tickers with no cached response?", default=False)
+    missing_only = typer.confirm("Only fetch tickers with no Yahoo fields stored?", default=False)
 
     raw_stale_days = typer.prompt(
         "Only fetch tickers not fetched in this many days (blank = any age)", default="", show_default=False
@@ -972,7 +977,7 @@ def _interactive_yahoo_update() -> None:
         # update_data raises when the column holds no tickers at all, and when a named symbol is not
         # listed, so an empty plan means missing_only or stale_days filtered out every ticker it found.
         if missing_only:
-            console.print("[green]Nothing to fetch; every ticker already has a cached response.[/green]")
+            console.print("[green]Nothing to fetch; every ticker already has Yahoo fields stored.[/green]")
         elif stale_days is not None:
             console.print(f"[green]Nothing to fetch; every ticker was fetched in the last {stale_days:g} days.[/green]")
         else:
@@ -1027,7 +1032,7 @@ def interactive() -> None:
         console.print("\n[green]Choose an option[/green]")
         console.print("1. Rebuild stocky.db from scratch")
         console.print("2. Update Yahoo data")
-        console.print("3. Import Yahoo JSON cache into stocky.db")
+        console.print("3. Import Yahoo JSON files")
         console.print("4. Show database status")
         console.print("5. Look up an instrument")
         console.print("6. Exit")
@@ -1382,7 +1387,7 @@ def refresh(
         typer.Option(
             "--stale-days",
             min=0,
-            help="Only fetch Yahoo tickers with no cached response or one fetched more than this many days ago.",
+            help="Only fetch Yahoo tickers with no fields stored or ones fetched more than this many days ago.",
         ),
     ] = None,
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
@@ -1540,7 +1545,7 @@ def status(
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
     json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
 ) -> None:
-    """Show database statistics, coverage, and Yahoo cache freshness."""
+    """Show database statistics, coverage, and Yahoo data freshness."""
     try:
         result = read_status(db_path)
     except Exception as exc:
@@ -1838,9 +1843,9 @@ def screen(
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
     json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
 ) -> None:
-    """Screen listings by cached Yahoo market cap, sector, and industry, largest market cap first.
+    """Screen listings by stored Yahoo market cap, sector, and industry, largest market cap first.
 
-    Reads only the cached Yahoo responses; it never calls Yahoo Finance.
+    Reads only the Yahoo fields stored in the database; it never calls Yahoo Finance.
     """
     try:
         result = screen_instruments(
@@ -1919,7 +1924,7 @@ def yahoo_update(
     limit: Annotated[int | None, typer.Option("--limit", help="Optional maximum number of tickers to process.")] = None,
     missing_only: Annotated[
         bool,
-        typer.Option("--missing-only", help="Only fetch tickers that have no cached response yet."),
+        typer.Option("--missing-only", help="Only fetch tickers that have no Yahoo fields stored yet."),
     ] = False,
     symbols: Annotated[
         str | None,
@@ -1934,7 +1939,7 @@ def yahoo_update(
         typer.Option(
             "--stale-days",
             min=0,
-            help="Only fetch tickers with no cached response or one fetched more than this many days ago.",
+            help="Only fetch tickers with no Yahoo fields stored or ones fetched more than this many days ago.",
         ),
     ] = None,
     json_output: Annotated[
@@ -1942,7 +1947,10 @@ def yahoo_update(
         typer.Option("--json", help="Print the result as JSON on stdout and progress events as JSON lines on stderr."),
     ] = False,
 ) -> None:
-    """Update Yahoo Finance responses in SQLite."""
+    """Fetch Yahoo Finance responses: the raw responses go to the cache file, their fields to the database.
+
+    The cache file sits beside the database, named after it: data/output/stocky_yahoo_cache.db by default.
+    """
     try:
         with _yahoo_progress(exchange, json_output) as print_progress:
             result = YahooDataManager(db_path).update_data(
@@ -1977,7 +1985,7 @@ def yahoo_import_cache(
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
     json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
 ) -> None:
-    """Import legacy Yahoo JSON files into SQLite."""
+    """Import legacy Yahoo JSON files into the cache file and their fields into the database."""
     try:
         result = import_yahoo_json_cache(cache_dir, db_path)
     except Exception as exc:
@@ -1995,7 +2003,7 @@ def yahoo_fields(
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
     json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON on stdout.")] = False,
 ) -> None:
-    """Show the cached Yahoo fields of an instrument, one table per exchange that lists it."""
+    """Show the stored Yahoo fields of an instrument, one table per exchange that lists it."""
     try:
         rows = lookup_fields(identifier, db_path)
     except Exception as exc:
@@ -2031,7 +2039,7 @@ def yahoo_enriched(
     ] = None,
     db_path: Annotated[Path, typer.Option("--db-path", help="SQLite DB path.")] = DEFAULT_DB_PATH,
 ) -> None:
-    """Export the consolidated table enriched with cached Yahoo fields, one row per instrument per exchange."""
+    """Export the consolidated table enriched with stored Yahoo fields, one row per instrument per exchange."""
     try:
         result = export_enriched(db_path, output=output, format=format, exchange=exchange)
     except Exception as exc:

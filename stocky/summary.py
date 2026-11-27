@@ -11,7 +11,7 @@ from stocky.bse_debt import BSE_DEBT_TABLE
 from stocky.config import DEFAULT_DB_PATH
 from stocky.database import (
     CONSOLIDATED_TABLE,
-    YAHOO_RESPONSES_TABLE,
+    YAHOO_FIELDS_TABLE,
     BuildProvenance,
     DatabaseStatus,
     ImportRecord,
@@ -64,7 +64,7 @@ class Check:
 
 @dataclass(frozen=True)
 class MissingYahooTickers:
-    """Listed tickers with no saved Yahoo response: never fetched, or skipped because Yahoo had no listed security."""
+    """Listed tickers with no Yahoo fields: never fetched, or skipped because Yahoo had no listed security."""
 
     exchange: str
     column: str
@@ -165,7 +165,7 @@ def _import_checks(
 
 
 def _consolidated_checks(con: sqlite3.Connection, sample_size: int) -> tuple[list[Check], list[MissingYahooTickers]]:
-    """ISIN and Yahoo ticker checks on a current-layout consolidated table, and each exchange's uncached tickers."""
+    """ISIN and Yahoo ticker checks on a current-layout consolidated table, and each exchange's tickers without fields."""
     checks: list[Check] = []
     missing_yahoo: list[MissingYahooTickers] = []
     empty, duplicates = con.execute(
@@ -207,9 +207,9 @@ def _consolidated_checks(con: sqlite3.Connection, sample_size: int) -> tuple[lis
         )
     )
 
-    has_yahoo = table_exists(con, YAHOO_RESPONSES_TABLE)
+    has_yahoo = table_exists(con, YAHOO_FIELDS_TABLE)
     for exchange, ticker_column, _, _ in YAHOO_TICKER_SOURCES:
-        cached = f"{ticker_column} IN (SELECT yahoo_symbol FROM {YAHOO_RESPONSES_TABLE})" if has_yahoo else "0"
+        cached = f"{ticker_column} IN (SELECT yahoo_symbol FROM {YAHOO_FIELDS_TABLE})" if has_yahoo else "0"
         listed = con.execute(
             f"SELECT COUNT(DISTINCT {ticker_column}) FROM {CONSOLIDATED_TABLE} WHERE {_populated(ticker_column)}"
         ).fetchone()[0]
@@ -372,7 +372,7 @@ def render_markdown(summary: RefreshSummary) -> str:
                 for entry in status.coverage
             ),
             "",
-            "## Yahoo cache",
+            "## Yahoo fields",
             "",
             f"Newest fetch {_timestamp(status.yahoo_newest_fetch)}; oldest fetch {_timestamp(status.yahoo_oldest_fetch)}.",
         ]

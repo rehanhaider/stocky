@@ -583,7 +583,7 @@ class StockyApp(App[None]):
         overview.add_row("Consolidated rows", str(status.consolidated_rows))
         for ins_type, count in status.ins_type_counts.items():
             overview.add_row(f"  {ins_type}", str(count))
-        overview.add_row("Yahoo responses", str(status.yahoo_rows))
+        overview.add_row("Yahoo tickers", str(status.yahoo_rows))
         for exchange, count in status.yahoo_exchange_counts.items():
             overview.add_row(f"  {exchange}", str(count))
 
@@ -596,7 +596,7 @@ class StockyApp(App[None]):
                 _format_percent(entry.populated, status.consolidated_rows),
             )
 
-        yahoo.add_columns("Yahoo cache", "Value")
+        yahoo.add_columns("Yahoo fields", "Value")
         yahoo.add_row("Newest fetch", _format_timestamp(status.yahoo_newest_fetch))
         yahoo.add_row("Oldest fetch", _format_timestamp(status.yahoo_oldest_fetch))
         for label, value in _yahoo_cached_rows(status):

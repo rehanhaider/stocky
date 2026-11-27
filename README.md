@@ -12,14 +12,19 @@
 ## Database tables
 
 `data/output/stocky.db` holds the `consolidated` table, one row per ISIN with its BSE, NSE, Zerodha, and Yahoo
-symbols, and the separate `mutual_funds`, `bse_debt`, `indices`, and `broker_symbols` tables. The
-[schema reference](docs/schema.md) lists each table's columns and sources.
+symbols, the separate `mutual_funds`, `bse_debt`, `indices`, and `broker_symbols` tables, and `yahoo_fields`, the
+fields Stocky reads from each ticker's Yahoo Finance response. The [schema reference](docs/schema.md) lists each
+table's columns and sources.
+
+The raw Yahoo responses are not in `stocky.db`. `stocky yahoo update` keeps them in a cache file beside the database,
+`data/output/stocky_yahoo_cache.db`, which Git ignores.
 
 ## Release data
 
-Release `v3.0.0` adds the `bse_debt`, `mutual_funds`, `indices`, and `broker_symbols` tables and the three provenance
-tables, labels ETFs and sovereign gold bonds in `ins_type`, and records a schema number in the file. See the
-[v3.0.0 release notes](docs/releases/v3.0.0.md) for the breaking changes, source dates, and row counts, and the
+Release `v4.0.0` replaces the `yahoo_responses` table of raw Yahoo responses with `yahoo_fields`, which holds the
+fields read from them, and takes the file from 40.9 MB to 11.1 MB. See the
+[v4.0.0 release notes](docs/releases/v4.0.0.md) for the breaking change, the
+[v3.0.0 notes](docs/releases/v3.0.0.md) for the tables, labels, and schema number added before it, and the
 [v2.0.0 notes](docs/releases/v2.0.0.md) for the earlier column change. `data/output/stocky.db` is versioned with the
 repository; pin the release tag to use that database version.
 
@@ -28,11 +33,11 @@ repository; pin the release tag to use that database version.
 Download the database at a release tag and check its hash:
 
 ```bash
-curl -fLo stocky.db https://raw.githubusercontent.com/rehanhaider/stocky/v3.0.0/data/output/stocky.db
+curl -fLo stocky.db https://raw.githubusercontent.com/rehanhaider/stocky/v4.0.0/data/output/stocky.db
 shasum -a 256 stocky.db
 ```
 
-SHA-256 for `v3.0.0`: `d173305ca9763cc2a6719e4f87b2d15cd4a8714f61a9edd305a4609b1813972e`.
+SHA-256 for `v4.0.0`: `1d4232e80d174606674aaea3448f38c78fcc3445bbda63840900649fbc778d45`.
 
 Look up an instrument's identifiers on both exchanges:
 
@@ -100,7 +105,8 @@ refresh needs all of these files and the broker files listed under the `brokers 
 5. BSE debt bhavcopy archives: `data/marketData/bhavCopies/bseDebt`. Keep the `DEBTBHAVCOPY<DDMMYYYY>.zip` filename;
    the loader reads `fgroup<DDMMYYYY>.csv`, `icdm<DDMMYYYY>.csv`, and `wdm<DDMMYYYY>.csv` directly from the zip.
 
-Raw market data files are local inputs and are ignored by Git. The durable output is `data/output/stocky.db`.
+Raw market data files are local inputs and are ignored by Git. The durable output is `data/output/stocky.db`. The
+Yahoo response cache, `data/output/stocky_yahoo_cache.db`, stays local too.
 
 ## Running the app
 
@@ -113,7 +119,7 @@ uv run stocky
 The rebuild option lists the BSE/NSE bhavcopy pairs it found in `data/marketData/bhavCopies`, lets you pick one by row
 number or trade date, asks whether to include sovereign gold bonds, and previews the resolved files, their row counts,
 and the row changes before you confirm the rebuild. The Yahoo option asks for the exchange, optional symbols, an optional
-limit, whether to fetch only uncached tickers, and an optional stale-days age, then shows how many tickers it will fetch
+limit, whether to fetch only tickers without Yahoo fields, and an optional stale-days age, then shows how many tickers it will fetch
 and a progress bar while it runs. Both options run exactly what `stocky rebuild` and `stocky yahoo update` run.
 
 Open the full-screen terminal UI:
@@ -210,32 +216,36 @@ uv run stocky rebuild \
   --zerodha-instruments data/marketData/zerodha/instruments.csv
 ```
 
-Import the legacy Yahoo JSON cache into SQLite:
+Import legacy Yahoo JSON files. Each response goes to the cache file and its fields to `yahoo_fields`:
 
 ```bash
 uv run stocky yahoo import-cache
 ```
 
-Update Yahoo responses in SQLite. `--exchange NSE` fetches the `yq_ns` tickers and `--exchange BSE` fetches the `yq_bo`
-tickers, so a run only asks Yahoo for tickers that exchange lists. Only answers that name a listed security are saved.
-An error, an empty answer, or an index that Yahoo files under the same ticker (such as `ENERGY.BO`, the S&P BSE Energy
-index) is skipped, and any older saved answer for that ticker is removed. `stocky yahoo import-cache` applies the same
-rule. A run without `--missing-only` refreshes every saved answer:
+Fetch Yahoo responses. `--exchange NSE` fetches the `yq_ns` tickers and `--exchange BSE` fetches the `yq_bo`
+tickers, so a run only asks Yahoo for tickers that exchange lists. Only answers that name a listed security are saved:
+the raw response to the cache file beside the database (`stocky_yahoo_cache.db` beside `stocky.db`, or named after the
+`--db-path` file) and its fields to the `yahoo_fields` table, in one transaction. An error, an empty answer, or an index
+that Yahoo files under the same ticker (such as `ENERGY.BO`, the S&P BSE Energy index) is skipped, and any older saved
+answer for that ticker is removed from both. `stocky yahoo import-cache` applies the same rule. A run without
+`--missing-only` refreshes every saved answer. A run that finishes also removes the fields and cached responses of
+tickers no longer in `consolidated`:
 
 ```bash
 uv run stocky yahoo update --exchange BSE
 ```
 
-Refresh part of the cache instead of every ticker. `--symbols` takes tickers or exchange symbols listed for the
-exchange, `--stale-days N` keeps tickers with no response or one fetched more than N days ago, and `--missing-only`
-keeps tickers with no response. The options combine, and `--limit` caps the selection after them:
+Refresh some tickers instead of every one. `--symbols` takes tickers or exchange symbols listed for the
+exchange, `--stale-days N` keeps tickers with no fields or ones fetched more than N days ago, and `--missing-only`
+keeps tickers with no fields. Both read `yahoo_fields`, not the cache file, so a fresh clone without the cache fetches
+only what the database lacks. The options combine, and `--limit` caps the selection after them:
 
 ```bash
 uv run stocky yahoo update --exchange NSE --symbols RELIANCE,INFY.NS
 uv run stocky yahoo update --exchange BSE --stale-days 90 --limit 500
 ```
 
-Show database statistics, per-column coverage, Yahoo cache freshness, the source files of the latest rebuild, and the
+Show database statistics, per-column coverage, Yahoo fetch dates, the source files of the latest rebuild, and the
 source files of each imported table:
 
 ```bash
@@ -243,7 +253,7 @@ uv run stocky status
 ```
 
 Validate the database and write the refresh summary. It lists the rebuild's and the imports' source files, every
-table's row count, column coverage, Yahoo cache dates, and the tickers without a Yahoo response, and exits with status 1
+table's row count, column coverage, Yahoo fetch dates, and the tickers without Yahoo fields, and exits with status 1
 when a check fails, including when a mapping table is empty or has no import record. See the
 [quarterly refresh checklist](docs/refresh-checklist.md) for the full refresh steps:
 
@@ -417,9 +427,9 @@ uv run stocky export --tickers yq_ns -o data/output/yahoo_nse.txt
 
 ### Yahoo fields and screening
 
-These commands read the Yahoo responses already cached in `stocky.db`. They never call Yahoo Finance and never write to the database.
+These commands read the `yahoo_fields` table in `stocky.db`, not the cache file, so they work in a fresh clone. They never call Yahoo Finance and never write to the database.
 
-Each exchange's data comes only from the response cached under that exchange's ticker column: `yq_ns` for NSE and `yq_bo` for BSE. A bare symbol is never used to match, because the same symbol can name different companies on NSE and BSE.
+Each exchange's data comes only from the fields stored under that exchange's ticker column: `yq_ns` for NSE and `yq_bo` for BSE. A bare symbol is never used to match, because the same symbol can name different companies on NSE and BSE.
 
 `yahoo fields` shows one instrument's fields, with one table per exchange that lists it. It takes the same exact identifiers as `lookup`:
 
@@ -436,20 +446,19 @@ The fields are:
 - trailing P/E, trailing EPS, book value, price to book, dividend yield, beta, shares outstanding, and enterprise value;
 - the first and last expected earnings date.
 
-Some responses do not have every module, so a field can be empty. More than 40% of the cached responses have no sector, industry, or key statistics.
+Some responses do not have every module, so a field can be empty. More than 40% of the saved responses have no sector, industry, or key statistics.
 
-`yahoo enriched` writes the enriched consolidated view as CSV, JSON, or Parquet. The view has one row for each instrument on each exchange where it has a Yahoo ticker. It shows the ticker and its identifiers, then `yahoo_status`, `fetched_at`, and the fields above. `yahoo_status` is one of three values:
+`yahoo enriched` writes the enriched consolidated view as CSV, JSON, or Parquet. The view has one row for each instrument on each exchange where it has a Yahoo ticker. It shows the ticker and its identifiers, then `yahoo_status`, `fetched_at`, and the fields above. `yahoo_status` is one of two values:
 
-- `ok`: the response names a listed security;
-- `unusable`: the response is an error or names something else, such as an index;
-- `missing`: no response is cached.
+- `ok`: the database holds fields for the ticker;
+- `missing`: it does not. The ticker was never fetched, or Yahoo had no listed security for it.
 
 ```bash
 uv run stocky yahoo enriched -o data/output/enriched.parquet
 uv run stocky yahoo enriched --exchange NSE --format csv
 ```
 
-`screen` filters the listings that have usable data. It shows the largest market cap first.
+`screen` filters the listings that have Yahoo fields. It shows the largest market cap first.
 
 - `--market-cap-gt` and `--market-cap-lt` are in crore. Both bounds are exclusive.
 - `--sector` and `--industry` match any part of the value, in any case.
@@ -460,7 +469,7 @@ uv run stocky screen --market-cap-gt 10000 --exchange NSE
 uv run stocky screen --sector technology --market-cap-lt 500 --limit 50 --json
 ```
 
-The values are what Yahoo returned when the response was fetched. Check the quote date: many responses hold quotes from years before `fetched_at`. A few hold impossible placeholder values that sort to the top of a market cap screen. The cached modules have no price history, so Stocky has no OHLCV export.
+The values are what Yahoo returned when the response was fetched. Check the quote date: many responses hold quotes from years before `fetched_at`. A few hold impossible placeholder values that sort to the top of a market cap screen. The saved modules have no price history, so Stocky has no OHLCV export.
 
 ### Pinnable snapshots
 

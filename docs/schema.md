@@ -1,7 +1,8 @@
 # Database schema
 
-This page describes the columns of the `consolidated`, `mutual_funds`, `bse_debt`, `indices`, and `broker_symbols`
-tables in `data/output/stocky.db`. The [README](../README.md) covers installation and the commands that build them.
+This page describes the columns of the `consolidated`, `mutual_funds`, `bse_debt`, `indices`, `broker_symbols`, and
+`yahoo_fields` tables in `data/output/stocky.db`. The [README](../README.md) covers installation and the commands that
+build them.
 
 ## The consolidated table
 
@@ -118,3 +119,31 @@ Alice Blue, and reimport it after rebuilding to refresh its ISIN mappings.
 
 The source files do not provide a whole-file snapshot date. Each import records every file's modification time, which
 `stocky status` and `stocky summary` show; that time does not prove when the brokers generated their lists.
+
+## The yahoo_fields table
+
+`yahoo_fields` holds one row per Yahoo ticker whose response named a listed security, with the fields Stocky reads
+from that response. `stocky yahoo update` and `stocky yahoo import-cache` write it; `screen`, `yahoo fields`,
+`yahoo enriched`, `status`, and `summary` read it. A ticker that Yahoo answers with an error, an empty answer, or an
+index has no row, and an update that gets such an answer removes the ticker's earlier row.
+
+| Column | Source |
+| --- | --- |
+| `yahoo_symbol` | The ticker, the primary key, such as `RELIANCE.NS`. It matches `consolidated.yq_ns` or `yq_bo` |
+| `symbol`, `exchange` | The ticker without its suffix, and `NSE` or `BSE` |
+| `fetched_at` | When the response was fetched, as an ISO 8601 UTC time. `--stale-days` compares against it |
+| `name`, `quote_type` | `quoteType` `longName` (or `shortName`) and `quoteType` |
+| `currency`, `market_cap` | `price`, then `summaryDetail` |
+| `sector`, `industry` | `assetProfile`, then `summaryProfile` |
+| `price`, `volume`, `market_time` | `price` `regularMarketPrice`, `regularMarketVolume`, and `regularMarketTime` |
+| `previous_close` | `summaryDetail` `previousClose`, then `price` `regularMarketPreviousClose` |
+| `fifty_two_week_high`, `fifty_two_week_low`, `trailing_pe`, `dividend_yield` | `summaryDetail` |
+| `trailing_eps`, `book_value`, `price_to_book`, `beta`, `shares_outstanding`, `enterprise_value` | `defaultKeyStatistics` |
+| `earnings_date`, `earnings_date_end` | The first and last date in `calendarEvents` `earnings.earningsDate`, as `YYYY-MM-DD` |
+
+The numbers are REAL and the rest TEXT. A field the response lacks is NULL, as is a number Yahoo sent as text, such as
+`Infinity`. Market cap is in the quoted currency, not crore.
+
+The raw responses are not in `stocky.db`. They are kept in `yahoo_responses` in the cache file beside the database,
+`data/output/stocky_yahoo_cache.db`, which Git ignores: one gzip-compressed `all_modules` JSON answer per ticker, with
+its fetch time and source. A run that finishes removes the rows of tickers no longer in `consolidated` from both files.

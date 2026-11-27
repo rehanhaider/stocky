@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -10,20 +11,22 @@ from typing import Literal
 from stocky.config import DEFAULT_DB_PATH
 from stocky.database import (
     OrphanVacuumError,
+    attach_yahoo_cache,
     connect,
     count_orphan_yahoo_responses,
     delete_yahoo_response,
     encode_response_json,
     fetch_consolidated_symbols,
-    initialize_database,
     is_usable_yahoo_payload,
     prune_orphan_yahoo_responses,
     read_available_yahoo_symbols,
     read_yahoo_fetch_times,
     split_yahoo_symbol,
+    ticker_column,
     upsert_yahoo_response,
     write_schema_version,
 )
+from stocky.enrich import extract_fields, initialize_yahoo_fields, upsert_yahoo_fields
 
 COMMIT_EVERY = 25
 CONSECUTIVE_FAILURE_LIMIT = 5
@@ -102,22 +105,97 @@ class YahooUpdateResult:
     written: int
     skipped: int
     dry_run: bool
-    # Cached responses removed because their ticker left consolidated; a dry run counts those it would remove.
+    # Tickers whose fields and cached response were removed because they left consolidated; a dry run counts those
+    # it would remove.
     pruned: int = 0
     # Problems after the fetched responses were saved, such as a prune that failed; the update itself succeeded.
     warnings: list[str] = field(default_factory=list)
 
 
-# Each exchange reads the consolidated column that holds its full Yahoo tickers.
-TICKER_COLUMNS = {"NSE": "yq_ns", "BSE": "yq_bo"}
 TICKER_SUFFIXES = {"NSE": ".NS", "BSE": ".BO"}
 
 
-def ticker_column(exchange: str) -> str:
-    column = TICKER_COLUMNS.get(exchange.upper())
-    if column is None:
-        raise ValueError(f"Unsupported exchange: {exchange}. Expected NSE or BSE.")
-    return column
+@dataclass(frozen=True)
+class JsonImportResult:
+    imported: int
+    skipped: int
+
+
+def save_yahoo_response(
+    con: sqlite3.Connection,
+    *,
+    yahoo_symbol: str,
+    exchange: str,
+    response: object,
+    source: str,
+    fetched_at: str,
+) -> None:
+    """Cache a usable response and store the fields read from it, in con's open transaction.
+
+    con must have the cache attached (see attach_yahoo_cache) and the yahoo_fields table created.
+    """
+    symbol = split_yahoo_symbol(yahoo_symbol)[0]
+    upsert_yahoo_response(
+        con,
+        yahoo_symbol=yahoo_symbol,
+        symbol=symbol,
+        exchange=exchange,
+        response_json=encode_response_json(response),
+        fetched_at=fetched_at,
+        source=source,
+    )
+    payload = response.get(yahoo_symbol) if isinstance(response, dict) else None
+    upsert_yahoo_fields(
+        con,
+        yahoo_symbol=yahoo_symbol,
+        symbol=symbol,
+        exchange=exchange,
+        fetched_at=fetched_at,
+        values=extract_fields(payload),
+    )
+
+
+def import_yahoo_json_cache(
+    cache_dir: Path,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> JsonImportResult:
+    """Import legacy per-ticker JSON files into the response cache and the database's yahoo_fields table."""
+    # Check before connecting, so a mistyped directory fails without creating an empty database.
+    if not cache_dir.is_dir():
+        raise FileNotFoundError(f"Yahoo JSON cache directory not found: {cache_dir}")
+
+    imported = 0
+    skipped = 0
+    with connect(db_path) as con:
+        attach_yahoo_cache(con, db_path)
+        initialize_yahoo_fields(con)
+        for file_path in sorted(cache_dir.glob("*.json")):
+            yahoo_symbol = file_path.stem
+            try:
+                response = json.loads(file_path.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError):
+                skipped += 1
+                continue
+
+            payload = response.get(yahoo_symbol) if isinstance(response, dict) else None
+            if not is_usable_yahoo_payload(payload):
+                skipped += 1
+                continue
+
+            save_yahoo_response(
+                con,
+                yahoo_symbol=yahoo_symbol,
+                exchange=split_yahoo_symbol(yahoo_symbol)[1],
+                response=response,
+                source=str(file_path),
+                fetched_at=datetime.fromtimestamp(file_path.stat().st_mtime, UTC).isoformat(),
+            )
+            if not imported:
+                # After the first row, so the number commits or rolls back with the imported rows.
+                write_schema_version(con)
+            imported += 1
+
+    return JsonImportResult(imported=imported, skipped=skipped)
 
 
 def normalize_tickers(symbols: Sequence[str], exchange: str) -> list[str]:
@@ -226,7 +304,6 @@ class YahooDataManager:
 
         import yahooquery as yq
 
-        initialize_database(self.db_path)
         written = 0
         skipped = 0
         consecutive_failures = 0
@@ -252,7 +329,10 @@ class YahooDataManager:
         # The sqlite3 connection context manager commits on a clean exit, so the
         # writes after the last COMMIT_EVERY boundary are persisted there. The
         # abort path commits explicitly because that exit rolls back instead.
+        # The cache file is attached, so each commit writes the raw responses and their fields together.
         with connect(self.db_path) as con:
+            attach_yahoo_cache(con, self.db_path)
+            initialize_yahoo_fields(con)
             for index, yahoo_symbol in enumerate(tickers, start=1):
                 outcome, detail, data, cause = fetch(yahoo_symbol)
                 if outcome == "failure" and is_auth_failure(detail):
@@ -276,13 +356,13 @@ class YahooDataManager:
                     delete_yahoo_response(con, yahoo_symbol)
                 else:
                     consecutive_failures = 0
-                    upsert_yahoo_response(
+                    save_yahoo_response(
                         con,
                         yahoo_symbol=yahoo_symbol,
-                        symbol=split_yahoo_symbol(yahoo_symbol)[0],
                         exchange=exchange.upper(),
-                        response_json=encode_response_json(data),
+                        response=data,
                         source="yahooquery",
+                        fetched_at=datetime.now(UTC).isoformat(),
                     )
                     if not written:
                         # After the first row, so the number commits or rolls back with this run's rows.
