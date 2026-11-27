@@ -43,7 +43,8 @@ _DATE_PREFIX = re.compile(r"(\d{4}-\d{2}-\d{2})")
 class YahooFields:
     """Fields read from one ticker's ``all_modules`` payload. Any field the payload lacks is None.
 
-    Each field is a column of the ``yahoo_fields`` table: TEXT for the text fields, REAL for the numbers.
+    Each field is a column of the ``yahoo_fields`` table: TEXT for the text fields, and no declared type for the
+    numbers, so each keeps the type Yahoo sent: an integer market cap reads back as an int, and -0.0 as -0.0.
     """
 
     name: str | None = None
@@ -195,8 +196,9 @@ def extract_fields(payload: object) -> YahooFields:
 
 def initialize_yahoo_fields(con: sqlite3.Connection) -> None:
     """Create the yahoo_fields table: one row per ticker whose response named a listed security."""
+    # A REAL column would turn every integer into a float and -0.0 into 0.0; an untyped one stores what it is given.
     columns = ",\n".join(
-        f"                {name} {'TEXT' if name in _TEXT_FIELDS else 'REAL'}" for name in YAHOO_FIELD_NAMES
+        f"                {name}{' TEXT' if name in _TEXT_FIELDS else ''}" for name in YAHOO_FIELD_NAMES
     )
     con.execute(
         f"""

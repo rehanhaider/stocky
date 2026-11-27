@@ -141,8 +141,9 @@ index has no row, and an update that gets such an answer removes the ticker's ea
 | `trailing_eps`, `book_value`, `price_to_book`, `beta`, `shares_outstanding`, `enterprise_value` | `defaultKeyStatistics` |
 | `earnings_date`, `earnings_date_end` | The first and last date in `calendarEvents` `earnings.earningsDate`, as `YYYY-MM-DD` |
 
-The numbers are REAL and the rest TEXT. A field the response lacks is NULL, as is a number Yahoo sent as text, such as
-`Infinity`. Market cap is in the quoted currency, not crore.
+The text columns are TEXT. The number columns have no declared type, so each value keeps the type Yahoo sent: an
+integer such as a market cap stays an integer, and a fraction stays a real. A field the response lacks is NULL, as is a
+number Yahoo sent as text, such as `Infinity`. Market cap is in the quoted currency, not crore.
 
 The raw responses are not in `stocky.db`. They are kept in `yahoo_responses` in the cache file beside the database,
 `data/output/stocky_yahoo_cache.db`, which Git ignores: one gzip-compressed `all_modules` JSON answer per ticker, with

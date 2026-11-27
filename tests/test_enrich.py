@@ -229,6 +229,24 @@ def test_read_enriched_attaches_each_exchange_response_to_its_own_instrument(glo
     assert rows[("INE002A01018", "BSE")].fields.market_cap == 1_182_543 * CRORE
 
 
+def test_read_enriched_returns_each_number_with_the_type_yahoo_sent(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path, (("INE000A00001", "equity", "OK", None, None, None, None, None, "OK.NS", None),))
+    payload = _payload("Ok Limited", market_cap=16_360_759_361_536, price=1380.5)
+    payload["summaryDetail"] = {"dividendYield": -0.0, "fiftyTwoWeekHigh": 1611.0}
+    _seed_responses(db_path, {"OK.NS": payload})
+
+    (row,) = read_enriched(db_path)
+
+    # The integer market cap stays an int and prints without ".0" in JSON; -0.0 and 1611.0 stay floats.
+    assert row.fields == extract_fields(payload)
+    assert type(row.fields.market_cap) is int
+    assert json.dumps(row.as_record()["market_cap"]) == "16360759361536"
+    assert type(row.fields.price) is float
+    assert json.dumps(row.fields.dividend_yield) == "-0.0"
+    assert json.dumps(row.fields.fifty_two_week_high) == "1611.0"
+
+
 def test_read_enriched_reads_the_stored_fields_without_the_cache_file(tmp_path, seed_consolidated) -> None:
     # A fresh clone has the database's yahoo_fields table but not the cache file, which Git ignores.
     db_path = tmp_path / "stocky.db"

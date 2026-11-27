@@ -37,7 +37,7 @@ curl -fLo stocky.db https://raw.githubusercontent.com/rehanhaider/stocky/v4.0.0/
 shasum -a 256 stocky.db
 ```
 
-SHA-256 for `v4.0.0`: `1d4232e80d174606674aaea3448f38c78fcc3445bbda63840900649fbc778d45`.
+SHA-256 for `v4.0.0`: `3bfe9e93702df14cf2f2ac9d1f32ac853588574c23aa2018017826f704b15a15`.
 
 Look up an instrument's identifiers on both exchanges:
 
