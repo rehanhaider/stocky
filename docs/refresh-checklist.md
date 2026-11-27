@@ -44,8 +44,9 @@ inputs, so step 1 stays manual.
 
    Keep `--include-sgb`: a rebuild without the flag drops the SGB rows. It needs UDiFF bhavcopies.
 
-4. Preview the Yahoo update, then run it for each exchange. `--stale-days` fetches only tickers with no response or
-   an old one; add `--symbols` to refresh named tickers only:
+4. Preview the Yahoo update, then run it for each exchange. `--stale-days` fetches only tickers with no Yahoo fields
+   or old ones; add `--symbols` to refresh named tickers only. The fields go to `yahoo_fields` in the database and the
+   raw responses to `data/output/stocky_yahoo_cache.db`, which stays local:
 
    ```bash
    uv run stocky yahoo update --exchange NSE --stale-days 90 --dry-run
@@ -72,7 +73,8 @@ inputs, so step 1 stays manual.
    ```
 
 6. Read the summary. Every check must pass. Compare the trade dates and row counts with the previous summary.
-7. Commit `data/output/stocky.db` and `data/output/refresh-summary.md` together.
+7. Commit `data/output/stocky.db` and `data/output/refresh-summary.md` together. Git ignores the Yahoo cache file,
+   so it is not committed.
 
 ## What the summary checks
 
@@ -87,4 +89,4 @@ inputs, so step 1 stays manual.
 | `mutual_funds` import, `bse_debt` import, `indices` import, `broker_symbols` import | The table is empty or missing, or no import recorded its source files |
 
 The summary also lists the rebuild's and the imports' source files with their SHA-256 hashes, the row count of every
-table, column coverage, Yahoo cache dates, and the tickers that have no Yahoo response.
+table, column coverage, Yahoo fetch dates, and the tickers that have no Yahoo fields.

@@ -5,9 +5,11 @@ import pytest
 
 import stocky.database as database
 from stocky.cli import app
-from stocky.database import SCHEMA_VERSION, connect, encode_response_json, initialize_database, upsert_yahoo_response
+from stocky.database import SCHEMA_VERSION, attach_yahoo_cache, connect
+from stocky.enrich import initialize_yahoo_fields
 from stocky.pipeline import rebuild_database
 from stocky.summary import build_refresh_summary, render_markdown
+from stocky.yahoo import save_yahoo_response
 
 
 def _rebuilt_database(tmp_path, market_csv_builder):
@@ -31,15 +33,16 @@ def test_summary_of_a_refreshed_database_passes_and_lists_sources_counts_and_gap
     tmp_path, market_csv_builder, import_mapping_tables
 ) -> None:
     db_path = _refreshed_database(tmp_path, market_csv_builder, import_mapping_tables)
-    initialize_database(db_path)
     with connect(db_path) as con:
-        upsert_yahoo_response(
+        attach_yahoo_cache(con, db_path)
+        initialize_yahoo_fields(con)
+        save_yahoo_response(
             con,
             yahoo_symbol="RELIANCE.NS",
-            symbol="RELIANCE",
             exchange="NSE",
-            response_json=encode_response_json({}),
+            response={},
             source="test",
+            fetched_at="2026-10-01T00:00:00+00:00",
         )
 
     summary = build_refresh_summary(db_path)
@@ -54,7 +57,7 @@ def test_summary_of_a_refreshed_database_passes_and_lists_sources_counts_and_gap
         "provenance_builds": 1,
         "provenance_imports": 5,
         "provenance_sources": 3,
-        "yahoo_responses": 1,
+        "yahoo_fields": 1,
     }
     assert [(record.table_name, record.role, record.file_name, record.rows) for record in summary.imports] == [
         ("broker_symbols", "groww", "instrument.csv", 1),
@@ -76,7 +79,7 @@ def test_summary_of_a_refreshed_database_passes_and_lists_sources_counts_and_gap
     assert "**Validation: passed**" in markdown
     assert f"Database schema: {SCHEMA_VERSION}." in markdown
     assert "| BSE bhavcopy | `BSE-EQ_ISINCODE_030521.CSV` | 2021-05-03 | 1 |" in markdown
-    assert "| `yahoo_responses` | 1 |" in markdown
+    assert "| `yahoo_fields` | 1 |" in markdown
     assert "| `yq_ns` | 1 | 0 | 100.0% |" in markdown
     record = summary.imports[1]
     assert (

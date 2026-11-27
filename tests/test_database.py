@@ -5,40 +5,42 @@ import sqlite3
 import pytest
 
 import stocky.database as database
+import stocky.yahoo as yahoo
 from stocky.database import (
     CONSOLIDATED_TABLE,
     SCHEMA_VERSION,
     BackupPruneError,
+    attach_yahoo_cache,
     backup_database,
     connect,
     decode_response_json,
-    encode_response_json,
     fetch_consolidated_symbols,
     has_sgb_rows,
-    import_yahoo_json_cache,
-    initialize_database,
     older_layout,
     prune_backups,
     read_available_yahoo_symbols,
     read_status,
     search_instruments,
     split_yahoo_symbol,
-    upsert_yahoo_response,
     write_schema_version,
+    yahoo_cache_path,
 )
+from stocky.enrich import initialize_yahoo_fields
+from stocky.yahoo import import_yahoo_json_cache, save_yahoo_response
 
 
 def _seed_yahoo(db_path, yahoo_symbols: list[tuple[str, str, str]]) -> None:
-    initialize_database(db_path)
     with connect(db_path) as con:
-        for yahoo_symbol, symbol, exchange in yahoo_symbols:
-            upsert_yahoo_response(
+        attach_yahoo_cache(con, db_path)
+        initialize_yahoo_fields(con)
+        for yahoo_symbol, _, exchange in yahoo_symbols:
+            save_yahoo_response(
                 con,
                 yahoo_symbol=yahoo_symbol,
-                symbol=symbol,
                 exchange=exchange,
-                response_json=encode_response_json({"price": 1}),
+                response={"price": 1},
                 source="test",
+                fetched_at="2026-10-01T00:00:00+00:00",
             )
 
 
@@ -59,10 +61,17 @@ def test_import_yahoo_json_cache_to_sqlite(tmp_path) -> None:
     assert read_available_yahoo_symbols(db_path) == {"RELIANCE.NS", "INFY.BO"}
 
     with sqlite3.connect(db_path) as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert con.execute("SELECT yahoo_symbol, exchange, name FROM yahoo_fields ORDER BY 1").fetchall() == [
+            ("INFY.BO", "BSE", "INFOSYS"),
+            ("RELIANCE.NS", "NSE", "Reliance Industries Limited"),
+        ]
+        # The raw responses stay out of the database.
+        assert con.execute("SELECT name FROM sqlite_master WHERE name = 'yahoo_responses'").fetchall() == []
+    with sqlite3.connect(yahoo_cache_path(db_path)) as con:
         stored_payload = con.execute(
             "SELECT response_json FROM yahoo_responses WHERE yahoo_symbol = 'RELIANCE.NS'"
         ).fetchone()[0]
-        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert decode_response_json(stored_payload) == reliance
 
 
@@ -108,6 +117,7 @@ def test_import_yahoo_json_cache_rejects_missing_dir_without_creating_database(t
         import_yahoo_json_cache(tmp_path / "missing", db_path)
 
     assert not db_path.exists()
+    assert not yahoo_cache_path(db_path).exists()
 
 
 def test_consolidated_table_name_is_the_db_contract(tmp_path, seed_consolidated) -> None:
@@ -288,7 +298,7 @@ def test_has_sgb_rows_reports_gold_bonds_in_the_consolidated_table(tmp_path, see
     assert not missing.exists()
 
     no_table = tmp_path / "empty.db"
-    initialize_database(no_table)
+    _seed_yahoo(no_table, [])
     assert has_sgb_rows(no_table) is False
 
     legacy = tmp_path / "legacy.db"
@@ -480,7 +490,7 @@ def test_search_rejects_blank_term_and_missing_table(tmp_path, seed_consolidated
         search_instruments("   ", db_path)
 
     yahoo_only = tmp_path / "yahoo_only.db"
-    initialize_database(yahoo_only)
+    _seed_yahoo(yahoo_only, [])
     with pytest.raises(RuntimeError):
         search_instruments("INFY", yahoo_only)
 
@@ -509,7 +519,7 @@ def test_fetch_consolidated_symbols_limit_and_failures(tmp_path, seed_consolidat
     )
 
     yahoo_only = tmp_path / "yahoo-only.db"
-    initialize_database(yahoo_only)
+    _seed_yahoo(yahoo_only, [])
     with pytest.raises(RuntimeError, match="does not exist"):
         fetch_consolidated_symbols(yahoo_only, key="yq_ns")
 
@@ -691,7 +701,7 @@ def test_a_failed_cache_import_rolls_the_schema_number_back_with_its_rows(tmp_pa
             encoding="utf-8",
         )
     db_path = tmp_path / "stocky.db"
-    upsert = database.upsert_yahoo_response
+    upsert = yahoo.upsert_yahoo_response
     calls = []
 
     def failing(*args, **kwargs):
@@ -700,13 +710,15 @@ def test_a_failed_cache_import_rolls_the_schema_number_back_with_its_rows(tmp_pa
             raise RuntimeError("disk full")
         upsert(*args, **kwargs)
 
-    monkeypatch.setattr(database, "upsert_yahoo_response", failing)
+    monkeypatch.setattr(yahoo, "upsert_yahoo_response", failing)
 
     with pytest.raises(RuntimeError, match="disk full"):
         import_yahoo_json_cache(cache_dir, db_path)
 
     with sqlite3.connect(db_path) as con:
         assert con.execute("PRAGMA user_version").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM yahoo_fields").fetchone()[0] == 0
+    with sqlite3.connect(yahoo_cache_path(db_path)) as con:
         assert con.execute("SELECT COUNT(*) FROM yahoo_responses").fetchone()[0] == 0
 
 
@@ -774,11 +786,7 @@ def test_a_database_away_from_the_backup_folder_marks_its_backups_with_its_path(
 def test_prune_orphans_reports_the_committed_count_when_vacuum_fails(tmp_path, seed_consolidated, monkeypatch) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path)
-    initialize_database(db_path)
-    with connect(db_path) as con:
-        upsert_yahoo_response(
-            con, yahoo_symbol="DELISTED.NS", symbol="DELISTED", exchange="NSE", response_json=b"{}", source="test"
-        )
+    _seed_yahoo(db_path, [("DELISTED.NS", "DELISTED", "NSE")])
 
     class NoVacuum(database.ClosingConnection):
         def execute(self, sql, *args):
@@ -793,7 +801,27 @@ def test_prune_orphans_reports_the_committed_count_when_vacuum_fails(tmp_path, s
 
     assert error.value.pruned == 1
     with sqlite3.connect(db_path) as con:
+        assert con.execute("SELECT COUNT(*) FROM yahoo_fields").fetchone()[0] == 0
+    with sqlite3.connect(yahoo_cache_path(db_path)) as con:
         assert con.execute("SELECT COUNT(*) FROM yahoo_responses").fetchone()[0] == 0
+
+
+def test_prune_orphans_without_a_cache_file_cleans_the_database_alone(tmp_path, seed_consolidated) -> None:
+    # A fresh clone has the database but not the cache file, which Git ignores.
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path)
+    _seed_yahoo(db_path, [("DELISTED.NS", "DELISTED", "NSE"), ("INFY.NS", "INFY", "NSE")])
+    yahoo_cache_path(db_path).unlink()
+
+    assert database.prune_orphan_yahoo_responses(db_path) == 1
+
+    assert read_available_yahoo_symbols(db_path) == {"INFY.NS"}
+    assert not yahoo_cache_path(db_path).exists()
+
+
+def test_the_cache_file_is_named_after_its_database(tmp_path) -> None:
+    assert yahoo_cache_path(tmp_path / "stocky.db") == tmp_path / "stocky_yahoo_cache.db"
+    assert yahoo_cache_path(tmp_path / "scratch.sqlite") == tmp_path / "scratch_yahoo_cache.db"
 
 
 def test_only_a_rebuild_numbers_a_file_whose_consolidated_has_no_number(tmp_path, seed_consolidated) -> None:

@@ -9,14 +9,15 @@ import pytest
 import stocky.yahoo as yahoo
 from stocky.database import (
     OrphanVacuumError,
+    attach_yahoo_cache,
     connect,
     decode_response_json,
-    encode_response_json,
-    initialize_database,
     read_available_yahoo_symbols,
     upsert_yahoo_response,
+    yahoo_cache_path,
 )
-from stocky.yahoo import YahooDataManager, ticker_column
+from stocky.enrich import YahooFields, initialize_yahoo_fields, upsert_yahoo_fields
+from stocky.yahoo import YahooDataManager, save_yahoo_response, ticker_column
 
 
 def _ticker_row(isin: str, symbol: str) -> tuple[object, ...]:
@@ -26,16 +27,16 @@ def _ticker_row(isin: str, symbol: str) -> tuple[object, ...]:
 
 
 def _seed_cached_response(db_path, yahoo_symbol: str) -> None:
-    initialize_database(db_path)
     with connect(db_path) as con:
-        symbol, _, _ = yahoo_symbol.partition(".")
-        upsert_yahoo_response(
+        attach_yahoo_cache(con, db_path)
+        initialize_yahoo_fields(con)
+        save_yahoo_response(
             con,
             yahoo_symbol=yahoo_symbol,
-            symbol=symbol,
             exchange="BSE",
-            response_json=encode_response_json({"price": 1}),
+            response={"price": 1},
             source="test",
+            fetched_at=datetime.now(UTC).isoformat(),
         )
 
 
@@ -64,7 +65,7 @@ class _FakeTicker:
 def _seed_fetched_at(db_path, yahoo_symbol: str, fetched_at: str) -> None:
     _seed_cached_response(db_path, yahoo_symbol)
     with connect(db_path) as con:
-        con.execute("UPDATE yahoo_responses SET fetched_at = ? WHERE yahoo_symbol = ?", (fetched_at, yahoo_symbol))
+        con.execute("UPDATE yahoo_fields SET fetched_at = ? WHERE yahoo_symbol = ?", (fetched_at, yahoo_symbol))
 
 
 def _days_ago(days: float) -> str:
@@ -164,6 +165,21 @@ def test_dry_run_missing_only_excludes_cached_symbols(tmp_path, seed_consolidate
         assert con.execute("PRAGMA user_version").fetchone()[0] == current - 1
 
 
+def test_selection_reads_the_database_so_a_clone_without_the_cache_file_skips_saved_tickers(
+    tmp_path, seed_consolidated
+) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path, [_ticker_row("INE001", "RELIANCE"), _ticker_row("INE002", "INFY")])
+    _seed_cached_response(db_path, "RELIANCE.BO")
+    # Git ignores the cache file, so a fresh clone has only the database.
+    yahoo_cache_path(db_path).unlink()
+
+    manager = YahooDataManager(db_path)
+
+    assert manager.select_tickers(exchange="BSE", missing_only=True) == ["INFY.BO"]
+    assert manager.select_tickers(exchange="BSE", stale_days=90) == ["INFY.BO"]
+
+
 def test_update_writes_responses_and_skips_unknown_symbols(
     numbered_one_behind, tmp_path, monkeypatch, seed_consolidated
 ) -> None:
@@ -194,7 +210,6 @@ def test_an_interrupted_update_rolls_the_schema_number_back_with_its_rows(
 ) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path, [_ticker_row("INE001", "RELIANCE"), _ticker_row("INE002", "INFY")])
-    initialize_database(db_path)
     current = numbered_one_behind(db_path)
     _use_fake_yahooquery(monkeypatch)
     upsert = yahoo.upsert_yahoo_response
@@ -212,9 +227,10 @@ def test_an_interrupted_update_rolls_the_schema_number_back_with_its_rows(
         YahooDataManager(db_path).update_data(exchange="NSE")
 
     with connect(db_path) as con:
-        # The number written with the first row rolled back with it.
+        # The number written with the first row rolled back with it, and so did the row in both files.
         assert con.execute("PRAGMA user_version").fetchone()[0] == current - 1
-        assert con.execute("SELECT COUNT(*) FROM yahoo_responses").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM yahoo_fields").fetchone()[0] == 0
+    assert _cached_rows(db_path) == {}
 
 
 def test_update_fetches_only_the_exchange_column_tickers(tmp_path, monkeypatch, seed_consolidated) -> None:
@@ -255,16 +271,16 @@ def test_update_fetches_only_the_exchange_column_tickers(tmp_path, monkeypatch, 
 
     # GLOBE is NSE-only, so no GLOBE.BO is ever requested; CDG is BSE-only, so no CDG.NS.
     assert requested == ["RELIANCE.BO", "CDG.BO", "RELIANCE.NS", "GLOBE.NS"]
-    with connect(db_path) as con:
-        stored = con.execute(
-            "SELECT yahoo_symbol, symbol, exchange FROM yahoo_responses ORDER BY yahoo_symbol"
-        ).fetchall()
-    assert stored == [
+    expected = [
         ("CDG.BO", "CDG", "BSE"),
         ("GLOBE.NS", "GLOBE", "NSE"),
         ("RELIANCE.BO", "RELIANCE", "BSE"),
         ("RELIANCE.NS", "RELIANCE", "NSE"),
     ]
+    with connect(db_path) as con:
+        stored = con.execute("SELECT yahoo_symbol, symbol, exchange FROM yahoo_fields ORDER BY yahoo_symbol").fetchall()
+    assert stored == expected
+    assert sorted(row[:3] for row in _cached_rows(db_path).values()) == expected
 
 
 def test_update_drops_a_saved_answer_when_yahoo_now_has_no_usable_data(
@@ -297,9 +313,11 @@ def test_update_drops_a_saved_answer_when_yahoo_now_has_no_usable_data(
 
     assert (result.written, result.skipped) == (1, 1)
     assert read_available_yahoo_symbols(db_path) == {"HITECH.BO"}
-    with connect(db_path) as con:
-        (blob,) = con.execute("SELECT response_json FROM yahoo_responses WHERE yahoo_symbol = 'HITECH.BO'").fetchone()
+    assert set(_cached_rows(db_path)) == {"HITECH.BO"}
+    blob = _cached_rows(db_path)["HITECH.BO"][3]
     assert decode_response_json(blob)["HITECH.BO"]["quoteType"]["longName"] == "Hi-Tech Pipes Limited"
+    with connect(db_path) as con:
+        assert con.execute("SELECT name FROM yahoo_fields").fetchall() == [("Hi-Tech Pipes Limited",)]
 
 
 def test_update_builds_one_client_for_every_ticker(tmp_path, monkeypatch, seed_consolidated) -> None:
@@ -459,7 +477,7 @@ def test_update_commits_every_25_reports_progress_and_writes_nse(tmp_path, monke
     assert progress[-1] == (51, 51, 51, 0)
     assert "SYM00.NS" in read_available_yahoo_symbols(db_path)
     with real_connect(db_path) as con:
-        assert con.execute("SELECT DISTINCT exchange FROM yahoo_responses").fetchall() == [("NSE",)]
+        assert con.execute("SELECT DISTINCT exchange FROM yahoo_fields").fetchall() == [("NSE",)]
 
 
 def test_update_rejects_empty_symbol_set(tmp_path, seed_consolidated) -> None:
@@ -552,11 +570,17 @@ def _use_fake_yahooquery(monkeypatch, ticker=_FakeTicker) -> None:
 
 
 def _cached_rows(db_path) -> dict[str, tuple[object, ...]]:
-    with connect(db_path) as con:
+    """The cache file's rows by ticker, after checking that the database holds fields for the same tickers."""
+    cache_path = yahoo_cache_path(db_path)
+    if not cache_path.exists():
+        return {}
+    with connect(cache_path) as con:
         rows = con.execute(
             "SELECT yahoo_symbol, symbol, exchange, response_json, fetched_at, source FROM yahoo_responses"
         )
-        return {row[0]: row for row in rows}
+        cached = {row[0]: row for row in rows}
+    assert read_available_yahoo_symbols(db_path) == set(cached)
+    return cached
 
 
 def _seed_orphans_beside_listed(db_path, seed_consolidated) -> None:
@@ -688,9 +712,12 @@ def test_aborted_update_prunes_nothing(tmp_path, monkeypatch, seed_consolidated)
 def test_pruning_vacuums_the_freed_pages_away(tmp_path, monkeypatch, seed_consolidated) -> None:
     db_path = tmp_path / "stocky.db"
     seed_consolidated(db_path, [_ticker_row("INE001", "RELIANCE")])
-    initialize_database(db_path)
+    cache_path = yahoo_cache_path(db_path)
     with connect(db_path) as con:
-        # Random bytes do not compress, so the orphan takes about 2 MB of pages.
+        attach_yahoo_cache(con, db_path)
+        initialize_yahoo_fields(con)
+        # Random bytes do not compress, so the orphan takes about 2 MB of the cache file's pages. Its fields row
+        # carries a long name, so the database file has pages to give back too.
         upsert_yahoo_response(
             con,
             yahoo_symbol="DELISTED.NS",
@@ -698,22 +725,35 @@ def test_pruning_vacuums_the_freed_pages_away(tmp_path, monkeypatch, seed_consol
             exchange="NSE",
             response_json=os.urandom(2_000_000),
             source="test",
+            fetched_at="2026-10-01T00:00:00+00:00",
         )
-    size_before = db_path.stat().st_size
+        upsert_yahoo_fields(
+            con,
+            yahoo_symbol="DELISTED.NS",
+            symbol="DELISTED",
+            exchange="NSE",
+            fetched_at="2026-10-01T00:00:00+00:00",
+            values=YahooFields(name="D" * 200_000),
+        )
+    db_size_before = db_path.stat().st_size
+    cache_size_before = cache_path.stat().st_size
     _use_fake_yahooquery(monkeypatch)
 
     result = YahooDataManager(db_path).update_data(exchange="NSE", limit=0)
 
     assert result.pruned == 1
-    assert db_path.stat().st_size < size_before - 1_900_000
-    with connect(db_path) as con:
-        assert con.execute("PRAGMA freelist_count").fetchone() == (0,)
-        assert con.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    assert _cached_rows(db_path) == {}
+    assert db_path.stat().st_size < db_size_before - 190_000
+    assert cache_path.stat().st_size < cache_size_before - 1_900_000
+    for path in (db_path, cache_path):
+        with connect(path) as con:
+            assert con.execute("PRAGMA freelist_count").fetchone() == (0,)
+            assert con.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
-    # A second run has nothing to prune and leaves the file as it is.
-    size_after = db_path.stat().st_size
+    # A second run has nothing to prune and leaves both files as they are.
+    sizes_after = (db_path.stat().st_size, cache_path.stat().st_size)
     assert YahooDataManager(db_path).update_data(exchange="NSE", limit=0).pruned == 0
-    assert db_path.stat().st_size == size_after
+    assert (db_path.stat().st_size, cache_path.stat().st_size) == sizes_after
 
 
 def test_update_resets_failure_counter_after_a_success(tmp_path, monkeypatch, seed_consolidated) -> None:

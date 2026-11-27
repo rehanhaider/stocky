@@ -6,7 +6,7 @@ import sqlite3
 import subprocess
 import sys
 import types
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -18,9 +18,10 @@ import stocky.pipeline as pipeline
 import stocky.yahoo as yahoo
 from stocky import __version__
 from stocky.cli import app
-from stocky.database import SCHEMA_VERSION, connect, encode_response_json, initialize_database, upsert_yahoo_response
+from stocky.database import SCHEMA_VERSION, attach_yahoo_cache, connect, yahoo_cache_path
+from stocky.enrich import initialize_yahoo_fields
 from stocky.sources import bse_filename_for_date, nse_filename_for_date
-from stocky.yahoo import YahooUpdateResult
+from stocky.yahoo import YahooUpdateResult, save_yahoo_response
 
 
 class _FakeTicker:
@@ -45,18 +46,24 @@ def _use_fake_yahooquery(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "yahooquery", fake_module)
 
 
-def _seed_cached_yahoo_responses(db_path, symbols, suffix: str = "BO") -> None:
-    initialize_database(db_path)
+def _save_responses(db_path, responses: dict[str, object]) -> None:
+    """Save each ticker's answer as 'yahoo update' does: the response in the cache file, its fields in the database."""
     with connect(db_path) as con:
-        for symbol in symbols:
-            upsert_yahoo_response(
+        attach_yahoo_cache(con, db_path)
+        initialize_yahoo_fields(con)
+        for ticker, response in responses.items():
+            save_yahoo_response(
                 con,
-                yahoo_symbol=f"{symbol}.{suffix}",
-                symbol=symbol,
-                exchange="BSE",
-                response_json=encode_response_json({"price": 1}),
+                yahoo_symbol=ticker,
+                exchange="NSE" if ticker.endswith(".NS") else "BSE",
+                response=response,
                 source="test",
+                fetched_at=datetime.now(UTC).isoformat(),
             )
+
+
+def _seed_cached_yahoo_responses(db_path, symbols, suffix: str = "BO") -> None:
+    _save_responses(db_path, {f"{symbol}.{suffix}": {"price": 1} for symbol in symbols})
 
 
 def _use_interactive_defaults(monkeypatch, paths, db_path) -> None:
@@ -485,7 +492,7 @@ def test_status_prints_seeded_database(tmp_path, seed_consolidated, runner) -> N
     assert "Schema 0 (written before Stocky recorded a schema number)" in lines
     assert "Database overview" in result.stdout
     assert "Consolidated coverage" in result.stdout
-    assert "Yahoo cache" in result.stdout
+    assert "Yahoo fields" in result.stdout
     assert "4" in result.stdout
     assert "50.0%" in result.stdout
     assert "None" in result.stdout
@@ -551,7 +558,7 @@ def test_status_handles_database_without_tables(tmp_path, runner) -> None:
 
     assert result.exit_code == 0
     assert "Consolidated rows" in result.stdout
-    assert "Yahoo responses" in result.stdout
+    assert "Yahoo tickers" in result.stdout
     assert "0/0 (n/a)" in result.stdout
 
 
@@ -791,7 +798,7 @@ def test_explore_missing_database_exits(tmp_path, runner) -> None:
 
 def test_explore_exits_when_consolidated_table_is_missing(tmp_path, runner) -> None:
     db_path = tmp_path / "stocky.db"
-    initialize_database(db_path)
+    _save_responses(db_path, {})
 
     result = runner.invoke(app, ["explore", "--db-path", str(db_path)], input="INFY\n")
 
@@ -1620,7 +1627,7 @@ def test_interactive_yahoo_update_stops_when_nothing_to_fetch(tmp_path, monkeypa
 
     assert result.exit_code == 0
     assert "0 tickers to fetch from Yahoo Finance (BSE, yq_bo)." in message
-    assert "Nothing to fetch; every ticker already has a cached response." in message
+    assert "Nothing to fetch; every ticker already has Yahoo fields stored." in message
     assert "Start the update?" not in message
     assert result.stdout.count("Choose an option") == 2
 
@@ -1706,27 +1713,24 @@ def test_format_timestamp(value, expected) -> None:
 
 
 def _seed_yahoo_payloads(db_path, payloads) -> None:
-    initialize_database(db_path)
-    with connect(db_path) as con:
-        for ticker, (name, market_cap, sector) in payloads.items():
-            payload = {
-                "quoteType": {"quoteType": "EQUITY", "longName": name},
-                "price": {
-                    "currency": "INR",
-                    "marketCap": market_cap,
-                    "regularMarketPrice": 100.0,
-                    "regularMarketTime": "2026-10-21 15:30:00",
-                },
-                "assetProfile": {"sector": sector, "industry": "Testing"},
+    _save_responses(
+        db_path,
+        {
+            ticker: {
+                ticker: {
+                    "quoteType": {"quoteType": "EQUITY", "longName": name},
+                    "price": {
+                        "currency": "INR",
+                        "marketCap": market_cap,
+                        "regularMarketPrice": 100.0,
+                        "regularMarketTime": "2026-10-21 15:30:00",
+                    },
+                    "assetProfile": {"sector": sector, "industry": "Testing"},
+                }
             }
-            upsert_yahoo_response(
-                con,
-                yahoo_symbol=ticker,
-                symbol=ticker.rsplit(".", 1)[0],
-                exchange="NSE" if ticker.endswith(".NS") else "BSE",
-                response_json=encode_response_json({ticker: payload}),
-                source="test",
-            )
+            for ticker, (name, market_cap, sector) in payloads.items()
+        },
+    )
 
 
 def _seed_enrichable_db(tmp_path, seed_consolidated):
@@ -1861,7 +1865,7 @@ def test_yahoo_fields_prints_one_table_per_exchange(tmp_path, seed_consolidated,
     assert "INFY.NS (NSE, INE009A01021)" in result.stdout
     assert "574,958 Cr" in result.stdout
     assert "INFY.BO (BSE, INE009A01021)" in result.stdout
-    assert "No cached Yahoo response for this ticker." in result.stdout
+    assert "No Yahoo fields are stored for this ticker." in result.stdout
 
 
 def test_yahoo_fields_json_prints_records(tmp_path, seed_consolidated, runner) -> None:
@@ -2796,10 +2800,11 @@ def test_refresh_runs_every_step_in_order_through_the_library_functions(refresh_
     events = [json.loads(line) for line in result.stderr.splitlines() if line.startswith("{")]
     assert [event["step"] for event in events if event["event"] == "step"] == REFRESH_STEPS
     db_path = refresh_root / "data/output/stocky.db"
-    assert {"consolidated", "indices", "bse_debt", "mutual_funds", "broker_symbols", "yahoo_responses"} <= _tables(
-        db_path
-    )
+    assert {"consolidated", "indices", "bse_debt", "mutual_funds", "broker_symbols", "yahoo_fields"} <= _tables(db_path)
+    assert "yahoo_responses" not in _tables(db_path)
     with sqlite3.connect(db_path) as con:
+        assert con.execute("SELECT COUNT(*) FROM yahoo_fields").fetchone()[0] == 2
+    with sqlite3.connect(yahoo_cache_path(db_path)) as con:
         assert con.execute("SELECT COUNT(*) FROM yahoo_responses").fetchone()[0] == 2
 
 
@@ -2822,11 +2827,12 @@ def test_refresh_prints_each_step_and_the_pruned_orphan_count(refresh_root, runn
     assert "Processed 1; wrote 1; skipped 0; pruned 0; dry_run=False." in stdout
     assert "# Stocky refresh summary" in result.stdout
     assert stdout.endswith("Refresh complete.")
-    with sqlite3.connect(db_path) as con:
-        assert con.execute("SELECT yahoo_symbol FROM yahoo_responses ORDER BY 1").fetchall() == [
-            ("GOLDBEES.BO",),
-            ("GOLDBEES.NS",),
-        ]
+    for path, table in ((db_path, "yahoo_fields"), (yahoo_cache_path(db_path), "yahoo_responses")):
+        with sqlite3.connect(path) as con:
+            assert con.execute(f"SELECT yahoo_symbol FROM {table} ORDER BY 1").fetchall() == [
+                ("GOLDBEES.BO",),
+                ("GOLDBEES.NS",),
+            ]
 
 
 @pytest.mark.parametrize("json_output", [False, True])
@@ -3147,16 +3153,14 @@ def test_a_second_refresh_reproduces_the_first_row_for_row_and_keeps_the_newest_
     (backups / "notes.txt").write_text("keep me", encoding="utf-8")
 
     def contents() -> dict[str, object]:
-        # Every row of the tables built from the source files; Yahoo responses only by ticker, because a refetch
+        # Every row of the tables built from the source files; Yahoo fields only by ticker, because a refetch
         # moves fetched_at.
         with sqlite3.connect(db_path) as con:
             tables = {
                 table: sorted(con.execute(f"SELECT * FROM {table}").fetchall(), key=repr)
                 for table in ("consolidated", "indices", "bse_debt", "mutual_funds", "broker_symbols")
             }
-            tables["yahoo_responses"] = sorted(
-                row[0] for row in con.execute("SELECT yahoo_symbol FROM yahoo_responses")
-            )
+            tables["yahoo_fields"] = sorted(row[0] for row in con.execute("SELECT yahoo_symbol FROM yahoo_fields"))
         return tables
 
     first = contents()

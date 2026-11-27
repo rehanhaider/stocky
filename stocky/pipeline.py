@@ -19,7 +19,6 @@ from stocky.database import (
     backups_belong_to,
     connect,
     file_sha256,
-    initialize_database,
     prune_backups,
     read_latest_provenance,
     record_build_provenance,
@@ -605,7 +604,6 @@ def rebuild_database(
         backup_path = backup_database(db_path, backup_dir=backup_dir)
 
     report("Writing consolidated table")
-    initialize_database(db_path)
     # One transaction, so the table and the record of what built it are written together or not at all.
     # pandas' to_sql commits on its own, so the table is written here with the same layout it produced.
     with connect(db_path) as con:

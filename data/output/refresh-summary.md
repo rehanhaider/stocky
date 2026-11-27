@@ -1,14 +1,14 @@
 # Stocky refresh summary
 
-Generated 2026-11-26 20:06:53 UTC by Stocky 3.0.0 from `data/output/stocky.db`.
+Generated 2026-11-27 19:20:20 UTC by Stocky 4.0.0 from `data/output/stocky.db`.
 
-Database schema: 1.
+Database schema: 2.
 
 **Validation: passed**
 
 | Check | Result | Detail |
 | --- | --- | --- |
-| Consolidated table layout | pass | Schema 1. |
+| Consolidated table layout | pass | Schema 2. |
 | Consolidated rows | pass | 4920 rows. |
 | ISINs present and unique | pass | 0 empty, 0 duplicated. |
 | Yahoo tickers follow exchange symbols | pass | Every ticker is its exchange symbol plus the suffix. |
@@ -54,7 +54,7 @@ Build 4 ran at 2026-11-26 20:06:42 UTC with Stocky 3.0.0 and wrote 4920 rows.
 | `provenance_builds` | 4 |
 | `provenance_imports` | 8 |
 | `provenance_sources` | 12 |
-| `yahoo_responses` | 7513 |
+| `yahoo_fields` | 7513 |
 
 ## Consolidated coverage
 
@@ -70,7 +70,7 @@ Build 4 ran at 2026-11-26 20:06:42 UTC with Stocky 3.0.0 and wrote 4920 rows.
 | `yq_ns` | 2973 | 1947 | 60.4% |
 | `yq_bo` | 4615 | 305 | 93.8% |
 
-## Yahoo cache
+## Yahoo fields
 
 Newest fetch 2026-11-26 20:06:49 UTC; oldest fetch 2026-05-31 03:58:52 UTC.
 

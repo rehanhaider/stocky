@@ -16,7 +16,12 @@ from stocky import __version__
 from stocky.config import DEFAULT_BACKUP_DIR, DEFAULT_DB_PATH
 
 CONSOLIDATED_TABLE = "consolidated"
+# The fields Stocky reads from each ticker's Yahoo response, one row per ticker, kept in the database.
+YAHOO_FIELDS_TABLE = "yahoo_fields"
+# The raw Yahoo responses, kept out of the database in a cache file beside it (see yahoo_cache_path), which Git ignores.
+# A write attaches that file to its connection under YAHOO_CACHE_SCHEMA, so both files commit or roll back together.
 YAHOO_RESPONSES_TABLE = "yahoo_responses"
+YAHOO_CACHE_SCHEMA = "yahoo_cache"
 # Every rebuild replaces the whole consolidated table, so one build's sources produced every row in it.
 PROVENANCE_BUILDS_TABLE = "provenance_builds"
 PROVENANCE_SOURCES_TABLE = "provenance_sources"
@@ -26,7 +31,7 @@ PROVENANCE_IMPORTS_TABLE = "provenance_imports"
 # The layout of every table Stocky writes, provenance_imports included, stored in the file's PRAGMA user_version by
 # each write that creates or replaces a table. Raise it when a table or its columns change. A file written before
 # Stocky recorded the number reads 0.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 # The schema number in which the consolidated table took its current layout. Reads of consolidated check the file
 # against this, not SCHEMA_VERSION, so raising SCHEMA_VERSION for another table does not ask for a rebuild.
 CONSOLIDATED_LAYOUT_VERSION = 1
@@ -34,6 +39,9 @@ CONSOLIDATED_LAYOUT_VERSION = 1
 # Yahoo quote types that describe a listed security. Yahoo labels some thinly traded Indian
 # shares MUTUALFUND and liquid ETFs BOND; an INDEX answer carries index levels, not the share's.
 LISTED_QUOTE_TYPES = frozenset({"EQUITY", "ETF", "MUTUALFUND", "BOND"})
+
+# Each exchange reads the consolidated column that holds its full Yahoo tickers.
+TICKER_COLUMNS = {"NSE": "yq_ns", "BSE": "yq_bo"}
 
 # Every symbol column belongs to one exchange and stays empty when that exchange does not list the ISIN.
 SYMBOL_COLUMNS = ("nse_symbol", "bse_symbol", "bse_sc_code", "zd_ns", "zd_bo", "yq_ns", "yq_bo")
@@ -58,12 +66,6 @@ def missing_database_message(db_path: Path, first_step: str) -> str:
         f"Database not found: {db_path.resolve()}. Run '{first_step}' first. "
         "To use an existing database, pass --db-path or run from the repository root."
     )
-
-
-@dataclass(frozen=True)
-class JsonImportResult:
-    imported: int
-    skipped: int
 
 
 @dataclass(frozen=True)
@@ -163,26 +165,40 @@ def connect(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
     return sqlite3.connect(db_path, factory=ClosingConnection)
 
 
-def initialize_database(db_path: Path = DEFAULT_DB_PATH) -> None:
-    with connect(db_path) as con:
-        con.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {YAHOO_RESPONSES_TABLE} (
-                yahoo_symbol TEXT PRIMARY KEY,
-                symbol TEXT NOT NULL,
-                exchange TEXT NOT NULL,
-                response_json BLOB NOT NULL,
-                fetched_at TEXT NOT NULL,
-                source TEXT
-            )
-            """
+def ticker_column(exchange: str) -> str:
+    column = TICKER_COLUMNS.get(exchange.upper())
+    if column is None:
+        raise ValueError(f"Unsupported exchange: {exchange}. Expected NSE or BSE.")
+    return column
+
+
+def yahoo_cache_path(db_path: Path = DEFAULT_DB_PATH) -> Path:
+    """The raw Yahoo response cache of a database: ``stocky_yahoo_cache.db`` beside ``stocky.db``.
+
+    The name follows the database's, so every database keeps its own cache and a scratch database never writes into
+    the repository's.
+    """
+    return db_path.with_name(f"{db_path.stem}_yahoo_cache.db")
+
+
+def attach_yahoo_cache(con: sqlite3.Connection, db_path: Path) -> None:
+    """Attach db_path's raw response cache to con as YAHOO_CACHE_SCHEMA, creating the file and its table if needed.
+
+    Call it before the connection's first write: SQLite does not attach a file inside a transaction.
+    """
+    con.execute(f"ATTACH DATABASE ? AS {YAHOO_CACHE_SCHEMA}", (str(yahoo_cache_path(db_path)),))
+    con.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {YAHOO_CACHE_SCHEMA}.{YAHOO_RESPONSES_TABLE} (
+            yahoo_symbol TEXT PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            exchange TEXT NOT NULL,
+            response_json BLOB NOT NULL,
+            fetched_at TEXT NOT NULL,
+            source TEXT
         )
-        con.execute(
-            f"""
-            CREATE INDEX IF NOT EXISTS idx_{YAHOO_RESPONSES_TABLE}_exchange
-            ON {YAHOO_RESPONSES_TABLE} (exchange)
-            """
-        )
+        """
+    )
 
 
 def initialize_provenance(con: sqlite3.Connection) -> None:
@@ -496,25 +512,26 @@ def prune_backups(db_path: Path, backup_dir: Path, keep: int, *, current: Path |
 
 
 def read_available_yahoo_symbols(db_path: Path = DEFAULT_DB_PATH) -> set[str]:
+    """The tickers with Yahoo fields in the database. The cache file is not read, so a clone without it agrees."""
     if not db_path.exists():
         return set()
 
     with connect(db_path) as con:
-        if not table_exists(con, YAHOO_RESPONSES_TABLE):
+        if not table_exists(con, YAHOO_FIELDS_TABLE):
             return set()
-        rows = con.execute(f"SELECT yahoo_symbol FROM {YAHOO_RESPONSES_TABLE}").fetchall()
+        rows = con.execute(f"SELECT yahoo_symbol FROM {YAHOO_FIELDS_TABLE}").fetchall()
     return {row[0] for row in rows}
 
 
 def read_yahoo_fetch_times(db_path: Path = DEFAULT_DB_PATH) -> dict[str, str]:
-    """Map each cached Yahoo ticker to the time its response was fetched."""
+    """Map each ticker with Yahoo fields in the database to the time its response was fetched."""
     if not db_path.exists():
         return {}
 
     with connect(db_path) as con:
-        if not table_exists(con, YAHOO_RESPONSES_TABLE):
+        if not table_exists(con, YAHOO_FIELDS_TABLE):
             return {}
-        return dict(con.execute(f"SELECT yahoo_symbol, fetched_at FROM {YAHOO_RESPONSES_TABLE}").fetchall())
+        return dict(con.execute(f"SELECT yahoo_symbol, fetched_at FROM {YAHOO_FIELDS_TABLE}").fetchall())
 
 
 def fetch_consolidated_symbols(
@@ -597,13 +614,13 @@ def read_status(db_path: Path = DEFAULT_DB_PATH) -> DatabaseStatus:
         provenance = read_latest_provenance(con)
         imports = read_import_provenance(con)
         schema_version = read_schema_version(con)
-        if table_exists(con, YAHOO_RESPONSES_TABLE):
+        if table_exists(con, YAHOO_FIELDS_TABLE):
             yahoo_rows, yahoo_oldest_fetch, yahoo_newest_fetch = con.execute(
-                f"SELECT COUNT(*), MIN(fetched_at), MAX(fetched_at) FROM {YAHOO_RESPONSES_TABLE}"
+                f"SELECT COUNT(*), MIN(fetched_at), MAX(fetched_at) FROM {YAHOO_FIELDS_TABLE}"
             ).fetchone()
             yahoo_exchange_counts = dict(
                 con.execute(
-                    f"SELECT exchange, COUNT(*) FROM {YAHOO_RESPONSES_TABLE} GROUP BY exchange ORDER BY COUNT(*) DESC"
+                    f"SELECT exchange, COUNT(*) FROM {YAHOO_FIELDS_TABLE} GROUP BY exchange ORDER BY COUNT(*) DESC"
                 ).fetchall()
             )
             if table_exists(con, CONSOLIDATED_TABLE):
@@ -613,8 +630,8 @@ def read_status(db_path: Path = DEFAULT_DB_PATH) -> DatabaseStatus:
                     for count in con.execute(
                         f"""
                         SELECT
-                            SUM(c.yq_ns IN (SELECT yahoo_symbol FROM {YAHOO_RESPONSES_TABLE})),
-                            SUM(c.yq_bo IN (SELECT yahoo_symbol FROM {YAHOO_RESPONSES_TABLE}))
+                            SUM(c.yq_ns IN (SELECT yahoo_symbol FROM {YAHOO_FIELDS_TABLE})),
+                            SUM(c.yq_bo IN (SELECT yahoo_symbol FROM {YAHOO_FIELDS_TABLE}))
                         FROM {CONSOLIDATED_TABLE} c
                         """
                     ).fetchone()
@@ -739,43 +756,47 @@ def is_usable_yahoo_payload(payload: object) -> bool:
 
 
 def delete_yahoo_response(con: sqlite3.Connection, yahoo_symbol: str) -> None:
-    con.execute(f"DELETE FROM {YAHOO_RESPONSES_TABLE} WHERE yahoo_symbol = ?", (yahoo_symbol,))
+    """Drop a ticker's fields and its cached response. con must have the cache attached (see attach_yahoo_cache)."""
+    con.execute(f"DELETE FROM main.{YAHOO_FIELDS_TABLE} WHERE yahoo_symbol = ?", (yahoo_symbol,))
+    con.execute(f"DELETE FROM {YAHOO_CACHE_SCHEMA}.{YAHOO_RESPONSES_TABLE} WHERE yahoo_symbol = ?", (yahoo_symbol,))
 
 
-# A response is orphaned once its ticker is in neither Yahoo column of consolidated. The NULL checks
+# A ticker is orphaned once it is in neither Yahoo column of consolidated. The NULL checks
 # matter: NOT IN against a list holding NULL is never true, so it would match no row at all.
-# A column that lists no ticker at all says nothing about which of that exchange's responses are stale: an empty
+# A column that lists no ticker at all says nothing about which of that exchange's tickers are stale: an empty
 # table, or a rebuild from legacy bhavcopies, which carry no BSE trading symbol and leave every yq_bo empty, would
-# otherwise make every .NS or .BO response look orphaned. So a .NS or .BO response is pruned only while its own
-# column lists at least one ticker, and any other response only while the table has rows.
-_ORPHAN_YAHOO_RESPONSES = f"""
-    FROM {YAHOO_RESPONSES_TABLE}
-    WHERE yahoo_symbol NOT IN (SELECT yq_ns FROM {CONSOLIDATED_TABLE} WHERE yq_ns IS NOT NULL)
-      AND yahoo_symbol NOT IN (SELECT yq_bo FROM {CONSOLIDATED_TABLE} WHERE yq_bo IS NOT NULL)
-      AND CASE
-          WHEN yahoo_symbol LIKE '%.NS'
-              THEN EXISTS (SELECT 1 FROM {CONSOLIDATED_TABLE} WHERE yq_ns IS NOT NULL AND yq_ns <> '')
-          WHEN yahoo_symbol LIKE '%.BO'
-              THEN EXISTS (SELECT 1 FROM {CONSOLIDATED_TABLE} WHERE yq_bo IS NOT NULL AND yq_bo <> '')
-          ELSE EXISTS (SELECT 1 FROM {CONSOLIDATED_TABLE})
-      END
-"""
+# otherwise make every .NS or .BO ticker look orphaned. So a .NS or .BO ticker is pruned only while its own
+# column lists at least one ticker, and any other ticker only while the table has rows.
+def _orphans(table: str) -> str:
+    """The FROM and WHERE clauses that select table's orphaned tickers; table is schema-qualified."""
+    return f"""
+        FROM {table}
+        WHERE yahoo_symbol NOT IN (SELECT yq_ns FROM main.{CONSOLIDATED_TABLE} WHERE yq_ns IS NOT NULL)
+          AND yahoo_symbol NOT IN (SELECT yq_bo FROM main.{CONSOLIDATED_TABLE} WHERE yq_bo IS NOT NULL)
+          AND CASE
+              WHEN yahoo_symbol LIKE '%.NS'
+                  THEN EXISTS (SELECT 1 FROM main.{CONSOLIDATED_TABLE} WHERE yq_ns IS NOT NULL AND yq_ns <> '')
+              WHEN yahoo_symbol LIKE '%.BO'
+                  THEN EXISTS (SELECT 1 FROM main.{CONSOLIDATED_TABLE} WHERE yq_bo IS NOT NULL AND yq_bo <> '')
+              ELSE EXISTS (SELECT 1 FROM main.{CONSOLIDATED_TABLE})
+          END
+    """
 
 
 def count_orphan_yahoo_responses(db_path: Path = DEFAULT_DB_PATH) -> int:
-    """Count the cached responses whose ticker no longer appears in consolidated."""
+    """Count the tickers with Yahoo fields that no longer appear in consolidated."""
     if not db_path.exists():
         return 0
 
     with connect(db_path) as con:
-        if not table_exists(con, YAHOO_RESPONSES_TABLE):
+        if not table_exists(con, YAHOO_FIELDS_TABLE):
             return 0
         require_consolidated_table(con, db_path, ("yq_ns", "yq_bo"))
-        return con.execute(f"SELECT COUNT(*) {_ORPHAN_YAHOO_RESPONSES}").fetchone()[0]
+        return con.execute(f"SELECT COUNT(*) {_orphans(f'main.{YAHOO_FIELDS_TABLE}')}").fetchone()[0]
 
 
 class OrphanVacuumError(Exception):
-    """Raised when the orphaned responses were deleted and committed but VACUUM then failed."""
+    """Raised when the orphaned tickers were deleted and committed but VACUUM then failed."""
 
     def __init__(self, pruned: int, cause: sqlite3.Error) -> None:
         super().__init__(str(cause))
@@ -783,21 +804,38 @@ class OrphanVacuumError(Exception):
 
 
 def prune_orphan_yahoo_responses(db_path: Path = DEFAULT_DB_PATH) -> int:
-    """Delete the cached responses whose ticker no longer appears in consolidated, and return how many.
+    """Delete the fields and cached responses of tickers no longer in consolidated, and return how many tickers'
+    fields were deleted.
 
-    The deletion is committed first and the file is then vacuumed, on a second connection, to give the
-    freed pages back, because VACUUM cannot run inside a transaction. Nothing is vacuumed when nothing was
-    deleted. A failed VACUUM raises OrphanVacuumError, which carries the committed count.
+    Both files are cleaned in one transaction, which is committed first; each file that lost rows is then vacuumed,
+    on a second connection, to give the freed pages back, because VACUUM cannot run inside a transaction. A
+    database without a cache file is cleaned on its own, and no cache file is created for it. A failed VACUUM
+    raises OrphanVacuumError, which carries the committed count.
     """
+    has_cache = yahoo_cache_path(db_path).exists()
     with connect(db_path) as con:
         require_consolidated_table(con, db_path, ("yq_ns", "yq_bo"))
-        pruned = con.execute(f"DELETE {_ORPHAN_YAHOO_RESPONSES}").rowcount
-    if pruned:
-        try:
+        if has_cache:
+            attach_yahoo_cache(con, db_path)
+        pruned = (
+            con.execute(f"DELETE {_orphans(f'main.{YAHOO_FIELDS_TABLE}')}").rowcount
+            if table_exists(con, YAHOO_FIELDS_TABLE)
+            else 0
+        )
+        cache_pruned = (
+            con.execute(f"DELETE {_orphans(f'{YAHOO_CACHE_SCHEMA}.{YAHOO_RESPONSES_TABLE}')}").rowcount
+            if has_cache
+            else 0
+        )
+    try:
+        if pruned:
             with connect(db_path) as con:
                 con.execute("VACUUM")
-        except sqlite3.Error as exc:
-            raise OrphanVacuumError(pruned, exc) from exc
+        if cache_pruned:
+            with connect(yahoo_cache_path(db_path)) as con:
+                con.execute("VACUUM")
+    except sqlite3.Error as exc:
+        raise OrphanVacuumError(pruned, exc) from exc
     return pruned
 
 
@@ -809,14 +847,12 @@ def upsert_yahoo_response(
     exchange: str,
     response_json: bytes,
     source: str,
-    fetched_at: str | None = None,
+    fetched_at: str,
 ) -> None:
-    if fetched_at is None:
-        fetched_at = datetime.now(UTC).isoformat()
-
+    """Cache one raw response. con must have the cache attached (see attach_yahoo_cache)."""
     con.execute(
         f"""
-        INSERT INTO {YAHOO_RESPONSES_TABLE}
+        INSERT INTO {YAHOO_CACHE_SCHEMA}.{YAHOO_RESPONSES_TABLE}
             (yahoo_symbol, symbol, exchange, response_json, fetched_at, source)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(yahoo_symbol) DO UPDATE SET
@@ -846,49 +882,3 @@ def split_yahoo_symbol(yahoo_symbol: str) -> tuple[str, str]:
     symbol, suffix = yahoo_symbol.rsplit(".", 1)
     exchange = {"NS": "NSE", "BO": "BSE"}.get(suffix.upper(), suffix.upper())
     return symbol, exchange
-
-
-def import_yahoo_json_cache(
-    cache_dir: Path,
-    db_path: Path = DEFAULT_DB_PATH,
-) -> JsonImportResult:
-    # Check before initialize_database, so a mistyped directory fails without creating an empty database.
-    if not cache_dir.is_dir():
-        raise FileNotFoundError(f"Yahoo JSON cache directory not found: {cache_dir}")
-
-    initialize_database(db_path)
-
-    imported = 0
-    skipped = 0
-    with connect(db_path) as con:
-        for file_path in sorted(cache_dir.glob("*.json")):
-            yahoo_symbol = file_path.stem
-            symbol, exchange = split_yahoo_symbol(yahoo_symbol)
-
-            try:
-                response = json.loads(file_path.read_text(encoding="utf-8-sig"))
-            except (OSError, json.JSONDecodeError):
-                skipped += 1
-                continue
-
-            payload = response.get(yahoo_symbol) if isinstance(response, dict) else None
-            if not is_usable_yahoo_payload(payload):
-                skipped += 1
-                continue
-
-            fetched_at = datetime.fromtimestamp(file_path.stat().st_mtime, UTC).isoformat()
-            upsert_yahoo_response(
-                con,
-                yahoo_symbol=yahoo_symbol,
-                symbol=symbol,
-                exchange=exchange,
-                response_json=encode_response_json(response),
-                fetched_at=fetched_at,
-                source=str(file_path),
-            )
-            if not imported:
-                # After the first row, so the number commits or rolls back with the imported rows.
-                write_schema_version(con)
-            imported += 1
-
-    return JsonImportResult(imported=imported, skipped=skipped)

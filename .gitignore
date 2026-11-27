@@ -136,3 +136,4 @@ data/marketData/*
 data/output/backup/
 data/output/backups/
 ph.md
+data/output/*_yahoo_cache.db*

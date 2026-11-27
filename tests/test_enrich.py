@@ -3,17 +3,19 @@ import sys
 
 import pytest
 
-from stocky.database import connect, encode_response_json, initialize_database, upsert_yahoo_response
+from stocky.database import attach_yahoo_cache, connect, yahoo_cache_path
 from stocky.enrich import (
     CRORE,
     ENRICHED_COLUMNS,
     YahooFields,
     export_enriched,
     extract_fields,
+    initialize_yahoo_fields,
     lookup_fields,
     read_enriched,
     screen_instruments,
 )
+from stocky.yahoo import save_yahoo_response
 
 
 def _payload(
@@ -35,16 +37,16 @@ def _payload(
 
 
 def _seed_responses(db_path, responses: dict[str, object]) -> None:
-    """Cache each ticker's payload the way 'yahoo update' writes it: the full answer keyed by ticker."""
-    initialize_database(db_path)
+    """Save each ticker's payload the way 'yahoo update' writes it: the full answer keyed by ticker."""
     with connect(db_path) as con:
+        attach_yahoo_cache(con, db_path)
+        initialize_yahoo_fields(con)
         for ticker, payload in responses.items():
-            upsert_yahoo_response(
+            save_yahoo_response(
                 con,
                 yahoo_symbol=ticker,
-                symbol=ticker.rsplit(".", 1)[0],
                 exchange="NSE" if ticker.endswith(".NS") else "BSE",
-                response_json=encode_response_json({ticker: payload}),
+                response={ticker: payload},
                 source="test",
                 fetched_at="2026-10-01T00:00:00+00:00",
             )
@@ -227,47 +229,45 @@ def test_read_enriched_attaches_each_exchange_response_to_its_own_instrument(glo
     assert rows[("INE002A01018", "BSE")].fields.market_cap == 1_182_543 * CRORE
 
 
-def test_read_enriched_marks_missing_and_unusable_responses(tmp_path, seed_consolidated) -> None:
+def test_read_enriched_returns_each_number_with_the_type_yahoo_sent(tmp_path, seed_consolidated) -> None:
+    db_path = tmp_path / "stocky.db"
+    seed_consolidated(db_path, (("INE000A00001", "equity", "OK", None, None, None, None, None, "OK.NS", None),))
+    payload = _payload("Ok Limited", market_cap=16_360_759_361_536, price=1380.5)
+    payload["summaryDetail"] = {"dividendYield": -0.0, "fiftyTwoWeekHigh": 1611.0}
+    _seed_responses(db_path, {"OK.NS": payload})
+
+    (row,) = read_enriched(db_path)
+
+    # The integer market cap stays an int and prints without ".0" in JSON; -0.0 and 1611.0 stay floats.
+    assert row.fields == extract_fields(payload)
+    assert type(row.fields.market_cap) is int
+    assert json.dumps(row.as_record()["market_cap"]) == "16360759361536"
+    assert type(row.fields.price) is float
+    assert json.dumps(row.fields.dividend_yield) == "-0.0"
+    assert json.dumps(row.fields.fifty_two_week_high) == "1611.0"
+
+
+def test_read_enriched_reads_the_stored_fields_without_the_cache_file(tmp_path, seed_consolidated) -> None:
+    # A fresh clone has the database's yahoo_fields table but not the cache file, which Git ignores.
     db_path = tmp_path / "stocky.db"
     seed_consolidated(
         db_path,
         (
             ("INE000A00001", "equity", "OK", None, None, None, None, None, "OK.NS", None),
-            ("INE000A00002", "equity", "GONE", None, None, None, None, None, "GONE.NS", None),
-            ("INE000A00003", "equity", "IDX", None, None, None, None, None, "IDX.NS", None),
             ("INE000A00004", "equity", "NEVER", None, None, None, None, None, "NEVER.NS", None),
         ),
     )
-    _seed_responses(
-        db_path,
-        {
-            "OK.NS": _payload("Ok Limited", market_cap=10 * CRORE),
-            "GONE.NS": "Quote not found for symbol: GONE.NS",
-            "IDX.NS": _payload("Some Index", market_cap=10 * CRORE, quote_type="INDEX"),
-        },
-    )
-
-    with connect(db_path) as con:
-        con.execute("INSERT INTO yahoo_responses VALUES ('BAD.NS', 'BAD', 'NSE', x'00ff', '2026-10-01', 'test')")
-        con.execute("INSERT INTO consolidated (isin, ins_type, yq_ns) VALUES ('INE000A00005', 'equity', 'BAD.NS')")
-        truncated = encode_response_json({"CUT.NS": _payload("Cut Limited")})[:-8]
-        con.execute(
-            "INSERT INTO yahoo_responses VALUES ('CUT.NS', 'CUT', 'NSE', ?, '2026-10-01', 'test')", (truncated,)
-        )
-        con.execute("INSERT INTO consolidated (isin, ins_type, yq_ns) VALUES ('INE000A00006', 'equity', 'CUT.NS')")
+    _seed_responses(db_path, {"OK.NS": _payload("Ok Limited", market_cap=10 * CRORE, sector="Energy")})
+    yahoo_cache_path(db_path).unlink()
 
     rows = {row.yahoo_ticker: row for row in read_enriched(db_path)}
 
     assert rows["OK.NS"].yahoo_status == "ok"
-    assert rows["BAD.NS"].yahoo_status == "unusable"
-    assert rows["CUT.NS"].yahoo_status == "unusable"
     assert rows["OK.NS"].fetched_at == "2026-10-01T00:00:00+00:00"
-    assert rows["GONE.NS"].yahoo_status == "unusable"
-    # An index answer carries the index's figures, not the share's, so none of them are attached.
-    assert rows["IDX.NS"].yahoo_status == "unusable"
-    assert rows["IDX.NS"].fields == YahooFields()
+    assert rows["OK.NS"].fields == extract_fields(_payload("Ok Limited", market_cap=10 * CRORE, sector="Energy"))
     assert rows["NEVER.NS"].yahoo_status == "missing"
     assert rows["NEVER.NS"].fetched_at is None
+    assert rows["NEVER.NS"].fields == YahooFields()
 
 
 def test_read_enriched_works_before_any_yahoo_response_is_cached(tmp_path, seed_consolidated) -> None:
@@ -337,7 +337,7 @@ def test_screen_matches_an_industry_substring(tmp_path, seed_consolidated) -> No
     assert [row.yahoo_ticker for row in screen_instruments(db_path, industry="technology").rows] == ["INFY.NS"]
 
 
-def test_screen_excludes_listings_without_usable_data_and_sorts_missing_market_caps_last(
+def test_screen_excludes_listings_without_fields_and_sorts_missing_market_caps_last(
     tmp_path, seed_consolidated
 ) -> None:
     db_path = tmp_path / "stocky.db"
@@ -347,13 +347,12 @@ def test_screen_excludes_listings_without_usable_data_and_sorts_missing_market_c
         {
             "INFY.NS": _payload("Infosys", market_cap=None),
             "INFY.BO": _payload("Infosys", market_cap=5 * CRORE),
-            "RELIANCE.NS": "Quote not found for symbol: RELIANCE.NS",
         },
     )
 
     result = screen_instruments(db_path)
 
-    # RELIANCE.BO has nothing cached and RELIANCE.NS holds an error, so neither is screenable.
+    # Neither RELIANCE ticker has stored fields, so neither is screenable.
     assert [row.yahoo_ticker for row in result.rows] == ["INFY.BO", "INFY.NS"]
     # A listing without a market cap fails any market cap bound.
     assert [row.yahoo_ticker for row in screen_instruments(db_path, market_cap_lt=100).rows] == ["INFY.BO"]

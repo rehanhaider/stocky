@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import math
 import re
+import sqlite3
 import sys
-import zlib
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, astuple, dataclass, fields
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -13,17 +13,16 @@ from typing import TYPE_CHECKING
 from stocky.config import DEFAULT_DB_PATH
 from stocky.database import (
     CONSOLIDATED_TABLE,
-    YAHOO_RESPONSES_TABLE,
+    TICKER_COLUMNS,
+    YAHOO_FIELDS_TABLE,
     connect,
-    decode_response_json,
-    is_usable_yahoo_payload,
     missing_database_message,
     require_consolidated_table,
     search_instruments,
     table_exists,
+    ticker_column,
 )
 from stocky.export import _render_csv, _render_json, _require_pyarrow, _resolve_format, _write
-from stocky.yahoo import TICKER_COLUMNS, ticker_column
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -31,10 +30,9 @@ if TYPE_CHECKING:
 # Market cap bounds on the command line are in crore, the unit Indian market caps are quoted in.
 CRORE = 10_000_000
 
-# A cached response is "ok" when it names a listed security, "unusable" when it holds an error or
-# an answer for something else (an index, or Yahoo's NONE type), and "missing" when nothing is cached.
+# A listing is "ok" when the database holds Yahoo fields for its ticker and "missing" when it does not. Only a
+# response that names a listed security is ever stored, so there is nothing in between.
 YAHOO_OK = "ok"
-YAHOO_UNUSABLE = "unusable"
 YAHOO_MISSING = "missing"
 
 # Yahoo's earnings dates arrive through yahooquery as e.g. "2020-08-13 05:30:S"; only the date is reliable.
@@ -43,7 +41,11 @@ _DATE_PREFIX = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 @dataclass(frozen=True)
 class YahooFields:
-    """Fields read from one ticker's cached ``all_modules`` payload. Any field the payload lacks is None."""
+    """Fields read from one ticker's ``all_modules`` payload. Any field the payload lacks is None.
+
+    Each field is a column of the ``yahoo_fields`` table: TEXT for the text fields, and no declared type for the
+    numbers, so each keeps the type Yahoo sent: an integer market cap reads back as an int, and -0.0 as -0.0.
+    """
 
     name: str | None = None
     quote_type: str | None = None
@@ -77,7 +79,7 @@ _TEXT_FIELDS = frozenset(
 
 @dataclass(frozen=True)
 class EnrichedRow:
-    """One instrument's listing on one exchange, with the Yahoo fields cached for that exchange's ticker."""
+    """One instrument's listing on one exchange, with the Yahoo fields stored for that exchange's ticker."""
 
     isin: str
     exchange: str
@@ -192,19 +194,43 @@ def extract_fields(payload: object) -> YahooFields:
     )
 
 
-def _ticker_payload(yahoo_ticker: str, response_json: bytes | None) -> tuple[str, object]:
-    """Decode a cached response and return its status with the ticker's own payload."""
-    if response_json is None:
-        return YAHOO_MISSING, None
-    try:
-        response = decode_response_json(response_json)
-    except (OSError, EOFError, ValueError, zlib.error):
-        # A blob that is not gzipped JSON, or is cut short, holds nothing to read, like an error answer.
-        return YAHOO_UNUSABLE, None
-    payload = response.get(yahoo_ticker) if isinstance(response, dict) else None
-    if not is_usable_yahoo_payload(payload):
-        return YAHOO_UNUSABLE, None
-    return YAHOO_OK, payload
+def initialize_yahoo_fields(con: sqlite3.Connection) -> None:
+    """Create the yahoo_fields table: one row per ticker whose response named a listed security."""
+    # A REAL column would turn every integer into a float and -0.0 into 0.0; an untyped one stores what it is given.
+    columns = ",\n".join(
+        f"                {name}{' TEXT' if name in _TEXT_FIELDS else ''}" for name in YAHOO_FIELD_NAMES
+    )
+    con.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS main.{YAHOO_FIELDS_TABLE} (
+            yahoo_symbol TEXT PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            exchange TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+{columns}
+        )
+        """
+    )
+
+
+def upsert_yahoo_fields(
+    con: sqlite3.Connection,
+    *,
+    yahoo_symbol: str,
+    symbol: str,
+    exchange: str,
+    fetched_at: str,
+    values: YahooFields,
+) -> None:
+    """Write one ticker's fields, replacing any earlier row for it."""
+    names = ("yahoo_symbol", "symbol", "exchange", "fetched_at", *YAHOO_FIELD_NAMES)
+    con.execute(
+        f"""
+        INSERT OR REPLACE INTO main.{YAHOO_FIELDS_TABLE} ({", ".join(names)})
+        VALUES ({", ".join("?" for _ in names)})
+        """,
+        (yahoo_symbol, symbol, exchange, fetched_at, *astuple(values)),
+    )
 
 
 def _resolve_exchanges(exchange: str | None) -> tuple[str, ...]:
@@ -222,10 +248,10 @@ def read_enriched(
 ) -> list[EnrichedRow]:
     """Join each instrument's Yahoo fields onto it, one row per exchange that lists it.
 
-    Each exchange's row reads only the response cached under that exchange's ticker column, ``yq_ns``
+    Each exchange's row reads only the fields stored under that exchange's ticker column, ``yq_ns``
     for NSE and ``yq_bo`` for BSE. A bare symbol is never matched, because the same symbol can name
     different companies on the two exchanges. Instruments without a ticker on an exchange have no row
-    for it; a ticker with nothing cached keeps its row with empty fields and status "missing".
+    for it; a ticker with no stored fields keeps its row with empty fields and status "missing".
     """
     if not db_path.exists():
         raise FileNotFoundError(missing_database_message(db_path, "stocky rebuild"))
@@ -234,14 +260,18 @@ def read_enriched(
     rows: list[EnrichedRow] = []
     with connect(db_path) as con:
         require_consolidated_table(con, db_path)
-        has_responses = table_exists(con, YAHOO_RESPONSES_TABLE)
+        has_fields = table_exists(con, YAHOO_FIELDS_TABLE)
         for name in exchanges:
             column = TICKER_COLUMNS[name]
-            response_columns = "y.response_json, y.fetched_at" if has_responses else "NULL, NULL"
-            join = f"LEFT JOIN {YAHOO_RESPONSES_TABLE} y ON y.yahoo_symbol = c.{column}" if has_responses else ""
+            field_columns = (
+                ", ".join(f"y.{field}" for field in ("yahoo_symbol", "fetched_at", *YAHOO_FIELD_NAMES))
+                if has_fields
+                else ", ".join("NULL" for _ in range(2 + len(YAHOO_FIELD_NAMES)))
+            )
+            join = f"LEFT JOIN {YAHOO_FIELDS_TABLE} y ON y.yahoo_symbol = c.{column}" if has_fields else ""
             query = f"""
                 SELECT c.isin, c.{column}, c.nse_symbol, c.bse_symbol, c.bse_sc_code, c.bse_sc_name,
-                       {response_columns}
+                       {field_columns}
                 FROM {CONSOLIDATED_TABLE} c
                 {join}
                 WHERE c.{column} IS NOT NULL AND TRIM(c.{column}) != ''
@@ -257,10 +287,10 @@ def read_enriched(
                 bse_symbol,
                 bse_sc_code,
                 bse_sc_name,
-                response_json,
+                stored,
                 fetched_at,
+                *values,
             ) in con.execute(query, params).fetchall():
-                status, payload = _ticker_payload(ticker, response_json)
                 rows.append(
                     EnrichedRow(
                         isin=isin,
@@ -270,9 +300,9 @@ def read_enriched(
                         bse_symbol=bse_symbol,
                         bse_sc_code=bse_sc_code,
                         bse_sc_name=bse_sc_name,
-                        yahoo_status=status,
+                        yahoo_status=YAHOO_MISSING if stored is None else YAHOO_OK,
                         fetched_at=fetched_at,
-                        fields=extract_fields(payload),
+                        fields=YahooFields(*values),
                     )
                 )
 
@@ -306,7 +336,7 @@ def screen_instruments(
     industry: str | None = None,
     limit: int | None = 20,
 ) -> ScreenResult:
-    """Filter listings with usable cached Yahoo data, largest market cap first.
+    """Filter listings with stored Yahoo fields, largest market cap first.
 
     Market cap bounds are in crore and exclusive. Sector and industry match a case-insensitive
     substring. A listing without a market cap fails any market cap bound and sorts last otherwise.
